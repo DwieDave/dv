@@ -25,6 +25,7 @@ pub enum Context {
     Query,
     Picker,
     Help,
+    Table,
 }
 
 const BROWSE: &[Hint] = &[
@@ -55,6 +56,15 @@ const PICKER: &[Hint] = &[
     hint("esc", "close"),
 ];
 const HELP: &[Hint] = &[hint("j/k", "scroll"), hint("esc", "close")];
+const TABLE: &[Hint] = &[
+    hint("j/k", "rows"),
+    hint("h/l", "columns"),
+    hint("⏎", "open"),
+    hint("esc", "close"),
+    hint("x", "hide"),
+    hint("X", "show all"),
+    hint("?", "help"),
+];
 
 /// The hints of `context`, most important first.
 #[must_use]
@@ -65,6 +75,7 @@ pub fn hints(context: Context) -> &'static [Hint] {
         Context::Query => QUERY,
         Context::Picker => PICKER,
         Context::Help => HELP,
+        Context::Table => TABLE,
     }
 }
 

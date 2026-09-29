@@ -70,8 +70,18 @@ const PREVIEW: &[Row] = &[
     row("yp", "copy the path", &["yp"]),
     row("yy yY", "copy the value, minified / pretty", &["yy", "yY"]),
     row("F", "follow the file as it grows (NDJSON)", &["F"]),
+    row("t", "table of the array at the cursor", &["t"]),
     row("?", "this help", &["?"]),
     row("q  ^c", "quit", &["q", "C-c"]),
+];
+
+/// Keys inside the table view (not keymap bindings).
+const TABLE: &[Row] = &[
+    row("j k  gg G", "rows (^d ^u PgDn PgUp too)", &[]),
+    row("h l", "columns", &[]),
+    row("x  X", "hide the column / show all", &[]),
+    row("⏎", "open the row in the tree", &[]),
+    row("t  esc  q", "close the table", &[]),
 ];
 
 /// Every binding, by section.
@@ -79,6 +89,7 @@ pub const SECTIONS: &[(&str, &[Row])] = &[
     ("Navigation", NAVIGATION),
     ("Finding", FINDING),
     ("Preview & copy", PREVIEW),
+    ("Table", TABLE),
 ];
 
 /// Width of the key column.

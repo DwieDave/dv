@@ -292,6 +292,13 @@ fn every_colored_cell_comes_from_the_theme() {
         corners(&shown).iter().all(|c| *c == Color::Rgb(7, 7, 7)),
         "borders use the badge color"
     );
+    let mut table = self::app().with_config(&with_theme(theme), None);
+    update_app(
+        &mut table,
+        loaded(br#"[{"s": "x", "n": 1, "b": true, "z": null, "a": [1]}, {}]"#),
+    );
+    update_app(&mut table, key('t'));
+    check(&table, "table");
     let mut failed = self::app().with_config(&with_theme(theme), None);
     let failure = LoadFailure::plain(&"broken");
     update_app(&mut failed, AppEvent::Load(LoadEvent::Loaded(Err(failure))));

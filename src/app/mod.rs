@@ -6,6 +6,7 @@ pub mod prompt;
 pub mod run;
 pub mod screen;
 pub mod search;
+pub mod table;
 pub mod terminal;
 
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use crate::app::keymap::Keymap;
 use crate::app::picker::{Catalog, Picker};
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::search::{Job, Outcome, SearchState};
+use crate::app::table::TableState;
 use crate::index::IndexError;
 use crate::json::format::Style;
 use crate::json::lex::Kind;
@@ -32,6 +34,7 @@ use crate::ui::footer::{Context, hint_line, hints};
 use crate::ui::help::help_lines;
 use crate::ui::preview::{PreviewWidget, highlight};
 use crate::ui::status::{Status, status_line};
+use crate::ui::table::TableWidget;
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::ui::wrap::wrap;
@@ -65,6 +68,8 @@ pub struct Model<T> {
     pub search: Option<SearchState>,
     /// The fuzzy schema-path picker, when open.
     pub picker: Option<Picker>,
+    /// The table view, while open (TB-1).
+    pub table: Option<TableState>,
     /// Schema paths, collected the first time the picker opens.
     pub schema: Option<Catalog>,
     /// What `n`/`N` repeat.
@@ -111,6 +116,7 @@ impl<T: TreeIndex> Model<T> {
             prompt: None,
             search: None,
             picker: None,
+            table: None,
             schema: None,
             last_find: LastFind::None,
             note: None,
@@ -175,11 +181,12 @@ fn context<T>(model: &Model<T>) -> Context {
     if model.help.is_some() {
         return Context::Help;
     }
-    match (&model.prompt, &model.picker) {
-        (Some(prompt), _) if prompt.kind == PromptKind::Search => Context::Search,
-        (Some(_), _) => Context::Query,
-        (None, Some(_)) => Context::Picker,
-        (None, None) => Context::Browse,
+    match (&model.prompt, &model.picker, &model.table) {
+        (Some(prompt), _, _) if prompt.kind == PromptKind::Search => Context::Search,
+        (Some(_), _, _) => Context::Query,
+        (None, Some(_), _) => Context::Picker,
+        (None, None, Some(_)) => Context::Table,
+        (None, None, None) => Context::Browse,
     }
 }
 
@@ -226,6 +233,8 @@ pub enum Msg {
     OpenHelp,
     /// `F`: start or stop following the file (FO-4).
     ToggleFollow,
+    /// `t`: the table view of the array at the cursor (TB-1).
+    OpenTable,
     /// Back or forward through the jump list.
     History(Step),
     /// `m{a-z}`: remember the cursor.
@@ -380,6 +389,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Key(key) if model.help.is_some() => help_key(model, key),
         Msg::Key(key) if model.prompt.is_some() => prompt_key(model, key),
         Msg::Key(key) if model.picker.is_some() => picker::key(model, key),
+        Msg::Key(key) if model.table.is_some() => table::key(model, key),
         Msg::Key(key) => {
             if let Some(next) = model.keymap.press(key) {
                 update(model, next);
@@ -405,6 +415,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             }
         }
         Msg::GoMark(c) => go_mark(model, c),
+        Msg::Mouse(_) if model.table.is_some() => {}
         Msg::Mouse(mouse) => on_mouse(model, mouse),
         Msg::OpenPrompt(PromptKind::Search) => search::open(model),
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
@@ -415,6 +426,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::OpenPicker => picker::open(model),
         Msg::OpenHelp => model.help = Some(0),
         Msg::ToggleFollow => model.effects.push(Effect::ToggleFollow),
+        Msg::OpenTable => table::open(model),
         Msg::Refresh => {
             if let Err(err) = model.state.refresh(&*model.tree) {
                 model.status = Some(err.to_string());
@@ -611,15 +623,16 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
         let line = Line::styled(format!("✗ indexing stopped: {message}"), model.theme.error);
         frame.render_widget(line, banner_area);
     }
-    let (tree_area, preview_area) = panes(&model.preview, main_area);
-    let widget = TreeWidget {
-        tree: &*model.tree,
-        state: &model.state,
-        theme: &model.theme,
-    };
-    frame.render_widget(widget, tree_area);
-    if let Some(area) = preview_area {
-        render_preview(model, frame, area);
+    match &model.table {
+        Some(table) => {
+            let widget = TableWidget {
+                tree: &*model.tree,
+                table,
+                theme: &model.theme,
+            };
+            frame.render_widget(widget, main_area);
+        }
+        None => render_tree(model, frame, main_area),
     }
     if let Some(picker) = &model.picker {
         render_picker(picker, frame, main_area, &model.theme);
@@ -642,6 +655,20 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
             frame.set_cursor_position((status_area.x.saturating_add(column), status_area.y));
         }
         None => frame.render_widget(status(model, status_area.width.into()), status_area),
+    }
+}
+
+/// The tree, and the preview pane when it is open.
+fn render_tree<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
+    let (tree_area, preview_area) = panes(&model.preview, area);
+    let widget = TreeWidget {
+        tree: &*model.tree,
+        state: &model.state,
+        theme: &model.theme,
+    };
+    frame.render_widget(widget, tree_area);
+    if let Some(area) = preview_area {
+        render_preview(model, frame, area);
     }
 }
 
