@@ -41,3 +41,8 @@ rss +cmd:
 bench-load:
     cargo build --release
     hyperfine --warmup 2 -N -L file api-15M.json,dense-15M.json,small-objects-15M.json,wide-15M.json,escapes-15M.json,deep-100k.json,api-100M.json 'target/release/dv --index-only {{data_dir}}/{file}'
+
+# The 10 GB streaming suite over `file`, with spill files in `dir` (T5.14); needs tmux.
+suite dir file:
+    cargo build --release
+    scripts/suite-10g.sh {{dir}} {{file}}
