@@ -10,8 +10,8 @@ use crate::document::Document;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::{Format, detect};
 use crate::index::IndexError;
+use crate::index::background::BackgroundSpill;
 use crate::index::lines::{LineSpill, PendingLines};
-use crate::index::spill::SpillBuilder;
 use crate::index::spill::SpillLimits;
 use crate::index::to_usize;
 use crate::json::lines_stream::parse_lines_stream;
@@ -292,7 +292,7 @@ fn pacer(
     budget: StreamBudget,
     total: u64,
     sink: &mut impl FnMut(LoadEvent<Document>),
-) -> impl FnMut(&mut SpillBuilder, Option<&mut PendingLines<'_>>, u64, bool) + '_ {
+) -> impl FnMut(&mut BackgroundSpill, Option<&mut PendingLines<'_>>, u64, bool) + '_ {
     let mut last = 0;
     move |builder, lines, frontier, done| {
         if done || frontier.saturating_sub(last) >= budget.publish_every {
@@ -334,11 +334,11 @@ fn stream_json(
 ) -> Result<Option<Document>, LoadFailure> {
     let src = sources(file, budget)?;
     let root = first_value(&src.parse).map_err(plain)?;
-    let (builder, store) = SpillBuilder::live(budget.spill).map_err(plain)?;
+    let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let live = LiveTree::new(src.live, store, root);
     sink(LoadEvent::Live(Document::Live(live)));
     let mut pace = pacer(budget, src.parse.len(), sink);
-    let publish = |b: &mut SpillBuilder, frontier, done| pace(b, None, frontier, done);
+    let publish = |b: &mut BackgroundSpill, frontier, done| pace(b, None, frontier, done);
     let parsed = parse_stream(&src.parse, builder, budget.stream, stopper(cancel), publish);
     let Some(parsed) = finished(parsed)? else {
         return Ok(None);
@@ -356,13 +356,13 @@ fn stream_lines(
     budget: StreamBudget,
 ) -> Result<Option<Document>, LoadFailure> {
     let src = sources(file, budget)?;
-    let (builder, store) = SpillBuilder::live(budget.spill).map_err(plain)?;
+    let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let (spill, lines) = LineSpill::live(budget.spill.stack).map_err(plain)?;
     sink(LoadEvent::Live(Document::Live(LiveTree::lines(
         src.live, store, lines,
     ))));
     let mut pace = pacer(budget, src.parse.len(), sink);
-    let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier, done| {
+    let publish = |b: &mut BackgroundSpill, lines: &mut PendingLines<'_>, frontier, done| {
         pace(b, Some(lines), frontier, done);
     };
     let (source, limits) = (&src.parse, budget.stream);

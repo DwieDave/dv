@@ -43,7 +43,7 @@ impl Default for SpillLimits {
 
 /// A container being built; `Slot` for the parser.
 #[derive(Debug)]
-pub struct SpillSlot(u64);
+pub struct SpillSlot;
 
 /// Builder state captured by `mark`.
 #[derive(Debug, Clone, Copy)]
@@ -162,15 +162,7 @@ impl Builder for SpillBuilder {
             let provisional = self.records.put(slot, encode([start, 0, 0, 0]));
             provisional.unwrap_or_else(|err| self.fail(err));
         }
-        SpillSlot(slot)
-    }
-
-    fn start(&self, slot: &SpillSlot) -> u64 {
-        self.open
-            .iter()
-            .rev()
-            .find(|o| o.slot == slot.0)
-            .map_or(0, |o| o.start)
+        SpillSlot
     }
 
     fn add_child(&mut self, _slot: &SpillSlot, offset: u64) {
@@ -199,7 +191,7 @@ impl Builder for SpillBuilder {
         self.stack.truncate(open.cp_base);
     }
 
-    fn mark(&self) -> SpillMark {
+    fn mark(&mut self) -> SpillMark {
         SpillMark {
             next: self.next,
             open: self.open.len(),

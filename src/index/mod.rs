@@ -1,5 +1,6 @@
 //! The semi-index: sparse container spans plus child checkpoints (D-3).
 
+pub mod background;
 pub mod children;
 pub mod lines;
 pub mod live;

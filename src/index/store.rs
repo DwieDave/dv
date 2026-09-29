@@ -81,9 +81,6 @@ pub trait Builder {
     /// Reserves a slot for the container opening at `start`.
     fn open(&mut self, start: u64) -> Self::Slot;
 
-    /// Offset of the opening bracket of `slot`.
-    fn start(&self, slot: &Self::Slot) -> u64;
-
     /// Records a child of `slot` beginning at `offset`.
     fn add_child(&mut self, slot: &Self::Slot, offset: u64);
 
@@ -91,7 +88,7 @@ pub trait Builder {
     fn close(&mut self, slot: Self::Slot, end: u64);
 
     /// Remembers the current state so a failed value can be undone.
-    fn mark(&self) -> Self::Mark;
+    fn mark(&mut self) -> Self::Mark;
 
     /// Drops everything recorded since `mark`.
     fn rollback(&mut self, mark: Self::Mark);
@@ -105,10 +102,6 @@ impl Builder for VecStoreBuilder {
         VecStoreBuilder::open(self, offset32_u64(start))
     }
 
-    fn start(&self, slot: &Slot) -> u64 {
-        u64::from(VecStoreBuilder::start(self, slot))
-    }
-
     fn add_child(&mut self, slot: &Slot, offset: u64) {
         VecStoreBuilder::add_child(self, slot, offset32_u64(offset));
     }
@@ -117,7 +110,7 @@ impl Builder for VecStoreBuilder {
         VecStoreBuilder::close(self, slot, offset32_u64(end));
     }
 
-    fn mark(&self) -> Mark {
+    fn mark(&mut self) -> Mark {
         VecStoreBuilder::mark(self)
     }
 

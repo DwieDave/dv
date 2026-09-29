@@ -5,9 +5,10 @@ use std::ops::{ControlFlow, Range};
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::Format;
+use crate::index::background::BackgroundSpill;
 use crate::index::children::Child;
 use crate::index::lines::{Kids, LineSpill, LineStore, Lines, checkpoint_index, kids};
-use crate::index::spill::{SpillBuilder, SpillLimits, SpillStore};
+use crate::index::spill::{SpillLimits, SpillStore};
 use crate::index::store::{Fanout, NodeStore};
 use crate::index::window::value_end;
 use crate::index::{IndexError, to_usize};
@@ -57,7 +58,7 @@ impl<R: Source + Sync> StreamTree<R, SpillStore> {
     ) -> Result<Self, IndexError> {
         let parsed = parse_stream(
             &source,
-            SpillBuilder::new(spill)?,
+            BackgroundSpill::new(spill)?,
             limits,
             hook,
             |_, _, _| {},
@@ -82,7 +83,7 @@ impl<R: Source + Sync> StreamTree<R, SpillStore> {
         spill: SpillLimits,
         hook: impl FnMut(u64) -> ControlFlow<()>,
     ) -> Result<Self, IndexError> {
-        let builder = SpillBuilder::new(spill)?;
+        let builder = BackgroundSpill::new(spill)?;
         let lines = LineSpill::new(spill.stack)?;
         let parsed = parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _, _| {})?;
         let store = parsed.builder.finish()?;
