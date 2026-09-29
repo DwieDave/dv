@@ -30,10 +30,11 @@ use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
 use crate::ui::footer::{Context, hint_line, hints};
 use crate::ui::help::help_lines;
-use crate::ui::preview::PreviewWidget;
+use crate::ui::preview::{PreviewWidget, highlight};
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
+use crate::ui::wrap::wrap;
 use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
 use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines, value_text};
@@ -252,6 +253,8 @@ pub enum PreviewCmd {
     SplitRight,
     ScrollDown,
     ScrollUp,
+    /// Word wrap on or off (WR-1).
+    Wrap,
 }
 
 /// Preview pane layout and scroll position.
@@ -260,7 +263,12 @@ pub struct PreviewState {
     pub visible: bool,
     /// Share of the width given to the tree.
     pub tree_percent: u16,
+    /// The first line shown.
     pub scroll: u64,
+    /// With wrap on: the first row of that line shown.
+    pub row: u64,
+    /// Word wrap with value-aligned continuation rows (WR-1).
+    pub wrap: bool,
     /// The cursor the scroll belongs to; a new cursor resets it.
     pub for_cursor: Vec<u64>,
 }
@@ -271,6 +279,8 @@ impl Default for PreviewState {
             visible: true,
             tree_percent: 50,
             scroll: 0,
+            row: 0,
+            wrap: false,
             for_cursor: Vec::new(),
         }
     }
@@ -284,7 +294,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     handle(model, msg);
     if model.preview.for_cursor != model.state.cursor {
         model.preview.for_cursor.clone_from(&model.state.cursor);
-        model.preview.scroll = 0;
+        (model.preview.scroll, model.preview.row) = (0, 0);
     }
 }
 
@@ -324,7 +334,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
         Msg::SearchStep(direction) => search::step(model, direction),
         Msg::SearchOutcome(outcome) => search::apply(model, outcome),
-        Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
+        Msg::Preview(cmd) => preview(model, cmd, 1),
         Msg::Copy(what) => copy(model, what),
         Msg::OpenPicker => picker::open(model),
         Msg::OpenHelp => model.help = Some(0),
@@ -398,7 +408,55 @@ fn preview_cmd(preview: &mut PreviewState, cmd: PreviewCmd, lines: u64) {
         }
         PreviewCmd::ScrollDown => preview.scroll = (preview.scroll + lines).min(MAX_PREVIEW_LINES),
         PreviewCmd::ScrollUp => preview.scroll = preview.scroll.saturating_sub(lines),
+        PreviewCmd::Wrap => (preview.wrap, preview.row) = (!preview.wrap, 0),
     }
+}
+
+/// A preview command; with wrap on, scrolling moves by screen rows (WR-5).
+fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps: u64) {
+    match cmd {
+        PreviewCmd::ScrollDown | PreviewCmd::ScrollUp if model.preview.wrap => {
+            for _ in 0..steps {
+                scroll_row(model, cmd == PreviewCmd::ScrollDown);
+            }
+        }
+        _ => preview_cmd(&mut model.preview, cmd, steps),
+    }
+}
+
+/// Moves the wrapped preview one row, re-wrapping at most one neighboring line.
+fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) {
+    let (line, row) = (model.preview.scroll, model.preview.row);
+    let next = if down {
+        match wrapped_rows(model, line) {
+            Some(rows) if row + 1 < rows => Some((line, row + 1)),
+            _ => wrapped_rows(model, line + 1).map(|_| (line + 1, 0)),
+        }
+    } else if row > 0 {
+        Some((line, row - 1))
+    } else {
+        line.checked_sub(1)
+            .map(|up| (up, wrapped_rows(model, up).map_or(0, |rows| rows - 1)))
+    };
+    if let Some((line, row)) = next {
+        (model.preview.scroll, model.preview.row) = (line, row);
+    }
+}
+
+/// Rows that preview line `line` wraps into, or `None` past the last line.
+fn wrapped_rows<T: TreeIndex>(model: &Model<T>, line: u64) -> Option<u64> {
+    let width = preview_text_width(model)?;
+    let tree = &*model.tree;
+    let item = resolve(tree, &model.state.root, &model.state.cursor).ok()??;
+    let preview = preview_lines(tree, &item, line, 1).ok()?;
+    let text = preview.lines.first()?;
+    Some(wrap(&highlight(text, &model.theme), width).len() as u64)
+}
+
+/// Columns inside the preview pane's border, when the pane is shown.
+fn preview_text_width<T>(model: &Model<T>) -> Option<usize> {
+    let (_, pane) = panes(&model.preview, Rect::new(0, 0, model.width, 1));
+    pane.map(|pane| usize::from(pane.width.saturating_sub(2)))
 }
 
 /// The tree and (when shown) preview areas within `area`.
@@ -424,10 +482,10 @@ fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
     let over_preview = over_preview(model, mouse.column);
     match mouse.kind {
         MouseEventKind::ScrollDown if over_preview => {
-            preview_cmd(&mut model.preview, PreviewCmd::ScrollDown, 3);
+            preview(model, PreviewCmd::ScrollDown, 3);
         }
         MouseEventKind::ScrollUp if over_preview => {
-            preview_cmd(&mut model.preview, PreviewCmd::ScrollUp, 3);
+            preview(model, PreviewCmd::ScrollUp, 3);
         }
         MouseEventKind::ScrollDown => update(model, Msg::Nav(Nav::ScrollDown)),
         MouseEventKind::ScrollUp => update(model, Msg::Nav(Nav::ScrollUp)),
@@ -584,6 +642,7 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
         lines: &preview.lines,
         more: preview.more,
         theme: &model.theme,
+        wrap: model.preview.wrap.then_some(model.preview.row),
     };
     frame.render_widget(widget, area);
 }
@@ -716,6 +775,65 @@ mod tests {
         update(&mut model, Msg::Key(KeyCode::Char('?').into()));
         update(&mut model, Msg::Key(KeyCode::Esc.into()));
         assert_eq!(model.help, None);
+    }
+
+    #[test]
+    fn w_wraps_the_preview_and_j_k_scroll_by_rows() {
+        let words = ["lorem ipsum"; 12].join(" ");
+        let text = format!(r#"{{"note": "{words}", "id": 7}}"#);
+        let mut model =
+            Model::new(MemTree::parse(MemSource::new(text.into_bytes())).unwrap()).unwrap();
+        update(&mut model, Msg::Resize(80, 16));
+        let key = |model: &mut Model<MemTree>, c| update(model, Msg::Key(KeyCode::Char(c).into()));
+        key(&mut model, 'w');
+        assert!(model.preview.wrap);
+        let pane = |model: &Model<MemTree>| -> Vec<String> {
+            rows(model, 80, 16)
+                .iter()
+                .map(|r| r.chars().skip(41).take(38).collect())
+                .collect()
+        };
+        let shown = pane(&model);
+        assert!(
+            shown[2].starts_with("  \"note\": \"lorem ipsum"),
+            "{shown:#?}"
+        );
+        assert!(
+            shown[3].starts_with("          lorem"),
+            "continuation aligned with the value: {shown:#?}"
+        );
+        key(&mut model, 'J');
+        assert_eq!(
+            (model.preview.scroll, model.preview.row),
+            (1, 0),
+            "past the one-row `{{`"
+        );
+        key(&mut model, 'J');
+        assert_eq!(
+            (model.preview.scroll, model.preview.row),
+            (1, 1),
+            "a row within the long line"
+        );
+        assert!(
+            pane(&model)[1].starts_with("          lorem"),
+            "{:#?}",
+            pane(&model)
+        );
+        for _ in 0..20 {
+            key(&mut model, 'J');
+        }
+        assert_eq!(model.preview.row, 0, "the long line was read to its end");
+        assert!(model.preview.scroll >= 2);
+        while model.preview.scroll > 1 {
+            key(&mut model, 'K');
+        }
+        assert!(
+            model.preview.row > 0,
+            "K enters the long line at its last row"
+        );
+        key(&mut model, 'w');
+        assert!(!model.preview.wrap);
+        assert_eq!(model.preview.row, 0);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::ui::theme::Theme;
+use crate::ui::wrap::wrap;
 
 /// Colors one line of pretty-printed JSON by token.
 #[must_use]
@@ -71,18 +72,45 @@ pub struct PreviewWidget<'a> {
     pub lines: &'a [String],
     pub more: bool,
     pub theme: &'a Theme,
+    /// Word wrap, skipping this many rows of the first line (`None`: lines are cut).
+    pub wrap: Option<u64>,
+}
+
+impl PreviewWidget<'_> {
+    /// The rows that fit inside `area`'s border, with `…` when more follow.
+    fn wrapped(
+        &self,
+        lines: impl Iterator<Item = Line<'static>>,
+        skip: u64,
+        area: Rect,
+    ) -> Vec<Line<'static>> {
+        let width = usize::from(area.width.saturating_sub(2));
+        let height = usize::from(area.height.saturating_sub(2));
+        let mut rows: Vec<Line<'static>> = lines
+            .flat_map(|line| wrap(&line, width))
+            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+            .collect();
+        if rows.len() > height || self.more {
+            rows.truncate(height.saturating_sub(1));
+            rows.push(Line::styled("…", self.theme.badge));
+        }
+        rows
+    }
 }
 
 impl Widget for PreviewWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line<'static>> = self
-            .lines
-            .iter()
-            .map(|l| highlight(l, self.theme))
-            .collect();
-        if self.more {
-            lines.push(Line::styled("…", self.theme.badge));
-        }
+        let lines = self.lines.iter().map(|l| highlight(l, self.theme));
+        let lines: Vec<Line<'static>> = match self.wrap {
+            None => {
+                let mut lines: Vec<Line<'static>> = lines.collect();
+                if self.more {
+                    lines.push(Line::styled("…", self.theme.badge));
+                }
+                lines
+            }
+            Some(skip) => self.wrapped(lines, skip, area),
+        };
         Paragraph::new(lines)
             .block(
                 Block::bordered()

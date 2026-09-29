@@ -52,6 +52,7 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
         (KeyCode::Char('>'), false) => return Some(Msg::Preview(PreviewCmd::SplitRight)),
         (KeyCode::Char('J'), false) => return Some(Msg::Preview(PreviewCmd::ScrollDown)),
         (KeyCode::Char('K'), false) => return Some(Msg::Preview(PreviewCmd::ScrollUp)),
+        (KeyCode::Char('w'), false) => return Some(Msg::Preview(PreviewCmd::Wrap)),
         (KeyCode::Char('/'), false) => return Some(Msg::OpenPrompt(PromptKind::Search)),
         (KeyCode::Char('n'), false) => return Some(Msg::SearchStep(Direction::Forward)),
         (KeyCode::Char('N'), false) => return Some(Msg::SearchStep(Direction::Backward)),
