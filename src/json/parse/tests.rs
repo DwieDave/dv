@@ -1,93 +1,9 @@
 use proptest::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use super::*;
 use crate::index::store::{CHECKPOINT_EVERY, MIN_NODE_LEN, NodeStore};
-
-/// A container as laid out by the test serializer.
-struct Container {
-    start: usize,
-    end: usize,
-    children: Vec<usize>,
-}
-
-/// Serializes `value` with `ws` around tokens, recording every container's layout.
-struct Writer<'a> {
-    out: String,
-    ws: &'a str,
-    containers: Vec<Container>,
-}
-
-impl Writer<'_> {
-    fn value(&mut self, value: &Value) {
-        match value {
-            Value::Array(items) => self.container('[', ']', items.iter().map(|v| (None, v))),
-            Value::Object(map) => self.container('{', '}', map.iter().map(|(k, v)| (Some(k), v))),
-            scalar => self.out.push_str(&scalar.to_string()),
-        }
-    }
-
-    fn container<'v>(
-        &mut self,
-        open: char,
-        close: char,
-        kids: impl Iterator<Item = (Option<&'v String>, &'v Value)>,
-    ) {
-        let start = self.out.len();
-        self.out.push(open);
-        let mut children = Vec::new();
-        for (i, (key, value)) in kids.enumerate() {
-            self.out.push_str(if i > 0 { "," } else { "" });
-            self.out.push_str(self.ws);
-            children.push(self.out.len());
-            self.member(key, value);
-        }
-        self.out.push_str(self.ws);
-        self.out.push(close);
-        self.containers.push(Container {
-            start,
-            end: self.out.len(),
-            children,
-        });
-    }
-
-    fn member(&mut self, key: Option<&String>, value: &Value) {
-        if let Some(key) = key {
-            self.out.push_str(&serde_json::to_string(key).unwrap());
-            self.out.push_str(self.ws);
-            self.out.push(':');
-            self.out.push_str(self.ws);
-        }
-        self.value(value);
-    }
-}
-
-fn layout(value: &Value, ws: &str) -> (String, Vec<Container>) {
-    let mut w = Writer {
-        out: String::new(),
-        ws,
-        containers: Vec::new(),
-    };
-    w.value(value);
-    (w.out, w.containers)
-}
-
-fn json_value() -> impl Strategy<Value = Value> {
-    let leaf = prop_oneof![
-        Just(Value::Null),
-        any::<bool>().prop_map(Value::from),
-        any::<i64>().prop_map(Value::from),
-        (-1e9f64..1e9).prop_map(Value::from),
-        "\\PC{0,12}".prop_map(Value::from),
-    ];
-    leaf.prop_recursive(6, 400, 40, |inner| {
-        prop_oneof![
-            proptest::collection::vec(inner.clone(), 0..40).prop_map(Value::Array),
-            proptest::collection::vec(("\\PC{0,6}", inner), 0..20)
-                .prop_map(|kv| Value::Object(kv.into_iter().collect::<Map<_, _>>())),
-        ]
-    })
-}
+use crate::test_support::{Container, json_value, layout};
 
 fn serde_verdict(text: &[u8]) -> Option<bool> {
     match serde_json::from_slice::<Value>(text) {
@@ -101,7 +17,13 @@ fn serde_verdict(text: &[u8]) -> Option<bool> {
 
 fn expected_checkpoints(c: &Container) -> Option<Vec<u64>> {
     let many = c.children.len() as u64 > CHECKPOINT_EVERY;
-    many.then(|| c.children.iter().step_by(16).map(|&o| o as u64).collect())
+    many.then(|| {
+        c.children
+            .iter()
+            .step_by(16)
+            .map(|k| k.start as u64)
+            .collect()
+    })
 }
 
 fn assert_indexed(store: &VecStore, c: &Container) {

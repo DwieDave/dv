@@ -6,3 +6,6 @@ pub mod index;
 pub mod json;
 pub mod position;
 pub mod source;
+
+#[cfg(test)]
+mod test_support;

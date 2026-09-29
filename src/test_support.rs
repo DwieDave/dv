@@ -1,0 +1,108 @@
+//! Shared test fixtures: arbitrary JSON values and a serializer that records layout.
+
+use proptest::prelude::*;
+use serde_json::{Map, Value};
+
+/// A child as laid out: `start` is the key (objects) or the value (arrays).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaidChild {
+    pub start: usize,
+    pub key: Option<String>,
+    pub value: usize,
+    pub end: usize,
+}
+
+/// A container as laid out by [`layout`].
+pub struct Container {
+    pub start: usize,
+    pub end: usize,
+    pub children: Vec<LaidChild>,
+}
+
+struct Writer<'a> {
+    out: String,
+    ws: &'a str,
+    containers: Vec<Container>,
+}
+
+impl Writer<'_> {
+    fn value(&mut self, value: &Value) {
+        match value {
+            Value::Array(items) => self.container('[', ']', items.iter().map(|v| (None, v))),
+            Value::Object(map) => self.container('{', '}', map.iter().map(|(k, v)| (Some(k), v))),
+            scalar => self.out.push_str(&scalar.to_string()),
+        }
+    }
+
+    fn container<'v>(
+        &mut self,
+        open: char,
+        close: char,
+        kids: impl Iterator<Item = (Option<&'v String>, &'v Value)>,
+    ) {
+        let start = self.out.len();
+        self.out.push(open);
+        let mut children = Vec::new();
+        for (i, (key, value)) in kids.enumerate() {
+            self.out.push_str(if i > 0 { "," } else { "" });
+            self.out.push_str(self.ws);
+            children.push(self.member(key, value));
+        }
+        self.out.push_str(self.ws);
+        self.out.push(close);
+        let end = self.out.len();
+        self.containers.push(Container {
+            start,
+            end,
+            children,
+        });
+    }
+
+    fn member(&mut self, key: Option<&String>, value: &Value) -> LaidChild {
+        let start = self.out.len();
+        if let Some(key) = key {
+            self.out.push_str(&serde_json::to_string(key).unwrap());
+            self.out.push_str(self.ws);
+            self.out.push(':');
+            self.out.push_str(self.ws);
+        }
+        let value_at = self.out.len();
+        self.value(value);
+        let key = key.cloned();
+        LaidChild {
+            start,
+            key,
+            value: value_at,
+            end: self.out.len(),
+        }
+    }
+}
+
+/// Serializes `value` with `ws` around tokens, returning the text and every container.
+pub fn layout(value: &Value, ws: &str) -> (String, Vec<Container>) {
+    let mut w = Writer {
+        out: String::new(),
+        ws,
+        containers: Vec::new(),
+    };
+    w.value(value);
+    (w.out, w.containers)
+}
+
+/// Arbitrary JSON values with enough breadth to exercise checkpoints.
+pub fn json_value() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::from),
+        any::<i64>().prop_map(Value::from),
+        (-1e9f64..1e9).prop_map(Value::from),
+        "\\PC{0,12}".prop_map(Value::from),
+    ];
+    leaf.prop_recursive(6, 400, 40, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..40).prop_map(Value::Array),
+            proptest::collection::vec(("\\PC{0,6}", inner), 0..20)
+                .prop_map(|kv| Value::Object(kv.into_iter().collect::<Map<_, _>>())),
+        ]
+    })
+}

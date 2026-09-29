@@ -131,6 +131,18 @@ pub fn scan_literal(bytes: &[u8], pos: usize, literal: &[u8]) -> Result<usize, P
     })
 }
 
+/// Checks that `bytes[pos]` is `byte`.
+///
+/// # Errors
+/// `UnexpectedByte` or `UnexpectedEof`.
+pub fn expect(bytes: &[u8], pos: usize, byte: u8) -> Result<(), ParseError> {
+    match bytes.get(pos) {
+        Some(&b) if b == byte => Ok(()),
+        Some(&b) => Err(fail(ParseErrorKind::UnexpectedByte(b), pos)),
+        None => Err(fail(ParseErrorKind::UnexpectedEof, pos)),
+    }
+}
+
 /// Scans the scalar at `pos`; containers return their kind with `end == pos`.
 ///
 /// # Errors

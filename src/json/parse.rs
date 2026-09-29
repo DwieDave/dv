@@ -2,7 +2,7 @@
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::store::{CHECKPOINT_EVERY, Slot, VecStore, VecStoreBuilder};
-use crate::json::lex::{Kind, fail, scan_scalar, scan_string, skip_ws};
+use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
 
 /// A parsed document: the root value's offset and the container index.
 #[derive(Debug)]
@@ -152,19 +152,11 @@ impl<'a> Parser<'a> {
 
     /// `"key" :` with surrounding whitespace.
     fn member_key(&mut self) -> Result<(), ParseError> {
-        self.expect(b'"')?;
+        expect(self.bytes, self.pos, b'"')?;
         self.pos = skip_ws(self.bytes, scan_string(self.bytes, self.pos)?);
-        self.expect(b':')?;
+        expect(self.bytes, self.pos, b':')?;
         self.pos = skip_ws(self.bytes, self.pos + 1);
         Ok(())
-    }
-
-    fn expect(&self, byte: u8) -> Result<(), ParseError> {
-        match self.bytes.get(self.pos) {
-            Some(&b) if b == byte => Ok(()),
-            Some(&b) => Err(fail(ParseErrorKind::UnexpectedByte(b), self.pos)),
-            None => Err(fail(ParseErrorKind::UnexpectedEof, self.pos)),
-        }
     }
 
     fn close(&mut self) {
