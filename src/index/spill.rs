@@ -6,8 +6,6 @@ use std::os::unix::fs::FileExt;
 
 use std::sync::{Arc, RwLock};
 
-use tempfile::tempfile;
-
 use crate::index::live::{LiveStore, LiveView, OpenNode, Shared};
 
 use crate::index::store::{BigNode, Builder, CHECKPOINT_EVERY, Fanout, MIN_NODE_LEN, NodeStore};
@@ -15,6 +13,7 @@ use crate::index::to_usize;
 use crate::index::u64file::U64File;
 use crate::source::file::FileSource;
 use crate::source::{Source, SourceError};
+use crate::temp;
 
 /// Bytes per node record: start, len, child count, first checkpoint.
 pub const RECORD: u64 = 32;
@@ -88,9 +87,9 @@ impl SpillBuilder {
         Ok(Self {
             next: 0,
             open: Vec::new(),
-            records: Records::new(tempfile()?, limits.window),
-            stack: U64File::new(tempfile()?, limits.stack),
-            cps: U64File::new(tempfile()?, limits.stack),
+            records: Records::new(temp::file()?, limits.window),
+            stack: U64File::new(temp::file()?, limits.stack),
+            cps: U64File::new(temp::file()?, limits.stack),
             cache: limits.cache,
             error: None,
             live: None,

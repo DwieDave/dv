@@ -25,6 +25,7 @@ use crate::snippet::{Snippet, snippet};
 use crate::source::file::FileSource;
 use crate::source::{MemSource, Source, SourceError};
 use crate::stream_tree::StreamTree;
+use crate::temp;
 use crate::tree::MemTree;
 use crate::yaml::{TranscodeError, budget, transcode};
 
@@ -167,7 +168,7 @@ fn spool(
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
 ) -> Result<Option<File>, LoadFailure> {
-    let mut file = tempfile::tempfile().map_err(plain)?;
+    let mut file = temp::file().map_err(plain)?;
     file.write_all(&head).map_err(plain)?;
     let mut done = head.len() as u64;
     drop(head);

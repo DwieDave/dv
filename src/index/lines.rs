@@ -4,8 +4,6 @@ use std::fs::File;
 use std::io;
 use std::sync::{Arc, RwLock};
 
-use tempfile::tempfile;
-
 use crate::error::ParseErrorKind;
 use crate::index::children::{Child, skip_value};
 use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
@@ -14,6 +12,7 @@ use crate::index::window::{OffsetStore, ReadWindow, StreamChildren, stream_seek,
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, skip_ws};
 use crate::source::{Source, SourceError};
+use crate::temp;
 use crate::tree::{NodeRef, last_at_or_before};
 
 /// A record that failed to parse; enumeration skips from `start` to `resume`.
@@ -44,8 +43,8 @@ impl LineSpill {
     pub fn new(limit: usize) -> Result<Self, SourceError> {
         Ok(Self {
             count: 0,
-            checkpoints: U64File::new(tempfile()?, limit),
-            bad: U64File::new(tempfile()?, limit),
+            checkpoints: U64File::new(temp::file()?, limit),
+            bad: U64File::new(temp::file()?, limit),
             error: None,
             live: None,
         })

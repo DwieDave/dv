@@ -133,6 +133,39 @@ fn piped_input_can_be_streamed() {
 }
 
 #[test]
+fn streaming_never_leaves_names_in_the_temp_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = temp_file(br#"{"a": [1, 2, 3], "b": {"c": null}}"#).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dv"))
+        .args(["--index-only", "--mode", "stream"])
+        .env("TMPDIR", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"[1, 2, ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let during = std::fs::read_dir(dir.path()).unwrap().count();
+    drop(stdin);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dv"))
+        .args([
+            "--index-only",
+            "--mode",
+            "stream",
+            file.path().to_str().unwrap(),
+        ])
+        .env("TMPDIR", dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let after = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!((during, after), (0, 0));
+}
+
+#[test]
 fn piped_ndjson_is_detected_from_content() {
     let out = dv_stdin(&["--index-only"], b"{\"a\":1}\n{bad\n{\"a\":2}\n").unwrap();
     assert!(out.status.success(), "{out:?}");

@@ -20,6 +20,7 @@ pub mod search;
 pub mod snippet;
 pub mod source;
 pub mod stream_tree;
+pub mod temp;
 pub mod tree;
 pub mod ui;
 pub mod view;
