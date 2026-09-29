@@ -90,3 +90,65 @@ fn scalars_have_no_children() {
     assert!(tree.children(root, 0..10).unwrap().is_empty());
     assert_eq!(&*tree.bytes(2..4).unwrap(), b"42");
 }
+
+fn to_value(tree: &MemTree, node: NodeRef) -> Value {
+    let Count::Known(n) = tree.child_count(node).unwrap() else {
+        unreachable!()
+    };
+    let kids = tree.children(node, 0..n).unwrap();
+    match node.kind {
+        Kind::Array => kids.iter().map(|c| to_value(tree, c.node())).collect(),
+        Kind::Object => kids
+            .iter()
+            .map(|c| {
+                let key = crate::json::text::unescape(&tree.bytes(c.key.clone().unwrap()).unwrap())
+                    .into_owned();
+                (key, to_value(tree, c.node()))
+            })
+            .collect(),
+        _ => {
+            let raw = tree.bytes(node.offset..scalar_end(tree, node)).unwrap();
+            serde_json::from_slice(&raw).unwrap()
+        }
+    }
+}
+
+fn scalar_end(tree: &MemTree, node: NodeRef) -> u64 {
+    let rest = tree.bytes(node.offset..u64::MAX).unwrap();
+    crate::json::lex::scan_scalar(&rest, 0).unwrap().1 as u64 + node.offset
+}
+
+fn serde_verdict(bytes: &[u8]) -> Option<bool> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(_) => Some(true),
+        Err(e) if e.to_string().contains("out of range") || e.to_string().contains("recursion") => {
+            None
+        }
+        Err(_) => Some(false),
+    }
+}
+
+proptest! {
+    #[test]
+    fn rebuilt_value_equals_serde(value in json_value(), pretty in any::<bool>()) {
+        let text = if pretty { serde_json::to_string_pretty(&value) } else { serde_json::to_string(&value) }.unwrap();
+        let tree = tree_of(&text);
+        // serde's default float parsing is not exact round-trip, so compare parses of the same text.
+        let expected: Value = serde_json::from_str(&text).unwrap();
+        prop_assert_eq!(to_value(&tree, tree.root().unwrap()), expected);
+    }
+
+    #[test]
+    fn arbitrary_bytes_agree_with_serde(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+        if let Some(expected) = serde_verdict(&bytes) {
+            prop_assert_eq!(MemTree::parse(MemSource::new(bytes)).is_ok(), expected);
+        }
+    }
+
+    #[test]
+    fn near_json_agrees_with_serde(text in r#"[\[\]{}",:0-9a-z\\. -]{0,24}"#) {
+        if let Some(expected) = serde_verdict(text.as_bytes()) {
+            prop_assert_eq!(MemTree::parse(MemSource::new(text.clone().into_bytes())).is_ok(), expected, "{}", text);
+        }
+    }
+}

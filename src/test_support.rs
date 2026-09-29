@@ -96,13 +96,21 @@ pub fn json_value() -> impl Strategy<Value = Value> {
         any::<bool>().prop_map(Value::from),
         any::<i64>().prop_map(Value::from),
         (-1e9f64..1e9).prop_map(Value::from),
-        "\\PC{0,12}".prop_map(Value::from),
+        text(12).prop_map(Value::from),
     ];
     leaf.prop_recursive(6, 400, 40, |inner| {
         prop_oneof![
             proptest::collection::vec(inner.clone(), 0..40).prop_map(Value::Array),
-            proptest::collection::vec(("\\PC{0,6}", inner), 0..20)
+            proptest::collection::vec((text(6), inner), 0..20)
                 .prop_map(|kv| Value::Object(kv.into_iter().collect::<Map<_, _>>())),
         ]
     })
+}
+
+/// Strings mixing printable text with escape-heavy content (controls, quotes, backslashes).
+fn text(max: usize) -> impl Strategy<Value = String> {
+    prop_oneof![
+        proptest::string::string_regex(&format!("\\PC{{0,{max}}}")).unwrap(),
+        proptest::string::string_regex(&format!("[\\x00-\\x1f\"\\\\a-z]{{0,{max}}}")).unwrap(),
+    ]
 }
