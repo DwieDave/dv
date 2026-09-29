@@ -64,6 +64,11 @@ impl MemSource {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
 }
 
 impl Source for MemSource {

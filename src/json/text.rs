@@ -4,6 +4,9 @@ use std::borrow::Cow;
 
 use crate::json::lex::hex4;
 
+/// Escape introducer, kept as a char so escapes stay literal in source.
+const BACKSLASH: char = '\\';
+
 /// Longest escape per char: a surrogate pair of two six-byte unicode escapes.
 const MAX_ESCAPE_LEN: usize = 12;
 
@@ -30,6 +33,25 @@ pub fn inline(raw: &[u8], max_chars: usize) -> String {
         }
     });
     truncate(visible, max_chars)
+}
+
+/// Appends `s` as a JSON string literal (quotes and escapes included).
+pub fn quote_into(out: &mut Vec<u8>, s: &str) {
+    out.push(b'"');
+    for c in s.chars() {
+        match c {
+            '"' => out.extend_from_slice(b"\\\""),
+            '\\' => out.extend_from_slice(b"\\\\"),
+            '\n' => out.extend_from_slice(b"\\n"),
+            '\t' => out.extend_from_slice(b"\\t"),
+            '\r' => out.extend_from_slice(b"\\r"),
+            c if c.is_control() => {
+                out.extend_from_slice(format!("{BACKSLASH}u{:04x}", u32::from(c)).as_bytes());
+            }
+            c => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    out.push(b'"');
 }
 
 fn inner(raw: &[u8]) -> &[u8] {

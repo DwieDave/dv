@@ -15,6 +15,7 @@ pub mod source;
 pub mod tree;
 pub mod ui;
 pub mod view;
+pub mod yaml;
 
 #[cfg(test)]
 mod test_support;

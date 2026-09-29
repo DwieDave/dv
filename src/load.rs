@@ -14,6 +14,7 @@ use crate::position::Position;
 use crate::snippet::{Snippet, snippet};
 use crate::source::{MemSource, Source, SourceError};
 use crate::tree::MemTree;
+use crate::yaml::{TranscodeError, budget, transcode};
 
 /// Lines of context shown on each side of a parse error.
 const SNIPPET_CONTEXT: usize = 2;
@@ -154,13 +155,76 @@ fn index(
     let parsed = match format {
         Format::Json => parse_with(source.as_bytes(), &mut hook).map(Parsed::Json),
         Format::Ndjson => parse_lines(source.as_bytes(), &mut hook).map(Parsed::Lines),
-        Format::Yaml => return Some(Err(LoadFailure::plain(&"YAML is not supported yet"))),
+        Format::Yaml => return yaml_tree(source.into_bytes(), &mut hook),
     };
     match parsed {
         Ok(Parsed::Json(parsed)) => Some(Ok(MemTree::from_parts(source, parsed))),
         Ok(Parsed::Lines(parsed)) => Some(Ok(MemTree::from_lines(source, parsed))),
         Err(err) if err.kind == ParseErrorKind::Cancelled => None,
         Err(err) => Some(Err(parse_failure(source.as_bytes(), err))),
+    }
+}
+
+/// Transcodes YAML to JSON, drops the YAML text, then indexes the JSON (D-5).
+fn yaml_tree(
+    bytes: Vec<u8>,
+    hook: &mut impl FnMut(u64) -> ControlFlow<()>,
+) -> Option<Result<MemTree, LoadFailure>> {
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            let offset = err.utf8_error().valid_up_to() as u64;
+            let kind = ParseErrorKind::InvalidUtf8;
+            return Some(Err(parse_failure(
+                err.as_bytes(),
+                ParseError { kind, offset },
+            )));
+        }
+    };
+    let transcoded = match transcode(&text, budget(text.len()), &mut *hook) {
+        Ok(transcoded) => transcoded,
+        Err(TranscodeError::Cancelled) => return None,
+        Err(err) => return Some(Err(yaml_failure(text.as_bytes(), &err))),
+    };
+    let origin = text.len() as u64;
+    drop(text);
+    Some(json_tree(
+        MemSource::new(transcoded.json),
+        transcoded.aliases,
+        origin,
+        hook,
+    ))
+}
+
+/// Indexes transcoded YAML; it is valid JSON by construction.
+fn json_tree(
+    json: MemSource,
+    aliases: Vec<u32>,
+    origin: u64,
+    hook: &mut impl FnMut(u64) -> ControlFlow<()>,
+) -> Result<MemTree, LoadFailure> {
+    match parse_with(json.as_bytes(), hook) {
+        Ok(parsed) => Ok(MemTree::from_parts(json, parsed)
+            .with_format(Format::Yaml)
+            .with_aliases(aliases)
+            .with_origin_bytes(origin)),
+        Err(err) => Err(LoadFailure::plain(&format!(
+            "internal error: transcoded YAML is not JSON ({err})"
+        ))),
+    }
+}
+
+fn yaml_failure(text: &[u8], err: &TranscodeError) -> LoadFailure {
+    let offset = match err {
+        TranscodeError::Scan { offset, .. }
+        | TranscodeError::Budget { offset }
+        | TranscodeError::BadAlias { offset } => *offset,
+        TranscodeError::Cancelled => 0,
+    };
+    let snippet = Some(snippet(text, offset as u64, SNIPPET_CONTEXT, SNIPPET_WIDTH));
+    LoadFailure {
+        message: err.to_string(),
+        snippet,
     }
 }
 
@@ -260,6 +324,53 @@ mod tests {
             Format::Ndjson
         );
         assert_eq!(loaded_format(b"{\"a\":1}", None), Format::Json);
+    }
+
+    #[test]
+    fn yaml_is_transcoded_and_labelled() {
+        let yaml = b"a: &x [1, 2]\nb: *x\n";
+        let mut seen = Vec::new();
+        let request = Request {
+            path: Some(PathBuf::from("c.yml")),
+            max_len: u64::MAX,
+            ..Request::default()
+        };
+        load(
+            &yaml[..],
+            &request,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+        );
+        let Some(LoadEvent::Loaded(Ok(tree))) = seen.pop() else {
+            panic!("not loaded")
+        };
+        assert_eq!(
+            (tree.format(), tree.stats().bytes),
+            (Format::Yaml, yaml.len() as u64)
+        );
+        let root = tree.root().unwrap();
+        let kids = tree.children(root, 0..2).unwrap();
+        assert!(!tree.is_alias(kids[0].node()) && tree.is_alias(kids[1].node()));
+    }
+
+    #[test]
+    fn yaml_errors_carry_a_snippet() {
+        let mut seen = Vec::new();
+        let request = Request {
+            format: Some(Format::Yaml),
+            max_len: u64::MAX,
+            ..Request::default()
+        };
+        load(
+            &b"a: [1\nb: 2\n"[..],
+            &request,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+        );
+        let Some(LoadEvent::Loaded(Err(failure))) = seen.pop() else {
+            panic!("expected failure")
+        };
+        assert!(failure.snippet.is_some(), "{failure:?}");
     }
 
     #[test]

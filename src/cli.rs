@@ -73,10 +73,8 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 /// # Errors
 /// Unsupported options, unreadable input, parse errors (`--index-only`) or terminal failures.
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
-    match (cli.mode, cli.format) {
-        (Mode::Stream, _) => return Err(CliError::Unsupported("streaming mode")),
-        (_, Some(FormatArg::Yaml)) => return Err(CliError::Unsupported("YAML")),
-        _ => {}
+    if cli.mode == Mode::Stream {
+        return Err(CliError::Unsupported("streaming mode"));
     }
     let path = cli.path.display().to_string();
     let file = File::open(&cli.path).map_err(|source| CliError::Open {

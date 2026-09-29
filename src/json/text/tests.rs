@@ -6,6 +6,13 @@ const BS: char = '\\';
 
 proptest! {
     #[test]
+    fn quote_into_round_trips_through_serde(s in any::<String>()) {
+        let mut out = b"x".to_vec();
+        quote_into(&mut out, &s);
+        prop_assert_eq!(serde_json::from_slice::<String>(&out[1..]).unwrap(), s);
+    }
+
+    #[test]
     fn unescape_inverts_serialization(s in any::<String>()) {
         let raw = serde_json::to_string(&s).unwrap();
         prop_assert_eq!(unescape(raw.as_bytes()), s);

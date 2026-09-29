@@ -87,6 +87,11 @@ pub trait TreeIndex {
 
     fn format(&self) -> Format;
 
+    /// Whether `node` was expanded from a YAML alias.
+    fn is_alias(&self, _node: NodeRef) -> bool {
+        false
+    }
+
     /// Why `node` failed to parse, for `Kind::Invalid` records.
     fn problem(&self, _node: NodeRef) -> Option<ParseErrorKind> {
         None
@@ -105,6 +110,10 @@ pub struct MemTree {
     values: u64,
     lines: Option<LineIndex>,
     format: Format,
+    /// Values expanded from YAML aliases, ascending.
+    aliases: Vec<u32>,
+    /// Size of the file as read (differs from `source` for transcoded YAML).
+    origin_bytes: u64,
 }
 
 impl MemTree {
@@ -132,6 +141,7 @@ impl MemTree {
             store,
             values,
         } = parsed;
+        let source_len = source.len();
         Self {
             source,
             store,
@@ -139,6 +149,8 @@ impl MemTree {
             values,
             lines: None,
             format: Format::Json,
+            aliases: Vec::new(),
+            origin_bytes: source_len,
         }
     }
 
@@ -150,6 +162,7 @@ impl MemTree {
             values,
             lines,
         } = parsed;
+        let source_len = source.len();
         Self {
             source,
             store,
@@ -157,6 +170,8 @@ impl MemTree {
             values,
             lines: Some(lines),
             format: Format::Ndjson,
+            aliases: Vec::new(),
+            origin_bytes: source_len,
         }
     }
 
@@ -164,6 +179,21 @@ impl MemTree {
     #[must_use]
     pub fn with_format(self, format: Format) -> Self {
         Self { format, ..self }
+    }
+
+    /// Marks values expanded from YAML aliases (ascending offsets).
+    #[must_use]
+    pub fn with_aliases(self, aliases: Vec<u32>) -> Self {
+        Self { aliases, ..self }
+    }
+
+    /// Reports the original file size (the YAML text) in the stats.
+    #[must_use]
+    pub fn with_origin_bytes(self, origin_bytes: u64) -> Self {
+        Self {
+            origin_bytes,
+            ..self
+        }
     }
 }
 
@@ -311,9 +341,13 @@ impl TreeIndex for MemTree {
 
     fn stats(&self) -> Stats {
         Stats {
-            bytes: self.source.len(),
+            bytes: self.origin_bytes,
             values: Some(self.values),
         }
+    }
+
+    fn is_alias(&self, node: NodeRef) -> bool {
+        u32::try_from(node.offset).is_ok_and(|offset| self.aliases.binary_search(&offset).is_ok())
     }
 
     fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {

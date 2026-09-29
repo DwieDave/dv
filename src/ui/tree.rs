@@ -69,6 +69,9 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
                 } else {
                     self.scalar(*node, *end, width.saturating_sub(used))?
                 });
+                if self.tree.is_alias(*node) {
+                    spans.push(Span::styled(" *alias", self.theme.badge));
+                }
             }
         }
         Ok(Line::from(spans))

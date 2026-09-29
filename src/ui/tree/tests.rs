@@ -98,3 +98,17 @@ fn invalid_records_render_as_errors() {
         ]
     );
 }
+
+#[test]
+fn yaml_aliases_get_a_badge() {
+    let transcoded = crate::yaml::transcode("a: &x [1]\nb: *x\n", 1 << 20, |_| {
+        std::ops::ControlFlow::Continue(())
+    })
+    .unwrap();
+    let tree = MemTree::parse(MemSource::new(transcoded.json))
+        .unwrap()
+        .with_aliases(transcoded.aliases);
+    let state = TreeState::new(&tree).unwrap();
+    let lines = text_lines(&draw(&tree, &state, 30, 3));
+    assert_eq!(lines, ["▼ {2}", "  ▶ a: [1]", "  ▶ b: [1] *alias"]);
+}

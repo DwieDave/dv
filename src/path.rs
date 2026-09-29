@@ -1,13 +1,9 @@
 //! jq-style paths (`.users[3]."first name"`) for display and copy.
 
-use std::fmt::Write;
-
 use crate::index::IndexError;
 use crate::index::children::Child;
-use crate::json::text::unescape;
+use crate::json::text::{quote_into, unescape};
 use crate::tree::TreeIndex;
-
-const BS: char = '\\';
 
 /// One step from a container to a child.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,20 +46,9 @@ fn is_identifier(key: &str) -> bool {
 
 /// A JSON string literal for `key`.
 fn quote(key: &str) -> String {
-    let mut out = String::with_capacity(key.len() + 2);
-    out.push('"');
-    for c in key.chars() {
-        match c {
-            '"' | BS => out.extend([BS, c]),
-            '\n' => out.extend([BS, 'n']),
-            '\t' => out.extend([BS, 't']),
-            '\r' => out.extend([BS, 'r']),
-            c if c.is_control() => write!(out, "{BS}u{:04x}", u32::from(c)).unwrap_or_default(),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    let mut out = Vec::with_capacity(key.len() + 2);
+    quote_into(&mut out, key);
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// One segment as it appears after its predecessor.
