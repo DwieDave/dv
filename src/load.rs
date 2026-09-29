@@ -197,9 +197,9 @@ fn stream(
         root,
     ))));
     let mut last = 0;
-    let publish = |b: &mut SpillBuilder, frontier: u64| {
-        if frontier - last >= budget.publish_every {
-            b.publish(frontier, false);
+    let publish = |b: &mut SpillBuilder, frontier: u64, done: bool| {
+        if done || frontier.saturating_sub(last) >= budget.publish_every {
+            b.publish(frontier, done);
             sink(LoadEvent::Progress(Progress {
                 phase: Phase::Indexing,
                 done: frontier,
@@ -220,9 +220,7 @@ fn stream(
         Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::Cancelled => return Ok(None),
         Err(err) => return Err(plain(&err)),
     };
-    let mut builder = parsed.builder;
-    builder.publish(total, true);
-    let store = builder.finish().map_err(|e| plain(&e))?;
+    let store = parsed.builder.finish().map_err(|e| plain(&e))?;
     Ok(Some(Document::Stream(StreamTree::new(
         final_source,
         store,
@@ -554,6 +552,33 @@ mod tests {
             crate::test_support::to_value(doc, doc.root().unwrap()),
             expected
         );
+    }
+
+    #[test]
+    fn broken_streams_stay_browsable_up_to_the_error() {
+        use std::io::Write;
+        let items: Vec<String> = (0..20_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
+        let text = format!("[{}, {{\"bad\" 1}}]", items.join(","));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        let mut seen = Vec::new();
+        load_stream(
+            &file,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        assert!(matches!(seen.last(), Some(LoadEvent::Loaded(Err(_)))));
+        let Some(LoadEvent::Live(live)) = seen.first() else {
+            panic!("no live document")
+        };
+        let root = live.root().unwrap();
+        assert_eq!(
+            live.child_count(root).unwrap(),
+            crate::tree::Count::Truncated(20_001)
+        );
+        let last = live.children(root, 19_999..20_000).unwrap();
+        assert_eq!(last.len(), 1, "everything before the error is browsable");
     }
 
     #[test]

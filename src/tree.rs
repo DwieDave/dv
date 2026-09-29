@@ -26,6 +26,8 @@ pub enum Count {
     Known(u64),
     /// Still being indexed; this many children are known so far.
     Pending(u64),
+    /// Indexing stopped at an error inside this container; this many children are known.
+    Truncated(u64),
 }
 
 impl Count {
@@ -33,7 +35,7 @@ impl Count {
     #[must_use]
     pub fn available(self) -> u64 {
         match self {
-            Self::Known(n) | Self::Pending(n) => n,
+            Self::Known(n) | Self::Pending(n) | Self::Truncated(n) => n,
         }
     }
 }

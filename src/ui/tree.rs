@@ -102,6 +102,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
         let count = match self.tree.child_count(node)? {
             Count::Known(n) => n.to_string(),
             Count::Pending(n) => format!("{n}…"),
+            Count::Truncated(n) => format!("{n} ✗"),
         };
         let text = if node.kind == Kind::Object {
             format!("{{{count}}}")

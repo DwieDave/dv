@@ -68,6 +68,8 @@ pub struct Model<T> {
     pub last_find: LastFind,
     /// Transient information for the status bar; the next key clears it.
     pub note: Option<String>,
+    /// A failure that stopped background indexing; stays until quit (FR-27).
+    pub banner: Option<String>,
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -99,12 +101,26 @@ impl<T: TreeIndex> Model<T> {
             schema: None,
             last_find: LastFind::None,
             note: None,
+            banner: None,
             effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
             quit: false,
         })
     }
+}
+
+/// Rows below the tree: the status bar, plus the banner when there is one.
+fn chrome_rows<T>(model: &Model<T>) -> u16 {
+    STATUS_ROWS + u16::from(model.banner.is_some())
+}
+
+/// Shows a persistent failure banner, giving it a row of the tree.
+pub fn show_banner<T>(model: &mut Model<T>, message: String) {
+    if model.banner.is_none() {
+        model.height = model.height.saturating_sub(1).max(1);
+    }
+    model.banner = Some(message);
 }
 
 /// Things that can happen to the model.
@@ -222,7 +238,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         }
         Msg::Resize(width, height) => {
             model.width = width;
-            model.height = u64::from(height.saturating_sub(STATUS_ROWS)).max(1);
+            model.height = u64::from(height.saturating_sub(chrome_rows(model))).max(1);
         }
         Msg::Nav(action) => {
             let result = nav::apply(&*model.tree, &mut model.state, action, model.height);
@@ -363,9 +379,17 @@ pub fn input_msg(event: &crossterm::event::Event) -> Option<Msg> {
 
 /// Renders `model` into `frame`: the tree above, the status bar in the last row.
 pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
-    let [main_area, status_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(STATUS_ROWS)])
-            .areas(frame.area());
+    let banner_rows = chrome_rows(model) - STATUS_ROWS;
+    let [main_area, banner_area, status_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(banner_rows),
+        Constraint::Length(STATUS_ROWS),
+    ])
+    .areas(frame.area());
+    if let Some(message) = &model.banner {
+        let line = Line::styled(format!("✗ indexing stopped: {message}"), model.theme.error);
+        frame.render_widget(line, banner_area);
+    }
     let (tree_area, preview_area) = panes(&model.preview, main_area);
     let widget = TreeWidget {
         tree: &*model.tree,

@@ -531,8 +531,8 @@ mod tests {
             max: 1 << 20,
         };
         let source = MemSource::new(text.as_bytes().to_vec());
-        let publish = |b: &mut SpillBuilder, frontier: u64| {
-            b.publish(frontier, false);
+        let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
+            b.publish(frontier, last);
             let view = live.view();
             assert_eq!(view.frontier, frontier);
             for (start, byte) in text

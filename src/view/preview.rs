@@ -42,6 +42,7 @@ pub fn preview_lines(
             let records = match tree.child_count(*node)? {
                 Count::Known(n) => grouped(n),
                 Count::Pending(n) => format!("{}…", grouped(n)),
+                Count::Truncated(n) => format!("{} ✗", grouped(n)),
             };
             Ok(window.of(vec![format!("{records} records")]))
         }

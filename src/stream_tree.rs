@@ -50,7 +50,13 @@ impl<R: Source> StreamTree<R, SpillStore> {
         spill: SpillLimits,
         hook: impl FnMut(u64) -> ControlFlow<()>,
     ) -> Result<Self, IndexError> {
-        let parsed = parse_stream(&source, SpillBuilder::new(spill)?, limits, hook, |_, _| {})?;
+        let parsed = parse_stream(
+            &source,
+            SpillBuilder::new(spill)?,
+            limits,
+            hook,
+            |_, _, _| {},
+        )?;
         let store = parsed.builder.finish()?;
         Ok(Self::new(
             source,

@@ -10,7 +10,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Gauge, Paragraph};
 
 use crate::app::search::{Outcome, spawn_worker};
-use crate::app::{Effect, Model, Msg, input_msg, update, view};
+use crate::app::{Effect, Model, Msg, input_msg, show_banner, update, view};
 use crate::clipboard;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
@@ -85,7 +85,7 @@ pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event:
         AppEvent::Load(LoadEvent::Live(doc)) => open(app, Ok(doc)),
         AppEvent::Load(LoadEvent::Loaded(result)) => match (&mut app.screen, result) {
             (Screen::Ready(model), Ok(doc)) => swap(model, doc, app.events.as_ref()),
-            (Screen::Ready(model), Err(failure)) => model.status = Some(failure.message),
+            (Screen::Ready(model), Err(failure)) => show_banner(model, failure.message),
             (_, result) => open(app, result),
         },
         AppEvent::Search(outcome) => {

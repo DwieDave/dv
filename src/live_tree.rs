@@ -92,6 +92,9 @@ impl<R: Source> TreeIndex for LiveTree<R> {
             return Ok(Count::Known(0));
         }
         match self.store.node(node.offset)? {
+            Some(NodeState::Open { count, .. }) if self.store.view().done => {
+                return Ok(Count::Truncated(count));
+            }
             Some(NodeState::Open { count, .. }) => return Ok(Count::Pending(count)),
             Some(NodeState::Closed(big)) if big.fanout.is_some() => {
                 return Ok(Count::Known(big.fanout.map_or(0, |f| f.count)));
@@ -245,6 +248,9 @@ mod tests {
                     c.end,
                     frontier
                 ),
+                Count::Truncated(n) => {
+                    prop_assert!(false, "unexpected truncation of {} ({} known)", c.start, n);
+                }
             }
         }
         Ok(())
@@ -260,8 +266,8 @@ mod tests {
             let root = crate::json::lex::skip_ws(text.as_bytes(), 0) as u64;
             let live = LiveTree::new(MemSource::new(text.as_bytes().to_vec()), store, root);
             let mut failure = None;
-            let publish = |b: &mut SpillBuilder, frontier: u64| {
-                b.publish(frontier, false);
+            let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
+                b.publish(frontier, last);
                 if failure.is_none() {
                     failure = check(&text, &containers, &finished, &live, frontier).err();
                 }

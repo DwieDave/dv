@@ -93,7 +93,14 @@ fn stream_once(path: &std::path::Path) -> Option<SpillStore> {
     let source = FileSource::new(fs::File::open(path).ok()?, 64 << 20).ok()?;
     let builder = SpillBuilder::new(SpillLimits::default()).ok()?;
     let hook = |_| ControlFlow::Continue(());
-    let parsed = parse_stream(&source, builder, StreamLimits::default(), hook, |_, _| {}).ok()?;
+    let parsed = parse_stream(
+        &source,
+        builder,
+        StreamLimits::default(),
+        hook,
+        |_, _, _| {},
+    )
+    .ok()?;
     parsed.builder.finish().ok()
 }
 

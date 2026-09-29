@@ -125,8 +125,8 @@ mod tests {
         let live = LiveTree::new(MemSource::new(text.clone().into_bytes()), store, 0);
         let mut state: Option<TreeState> = None;
         let mut sizes = Vec::new();
-        let publish = |b: &mut SpillBuilder, frontier: u64| {
-            b.publish(frontier, false);
+        let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
+            b.publish(frontier, last);
             let state = state.get_or_insert_with(|| TreeState::new(&live).unwrap());
             state.cursor = vec![0];
             state.refresh(&live).unwrap();
