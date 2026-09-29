@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::IndexError;
 use crate::index::children::{Child, skip_value};
-use crate::index::store::{CHECKPOINT_EVERY, NodeStore, VecStore};
+use crate::index::store::{Builder, CHECKPOINT_EVERY, NodeStore, VecStore};
 use crate::index::to_usize;
 use crate::json::lex::{Kind, fail, skip_ws};
 use crate::json::parse::{Parser, ensure_addressable};
@@ -162,31 +162,7 @@ pub fn parse_lines(
     ensure_addressable(bytes.len())?;
     let mut parser = Parser::new(bytes, hook);
     let mut lines = LineIndex::default();
-    loop {
-        parser.pos = skip_ws(bytes, parser.pos);
-        if parser.pos >= bytes.len() {
-            break;
-        }
-        let start = parser.pos;
-        lines.record_start(start);
-        let (mark, values) = (parser.builder.mark(), parser.values);
-        match record(&mut parser, start) {
-            Ok(()) => {}
-            Err(err) if err.kind == ParseErrorKind::Cancelled => return Err(err),
-            Err(err) => {
-                parser.builder.rollback(mark);
-                parser.abandon();
-                parser.values = values + 1;
-                parser.pos = resume_after(bytes, err.offset);
-                lines.bad.push(BadRecord {
-                    start: offset32(start),
-                    resume: offset32(parser.pos),
-                    kind: err.kind,
-                });
-            }
-        }
-        parser.maybe_report()?;
-    }
+    parse_block(&mut parser, &mut lines, true)?;
     parser.final_report();
     Ok(ParsedLines {
         store: parser.builder.finish(),
@@ -195,9 +171,82 @@ pub fn parse_lines(
     })
 }
 
+/// Receives the records of a block, at offsets within it.
+pub(crate) trait LineSink {
+    fn record(&mut self, start: usize);
+    fn bad(&mut self, start: usize, resume: usize, kind: ParseErrorKind);
+}
+
+impl LineSink for LineIndex {
+    fn record(&mut self, start: usize) {
+        self.record_start(start);
+    }
+
+    fn bad(&mut self, start: usize, resume: usize, kind: ParseErrorKind) {
+        let (start, resume) = (offset32(start), offset32(resume));
+        self.bad.push(BadRecord {
+            start,
+            resume,
+            kind,
+        });
+    }
+}
+
+/// The records of `parser.bytes` from `parser.pos` on. Returns where parsing stopped: the end,
+/// or (unless `eof`) the start of a record that may continue past the end.
+///
+/// # Errors
+/// `Cancelled` when the parser's hook breaks.
+pub(crate) fn parse_block<H: FnMut(u64) -> ControlFlow<()>, B: Builder>(
+    parser: &mut Parser<'_, H, B>,
+    sink: &mut impl LineSink,
+    eof: bool,
+) -> Result<usize, ParseError> {
+    let bytes = parser.bytes;
+    loop {
+        parser.pos = skip_ws(bytes, parser.pos);
+        let start = parser.pos;
+        if start >= bytes.len() {
+            return Ok(bytes.len());
+        }
+        let (mark, values) = (parser.builder.mark(), parser.values);
+        let outcome = record(parser, start);
+        if !settled(bytes, &outcome, parser.pos, eof) {
+            parser.builder.rollback(mark);
+            parser.abandon();
+            (parser.values, parser.pos) = (values, start);
+            return Ok(start);
+        }
+        sink.record(start);
+        match outcome {
+            Err(err) if err.kind == ParseErrorKind::Cancelled => return Err(err),
+            Err(err) => {
+                parser.builder.rollback(mark);
+                parser.abandon();
+                parser.values = values + 1;
+                parser.pos = resume_after(bytes, err.offset);
+                sink.bad(start, parser.pos, err.kind);
+            }
+            Ok(()) => {}
+        }
+        parser.maybe_report()?;
+    }
+}
+
+/// Whether a record's outcome is final, or more bytes past the end could change it.
+fn settled(bytes: &[u8], outcome: &Result<(), ParseError>, end: usize, eof: bool) -> bool {
+    eof || match outcome {
+        Ok(()) => end < bytes.len(),
+        Err(err) if err.kind == ParseErrorKind::UnexpectedEof => false,
+        Err(err) => {
+            memchr::memchr(b'\n', &bytes[to_usize(err.offset).min(bytes.len())..]).is_some()
+        }
+    }
+}
+
 /// One value, then only spaces, tabs or `\r` before the newline, all valid UTF-8.
-fn record<H: FnMut(u64) -> ControlFlow<()>>(
-    parser: &mut Parser<'_, H>,
+fn record<H: FnMut(u64) -> ControlFlow<()>, B: Builder>(
+    parser: &mut Parser<'_, H, B>,
     start: usize,
 ) -> Result<(), ParseError> {
     parser.value()?;

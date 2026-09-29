@@ -11,12 +11,12 @@ use crate::source::{Source, SourceError};
 /// Buffers read ahead but not yet taken by the parser.
 const AHEAD: usize = 2;
 
-/// A filled buffer: data at `buf[head..head + len]`, which starts at absolute offset `at`. The
-/// `head` bytes in front are room for the previous buffer's unfinished token.
+/// A filled buffer: data at `buf[start..end]`, which starts at absolute offset `at`. The
+/// `start` bytes in front are room for the previous buffer's unfinished token.
 pub(crate) struct Chunk {
     pub(crate) buf: Vec<u8>,
-    pub(crate) head: usize,
-    pub(crate) len: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
     pub(crate) at: u64,
     pub(crate) eof: bool,
     /// The first invalid UTF-8 up to the end of this chunk, when validating.
@@ -30,16 +30,34 @@ pub(crate) struct Prefetch {
 }
 
 impl Prefetch {
-    /// Starts reading `source` from the beginning in chunks of `size` bytes.
+    /// Starts reading `source` from the beginning in chunks of `size` bytes, checking UTF-8.
     pub(crate) fn spawn<'scope, 'env, R: Source + Sync>(
         scope: &'scope Scope<'scope, 'env>,
         source: &'env R,
         size: usize,
-        validate: bool,
+    ) -> Self {
+        Self::start(scope, source, size, Mode::Json)
+    }
+
+    /// Like [`Self::spawn`], but each chunk ends after its last newline (the rest opens the
+    /// next one), and UTF-8 is left to the caller: blocks of whole NDJSON lines.
+    pub(crate) fn lines<'scope, 'env, R: Source + Sync>(
+        scope: &'scope Scope<'scope, 'env>,
+        source: &'env R,
+        size: usize,
+    ) -> Self {
+        Self::start(scope, source, size, Mode::Lines)
+    }
+
+    fn start<'scope, 'env, R: Source + Sync>(
+        scope: &'scope Scope<'scope, 'env>,
+        source: &'env R,
+        size: usize,
+        mode: Mode,
     ) -> Self {
         let (tx, chunks) = sync_channel(AHEAD);
         let (spare, spares) = channel();
-        scope.spawn(move || read_ahead(source, size, validate, &tx, &spares));
+        scope.spawn(move || read_ahead(source, size, mode, &tx, &spares));
         Self { chunks, spare }
     }
 
@@ -54,16 +72,25 @@ impl Prefetch {
     }
 }
 
+/// What the reader does besides reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Validate UTF-8.
+    Json,
+    /// Cut chunks after their last newline.
+    Lines,
+}
+
 /// Reads chunks until the end of `source`, a read error, or the parser hanging up.
 fn read_ahead<R: Source>(
     source: &R,
     size: usize,
-    validate: bool,
+    mode: Mode,
     tx: &SyncSender<Result<Chunk, SourceError>>,
     spares: &Receiver<Vec<u8>>,
 ) {
-    let mut utf8 = validate.then(Utf8::default);
-    let (mut at, mut utf8_error) = (0u64, None);
+    let mut utf8 = (mode == Mode::Json).then(Utf8::default);
+    let (mut at, mut utf8_error, mut carry) = (0u64, None, Vec::new());
     loop {
         let mut buf = spares.try_recv().unwrap_or_default();
         buf.resize(2 * size, 0);
@@ -73,11 +100,23 @@ fn read_ahead<R: Source>(
         };
         let eof = at + len as u64 >= source.len();
         utf8_error = utf8_error.or_else(|| check(utf8.as_mut(), &buf[size..size + len], at, eof));
+        let start = size - carry.len();
+        buf[start..size].copy_from_slice(&carry);
+        let chunk_at = at - carry.len() as u64;
+        carry.clear();
+        let mut end = size + len;
+        if mode == Mode::Lines
+            && !eof
+            && let Some(nl) = memchr::memrchr(b'\n', &buf[size..end])
+        {
+            carry.extend_from_slice(&buf[size + nl + 1..end]);
+            end = size + nl + 1;
+        }
         let chunk = Chunk {
             buf,
-            head: size,
-            len,
-            at,
+            start,
+            end,
+            at: chunk_at,
             eof,
             utf8_error,
         };

@@ -106,27 +106,19 @@ fn eof(offset: u64) -> ParseError {
     }
 }
 
-/// The sliding buffer: `bytes()` starts at absolute offset `base`. Chunks come from a
-/// read-ahead thread; after a backward seek, reads are direct.
+/// The sliding buffer: `bytes()` starts at absolute offset `base`; chunks come from a
+/// read-ahead thread.
 pub(crate) struct Window<'s, R> {
     source: &'s R,
     buf: Vec<u8>,
     start: usize,
     end: usize,
     pub(crate) base: u64,
-    size: usize,
     max: usize,
     pub(crate) eof: bool,
-    feed: Feed,
+    ahead: Prefetch,
     /// The first invalid UTF-8 read so far; reported only if no earlier error turns up.
     utf8_error: Option<ParseError>,
-}
-
-/// Where the next bytes come from.
-enum Feed {
-    Ahead(Prefetch),
-    /// Synchronous reads, unchecked (only unchecked windows seek).
-    Direct,
 }
 
 impl<'s, R: Source + Sync> Window<'s, R> {
@@ -136,24 +128,6 @@ impl<'s, R: Source + Sync> Window<'s, R> {
         source: &'s R,
         limits: StreamLimits,
     ) -> Self {
-        Self::spawn(scope, source, limits, true)
-    }
-
-    /// A window that leaves UTF-8 validation to the caller.
-    pub(crate) fn unchecked<'scope>(
-        scope: &'scope Scope<'scope, 's>,
-        source: &'s R,
-        limits: StreamLimits,
-    ) -> Self {
-        Self::spawn(scope, source, limits, false)
-    }
-
-    fn spawn<'scope>(
-        scope: &'scope Scope<'scope, 's>,
-        source: &'s R,
-        limits: StreamLimits,
-        validate: bool,
-    ) -> Self {
         let size = limits.initial.max(1);
         Self {
             source,
@@ -161,10 +135,9 @@ impl<'s, R: Source + Sync> Window<'s, R> {
             start: 0,
             end: 0,
             base: 0,
-            size,
             max: limits.max.max(size),
             eof: false,
-            feed: Feed::Ahead(Prefetch::spawn(scope, source, size, validate)),
+            ahead: Prefetch::spawn(scope, source, size),
             utf8_error: None,
         }
     }
@@ -174,13 +147,6 @@ impl<R: Source> Window<'_, R> {
     /// The bytes held, from `base` on.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.buf[self.start..self.end]
-    }
-
-    /// Restarts at absolute offset `at` with direct reads (the read-ahead only moves forward).
-    pub(crate) fn seek(&mut self, at: u64) -> Result<(), IndexError> {
-        self.feed = Feed::Direct;
-        (self.buf, self.start, self.end, self.base) = (Vec::new(), 0, 0, at);
-        self.refill(0)
     }
 
     /// Drops the bytes before `keep`, then appends the next chunk.
@@ -195,29 +161,22 @@ impl<R: Source> Window<'_, R> {
             }
             .into());
         }
-        match &self.feed {
-            Feed::Ahead(ahead) => {
-                let chunk = ahead.next().ok_or_else(|| eof(self.base))??;
-                let old = self.take(chunk);
-                if let Feed::Ahead(ahead) = &self.feed {
-                    ahead.recycle(old);
-                }
-                Ok(())
-            }
-            Feed::Direct => self.read_direct(),
-        }
+        let chunk = self.ahead.next().ok_or_else(|| eof(self.base))??;
+        let old = self.take(chunk);
+        self.ahead.recycle(old);
+        Ok(())
     }
 
     /// Puts the kept bytes in front of `chunk`'s data; returns the buffer no longer used.
     fn take(&mut self, mut chunk: Chunk) -> Vec<u8> {
         let kept = self.end - self.start;
         debug_assert_eq!(chunk.at, self.base + kept as u64, "chunks arrive in order");
-        let data = chunk.head..chunk.head + chunk.len;
+        let data = chunk.start..chunk.end;
         self.eof = chunk.eof;
         self.utf8_error = self.utf8_error.or(chunk.utf8_error);
-        if kept <= chunk.head {
-            let at = chunk.head - kept;
-            chunk.buf[at..chunk.head].copy_from_slice(&self.buf[self.start..self.end]);
+        if kept <= chunk.start {
+            let at = chunk.start - kept;
+            chunk.buf[at..chunk.start].copy_from_slice(&self.buf[self.start..self.end]);
             (self.start, self.end) = (at, data.end);
             return std::mem::replace(&mut self.buf, chunk.buf);
         }
@@ -227,17 +186,6 @@ impl<R: Source> Window<'_, R> {
         self.buf.extend_from_slice(&chunk.buf[data]);
         (self.start, self.end) = (0, self.buf.len());
         chunk.buf
-    }
-
-    fn read_direct(&mut self) -> Result<(), IndexError> {
-        self.buf.truncate(self.end);
-        self.buf.drain(..self.start);
-        let from = self.base + self.buf.len() as u64;
-        let chunk = self.source.read(from..from + self.size as u64)?;
-        self.buf.extend_from_slice(&chunk);
-        (self.start, self.end) = (0, self.buf.len());
-        self.eof = from + chunk.len() as u64 >= self.source.len();
-        Ok(())
     }
 
     /// `result`, unless invalid UTF-8 was read before its error (see [`first_error`]).

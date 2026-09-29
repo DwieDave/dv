@@ -4,6 +4,7 @@ pub mod background;
 pub mod children;
 pub mod lines;
 pub mod live;
+pub mod recorder;
 pub mod spill;
 pub mod store;
 pub mod u64file;
