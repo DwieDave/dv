@@ -3,6 +3,7 @@
 //! No hit list is kept (NFR-4): `n`/`N` search from the cursor and `count` only counts.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::ops::{ControlFlow, Range};
 
 use regex::bytes::{Regex, RegexBuilder};
@@ -18,6 +19,29 @@ use crate::view::resolve::RootItem;
 pub const WINDOW: usize = 4 << 20;
 /// Longest match guaranteed to be found across a window boundary.
 pub const OVERLAP: usize = 4 << 10;
+/// Bytes scanned between two progress reports.
+pub const REPORT_EVERY: u64 = 64 << 20;
+
+/// How far a running scan has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scanned {
+    pub bytes: u64,
+    /// Matches so far, when counting.
+    pub matches: Option<u64>,
+}
+
+/// Consulted between windows: whether to stop, and where to send progress.
+pub trait Pulse {
+    fn cancelled(&self) -> bool;
+
+    fn report(&self, _scanned: Scanned) {}
+}
+
+impl<F: Fn() -> bool> Pulse for F {
+    fn cancelled(&self) -> bool {
+        self()
+    }
+}
 
 /// Where matches may fall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,14 +136,30 @@ pub fn find(
     matcher: &Matcher,
     from: Option<u64>,
     direction: Direction,
-    cancelled: &dyn Fn() -> bool,
+    pulse: &dyn Pulse,
 ) -> Result<Option<Hit>, SearchError> {
-    let search = Search {
+    find_in(
         tree,
         root,
         matcher,
-        cancelled,
-    };
+        from,
+        direction,
+        pulse,
+        Windows::default(),
+    )
+}
+
+/// [`find`] with an explicit window geometry.
+pub(crate) fn find_in(
+    tree: &impl TreeIndex,
+    root: &RootItem,
+    matcher: &Matcher,
+    from: Option<u64>,
+    direction: Direction,
+    pulse: &dyn Pulse,
+    windows: Windows,
+) -> Result<Option<Hit>, SearchError> {
+    let search = Search::new(tree, root, matcher, pulse, windows);
     match direction {
         Direction::Forward => {
             let start = from.map_or(0, |f| f + 1);
@@ -140,21 +180,29 @@ pub fn count(
     tree: &impl TreeIndex,
     root: &RootItem,
     matcher: &Matcher,
-    cancelled: &dyn Fn() -> bool,
+    pulse: &dyn Pulse,
 ) -> Result<Option<u64>, SearchError> {
-    let search = Search {
-        tree,
-        root,
-        matcher,
-        cancelled,
-    };
-    let mut total = 0u64;
-    let finished = search.visit(0, Windows::default(), &mut |start, end| {
-        let counted = matcher.scope == Scope::Both || search.accepted(start, end)?.is_some();
-        total += u64::from(counted);
+    count_in(tree, root, matcher, pulse, Windows::default())
+}
+
+/// [`count`] with an explicit window geometry.
+pub(crate) fn count_in(
+    tree: &impl TreeIndex,
+    root: &RootItem,
+    matcher: &Matcher,
+    pulse: &dyn Pulse,
+    windows: Windows,
+) -> Result<Option<u64>, SearchError> {
+    let search = Search::new(tree, root, matcher, pulse, windows);
+    let tally = &search.progress.matches;
+    tally.set(Some(0));
+    let finished = search.visit(0, false, &mut |start, end| {
+        if matcher.scope == Scope::Both || search.accepted(start, end)?.is_some() {
+            tally.set(tally.get().map(|n| n + 1));
+        }
         Ok(ControlFlow::Continue(()))
     })?;
-    Ok(finished.then_some(total))
+    Ok(finished.then(|| tally.get().unwrap_or(0)))
 }
 
 /// The row path and kind of the node holding `offset`.
@@ -189,13 +237,61 @@ struct Search<'a, T> {
     tree: &'a T,
     root: &'a RootItem,
     matcher: &'a Matcher,
-    cancelled: &'a dyn Fn() -> bool,
+    pulse: &'a dyn Pulse,
+    windows: Windows,
+    progress: Progress,
+}
+
+/// Bytes scanned so far, reported every `every` bytes.
+struct Progress {
+    every: u64,
+    scanned: Cell<u64>,
+    reported: Cell<u64>,
+    matches: Cell<Option<u64>>,
+}
+
+impl Progress {
+    fn advance(&self, bytes: u64, pulse: &dyn Pulse) {
+        let scanned = self.scanned.get() + bytes;
+        self.scanned.set(scanned);
+        if scanned - self.reported.get() >= self.every {
+            self.reported.set(scanned);
+            let matches = self.matches.get();
+            pulse.report(Scanned {
+                bytes: scanned,
+                matches,
+            });
+        }
+    }
 }
 
 /// Called per match with its span; may stop the scan or fail.
 type Visit<'v> = dyn FnMut(u64, u64) -> Result<ControlFlow<()>, SearchError> + 'v;
 
-impl<T: TreeIndex> Search<'_, T> {
+impl<'a, T: TreeIndex> Search<'a, T> {
+    fn new(
+        tree: &'a T,
+        root: &'a RootItem,
+        matcher: &'a Matcher,
+        pulse: &'a dyn Pulse,
+        windows: Windows,
+    ) -> Self {
+        let progress = Progress {
+            every: windows.report_every.max(1),
+            scanned: Cell::new(0),
+            reported: Cell::new(0),
+            matches: Cell::new(None),
+        };
+        Self {
+            tree,
+            root,
+            matcher,
+            pulse,
+            windows,
+            progress,
+        }
+    }
+
     /// The match at `start..end` as a hit, if its kind passes the scope.
     fn accepted(&self, start: u64, end: u64) -> Result<Option<Hit>, SearchError> {
         let (rows, kind) = locate(self.tree, self.root, start)?;
@@ -211,24 +307,25 @@ impl<T: TreeIndex> Search<'_, T> {
     fn visit(
         &self,
         from: u64,
-        windows: Windows,
+        overlapping: bool,
         visit: &mut Visit<'_>,
     ) -> Result<bool, SearchError> {
         let read = |range| self.tree.bytes(range);
-        scan(
-            &read,
-            &self.matcher.re,
-            from,
-            windows,
-            self.cancelled,
-            visit,
-        )
+        let windows = Windows {
+            overlapping,
+            ..self.windows
+        };
+        let on_window = &mut |bytes| {
+            self.progress.advance(bytes, self.pulse);
+            !self.pulse.cancelled()
+        };
+        scan(&read, &self.matcher.re, from, windows, on_window, visit)
     }
 
     /// The first accepted match starting in `from..until`.
     fn first(&self, from: u64, until: u64) -> Result<Option<Hit>, SearchError> {
         let mut found = None;
-        self.visit(from, Windows::default(), &mut |start, end| {
+        self.visit(from, false, &mut |start, end| {
             if start >= until {
                 return Ok(ControlFlow::Break(()));
             }
@@ -244,11 +341,7 @@ impl<T: TreeIndex> Search<'_, T> {
     /// The last accepted match starting in `from..until` (overlapping matches included).
     fn last(&self, from: u64, until: u64) -> Result<Option<Hit>, SearchError> {
         let mut last = None;
-        let windows = Windows {
-            overlapping: true,
-            ..Windows::default()
-        };
-        self.visit(from, windows, &mut |start, end| {
+        self.visit(from, true, &mut |start, end| {
             if start >= until {
                 return Ok(ControlFlow::Break(()));
             }
@@ -261,11 +354,13 @@ impl<T: TreeIndex> Search<'_, T> {
 
 /// Scanner window geometry.
 #[derive(Debug, Clone, Copy)]
-struct Windows {
-    size: usize,
-    overlap: usize,
+pub(crate) struct Windows {
+    pub(crate) size: usize,
+    pub(crate) overlap: usize,
     /// Resume one byte after each match start instead of after its end.
-    overlapping: bool,
+    pub(crate) overlapping: bool,
+    /// Bytes scanned between two progress reports.
+    pub(crate) report_every: u64,
 }
 
 impl Default for Windows {
@@ -274,6 +369,7 @@ impl Default for Windows {
             size: WINDOW,
             overlap: OVERLAP,
             overlapping: false,
+            report_every: REPORT_EVERY,
         }
     }
 }
@@ -285,17 +381,19 @@ const CONTEXT: u64 = 4;
 type Read<'r> = dyn Fn(Range<u64>) -> Result<Cow<'r, [u8]>, IndexError> + 'r;
 
 /// Visits matches starting at or after `from`, reading window by window; `false` when cancelled.
+///
+/// `on_window` hears the bytes scanned since its last call and says whether to go on.
 fn scan(
     read: &Read<'_>,
     re: &Regex,
     from: u64,
     windows: Windows,
-    cancelled: &dyn Fn() -> bool,
+    on_window: &mut dyn FnMut(u64) -> bool,
     visit: &mut Visit<'_>,
 ) -> Result<bool, SearchError> {
-    let (mut start, span) = (from, (windows.size + windows.overlap) as u64);
+    let (mut start, span, mut scanned) = (from, (windows.size + windows.overlap) as u64, 0);
     loop {
-        if cancelled() {
+        if !on_window(scanned) {
             return Ok(false);
         }
         let base = start.saturating_sub(CONTEXT);
@@ -315,7 +413,10 @@ fn scan(
         match window.matches(re, windows.overlapping, visit)? {
             ControlFlow::Break(()) => return Ok(true),
             ControlFlow::Continue(_) if last => return Ok(true),
-            ControlFlow::Continue(resume) => start = resume.max(limit),
+            ControlFlow::Continue(resume) => {
+                scanned = resume.max(limit) - start;
+                start += scanned;
+            }
         }
     }
 }
@@ -366,6 +467,7 @@ fn scan_offsets(bytes: &[u8], re: &Regex, size: usize, overlap: usize) -> Vec<u6
         size,
         overlap,
         overlapping: false,
+        report_every: u64::MAX,
     };
     let read = |r: Range<u64>| {
         let clamp = |x: u64| to_usize(x).min(bytes.len());
@@ -375,7 +477,7 @@ fn scan_offsets(bytes: &[u8], re: &Regex, size: usize, overlap: usize) -> Vec<u6
         offsets.push(start);
         Ok(ControlFlow::Continue(()))
     };
-    let finished = scan(&read, re, 0, windows, &|| false, visit);
+    let finished = scan(&read, re, 0, windows, &mut |_| true, visit);
     assert!(matches!(finished, Ok(true)));
     offsets
 }

@@ -333,3 +333,60 @@ proptest! {
         prop_assert_eq!(scan_offsets(text.as_bytes(), &re, size, 4), whole);
     }
 }
+
+/// Records progress reports; never cancels.
+struct Recorder(std::cell::RefCell<Vec<Scanned>>);
+
+impl Pulse for Recorder {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn report(&self, scanned: Scanned) {
+        self.0.borrow_mut().push(scanned);
+    }
+}
+
+#[test]
+fn long_scans_report_progress() {
+    let items: Vec<String> = (0..2000).map(|i| format!("a{i}")).collect();
+    let d = doc(&serde_json::json!(items));
+    let windows = Windows {
+        size: 256,
+        overlap: 16,
+        overlapping: false,
+        report_every: 1024,
+    };
+    let rec = Recorder(std::cell::RefCell::new(Vec::new()));
+    let m = literal("a", Scope::Both);
+    assert_eq!(
+        count_in(&d.tree, &d.root, &m, &rec, windows).unwrap(),
+        Some(2000)
+    );
+    let reports = rec.0.take();
+    assert!(
+        reports.len() + 1 >= d.text.len() / 1024,
+        "{} reports",
+        reports.len()
+    );
+    assert!(
+        reports
+            .windows(2)
+            .all(|w| w[0].bytes < w[1].bytes && w[0].matches <= w[1].matches)
+    );
+    assert!(reports.iter().all(|r| r.matches.is_some()));
+    let miss = literal("zzz", Scope::Both);
+    let found = find_in(
+        &d.tree,
+        &d.root,
+        &miss,
+        None,
+        Direction::Forward,
+        &rec,
+        windows,
+    )
+    .unwrap();
+    assert_eq!(found, None);
+    let reports = rec.0.take();
+    assert!(!reports.is_empty() && reports.iter().all(|r| r.matches.is_none()));
+}

@@ -12,9 +12,11 @@ use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::{LastFind, Model, picker};
 use crate::index::children::Child;
 use crate::schema::{Seg, collect, render};
-use crate::search::{Direction, Hit, Matcher, Query, Scope, SearchError, count, find};
+use crate::search::{
+    Direction, Hit, Matcher, Pulse, Query, Scanned, Scope, SearchError, count, find,
+};
 use crate::tree::{LINES_ROOT, TreeIndex};
-use crate::ui::status::grouped;
+use crate::ui::status::{grouped, human_bytes};
 use crate::view::jump::reveal;
 use crate::view::resolve::{Label, RootItem, RowKind, chain};
 
@@ -45,6 +47,8 @@ pub enum JobResult {
     /// `None` when cancelled.
     Schema(Option<Entries>),
     Failed(String),
+    /// Progress of a long scan; the final result follows.
+    Scanning(Scanned),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,13 +68,13 @@ pub struct SearchState {
 }
 
 /// Runs one job to completion (or cancellation).
-pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, cancelled: &dyn Fn() -> bool) -> Outcome {
+pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome {
     let result = match (job.work, &job.matcher) {
         (Work::Find(direction), Some(m)) => {
-            find(tree, &job.root, m, job.from, direction, cancelled).map(JobResult::Found)
+            find(tree, &job.root, m, job.from, direction, pulse).map(JobResult::Found)
         }
-        (Work::Count, Some(m)) => count(tree, &job.root, m, cancelled).map(JobResult::Counted),
-        (Work::Schema, _) => collect(tree, &job.root, cancelled)
+        (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
+        (Work::Schema, _) => collect(tree, &job.root, &|| pulse.cancelled())
             .map(|paths| JobResult::Schema(paths.map(entries)))
             .map_err(SearchError::from),
         (Work::Find(_) | Work::Count, None) => {
@@ -94,6 +98,29 @@ fn entries(paths: Vec<Vec<Seg>>) -> Entries {
     )
 }
 
+/// The worker's pulse: a newer generation cancels, and progress goes out as interim outcomes.
+struct WorkerPulse<'a> {
+    generation: &'a AtomicU64,
+    job: u64,
+    notify: &'a dyn Fn(Outcome),
+}
+
+impl Pulse for WorkerPulse<'_> {
+    fn cancelled(&self) -> bool {
+        self.generation.load(Ordering::Relaxed) != self.job
+    }
+
+    fn report(&self, scanned: Scanned) {
+        if !self.cancelled() {
+            let result = JobResult::Scanning(scanned);
+            (self.notify)(Outcome {
+                generation: self.job,
+                result,
+            });
+        }
+    }
+}
+
 /// A thread that runs jobs of the current generation and reports through `notify`.
 pub fn spawn_worker<T: TreeIndex + Send + Sync + 'static>(
     tree: Arc<T>,
@@ -103,12 +130,17 @@ pub fn spawn_worker<T: TreeIndex + Send + Sync + 'static>(
     let (tx, rx) = mpsc::channel::<Job>();
     thread::spawn(move || {
         for job in rx {
-            let current = || generation.load(Ordering::Relaxed) == job.generation;
-            if !current() {
+            let job_generation = job.generation;
+            let pulse = WorkerPulse {
+                generation: &generation,
+                job: job_generation,
+                notify: &notify,
+            };
+            if pulse.cancelled() {
                 continue;
             }
-            let outcome = run_job(&*tree, &job, &|| !current());
-            if current() {
+            let outcome = run_job(&*tree, &job, &pulse);
+            if !pulse.cancelled() {
                 notify(outcome);
             }
         }
@@ -294,6 +326,16 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         JobResult::Counted(None) | JobResult::Schema(None) => {}
         JobResult::Schema(Some(entries)) => picker::receive(model, entries),
         JobResult::Failed(message) => note(model, message),
+        JobResult::Scanning(scanned) => note(model, scanning(scanned)),
+    }
+}
+
+/// `searching… (1.2 GB scanned)`, or matches so far while counting.
+fn scanning(scanned: Scanned) -> String {
+    let bytes = human_bytes(scanned.bytes);
+    match scanned.matches {
+        Some(n) => format!("{} matches so far… ({bytes} scanned)", grouped(n)),
+        None => format!("searching… ({bytes} scanned)"),
     }
 }
 
@@ -545,5 +587,53 @@ mod tests {
             }
         );
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn scan_progress_is_noted_until_the_result_arrives() {
+        let mut model = model();
+        let generation = model.generation.load(Ordering::Relaxed);
+        update(&mut model, Msg::OpenPrompt(PromptKind::Search));
+        let scanning = |matches| Outcome {
+            generation,
+            result: JobResult::Scanning(Scanned {
+                bytes: 67_100_000,
+                matches,
+            }),
+        };
+        apply(&mut model, scanning(Some(1234)));
+        assert_eq!(
+            note(&model).as_deref(),
+            Some("1,234 matches so far… (67.1 MB scanned)")
+        );
+        apply(&mut model, scanning(None));
+        assert_eq!(
+            note(&model).as_deref(),
+            Some("searching… (67.1 MB scanned)")
+        );
+    }
+
+    #[test]
+    fn the_worker_pulse_reports_only_for_the_current_generation() {
+        let (generation, sent) = (AtomicU64::new(7), std::cell::RefCell::new(Vec::new()));
+        let notify = |outcome: Outcome| sent.borrow_mut().push(outcome);
+        let pulse = WorkerPulse {
+            generation: &generation,
+            job: 7,
+            notify: &notify,
+        };
+        let scanned = Scanned {
+            bytes: 1,
+            matches: None,
+        };
+        pulse.report(scanned);
+        generation.store(8, Ordering::Relaxed);
+        pulse.report(scanned);
+        assert!(pulse.cancelled());
+        let expected = Outcome {
+            generation: 7,
+            result: JobResult::Scanning(scanned),
+        };
+        assert_eq!(sent.take(), vec![expected]);
     }
 }
