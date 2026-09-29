@@ -9,7 +9,11 @@ It targets macOS on Apple silicon.
 - **Hierarchical browsing.** Keys, indices and inline values show in a tree. Large arrays are
   split into buckets of 1024. A preview pane pretty-prints the selected value.
 - **Search and jump.** Incremental substring or regex search over keys and/or values, jq-style
-  path jumps (`.users[42].name`), and a fuzzy picker over the document's key paths.
+  path jumps (`.users[42].name`), and a fuzzy picker over the document's key paths. A jump
+  history, marks, and the last position per file.
+- **Table and filter.** Any array of objects as a sortable table; filter records with
+  expressions like `.age > 30 and has(.email)`.
+- **Follow.** `--follow` tails a growing NDJSON log.
 - **Robust.** A strict validating parser. Malformed NDJSON lines are isolated and shown inline.
   Errors show the line and column in context. No `unsafe` code.
 
@@ -27,6 +31,7 @@ cargo build --release   # binary: target/release/dv
 ```sh
 dv data.json                   # a file
 dv logs.ndjson --mode stream   # force streaming mode
+dv --follow app.log.ndjson     # keep indexing lines as they are appended
 curl -s https://… | dv         # stdin (or pass `-`)
 dv --format yaml config.txt    # override format detection
 dv --config ./my-config.toml big.json
@@ -37,6 +42,7 @@ dv --config ./my-config.toml big.json
 | `--format json\|ndjson\|yaml` | Skip format detection (by extension, then by content) |
 | `--mode auto\|memory\|stream` | `auto` streams files larger than min(256 MB, 25% of RAM) |
 | `--config PATH` | Config file (default `$XDG_CONFIG_HOME/dv/config.toml` or `~/.config/dv/config.toml`) |
+| `--follow` | Follow a growing NDJSON file (implies streaming; not for stdin) |
 
 **Streaming mode** keeps an on-disk index in private temp files, which are unlinked the moment
 they're created. It opens immediately, shows `n…` counts for containers still being indexed,
@@ -79,6 +85,58 @@ on narrow terminals (`? more`). `?` opens an overlay listing every key.
 
 In streaming mode the picker covers the container at the cursor, and its title says which one.
 Collecting paths stops after 2M values ("partial list").
+
+### History and marks
+
+| Key | Action |
+|---|---|
+| `Ctrl-o` / `Tab` | Back / forward through jumps (`:`, search hits, the picker, `gg`/`G`, marks, opening from the table or a filter) |
+| `m{a-z}` / `'{a-z}` | Set a mark / go to it (for this session) |
+
+On quit, the cursor is remembered per file (by path, size and modification time) in
+`$XDG_STATE_HOME/dv/positions.tsv` (default `~/.local/state/dv/positions.tsv`, the last 500
+files) and restored the next time the unchanged file opens.
+
+### Table
+
+`t` shows the array at the cursor (or the cursor's array) as a table when its elements are
+objects. Columns are the keys of the first 1,000 rows. Missing keys show `—`, and nested
+values show their size.
+
+| Key | Action |
+|---|---|
+| `j` `k`, `gg` `G`, `Ctrl-d` `Ctrl-u`, `PgDn` `PgUp` | Rows |
+| `h` `l` | Columns (scrolls sideways) |
+| `s` | Sort by the column: ascending ▲, descending ▼, off. Numbers, then strings, booleans, null and nested values; missing last. Up to 1M rows, on a background thread |
+| `x` / `X` | Hide the column / show all |
+| `Enter` | Open the row in the tree |
+| `t` / `Esc` / `q` | Close |
+
+### Filter
+
+`f` filters the array (or object) at the cursor: only the matching elements stay listed, with
+their original indices, and everything else (browsing, search, the table) works on that view.
+Matches arrive while the scan runs (`12 of 400,000 records (scanning 40%)`), and at most 1M
+are kept. `o` opens the match under the cursor in the full tree, `Esc` clears the filter, and
+`f` edits it.
+
+```text
+.status == "error"                     # compare a member
+.age >= 30 and not has(.deleted)       # and, or, not, parentheses
+.user.name ~ "^A"                      # regex on strings
+."first name" != null or .tags[0] == "x"
+```
+
+Paths start at each element (`.` is the element itself). Comparisons are type-strict:
+numbers with numbers, strings with strings, and `==`/`!=` also compare `true`, `false` and
+`null`. A missing path makes every comparison false.
+
+### Follow
+
+`dv --follow FILE`, or `F` on an NDJSON file, keeps indexing lines as they're appended
+(checked every 250 ms). With the cursor on the last record, it moves to each new one. The
+status bar shows `following`. `F` again stops following. If the file shrinks, following
+stops with a note.
 
 ### Preview and copying
 
