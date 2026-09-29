@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Gauge, Paragraph};
 use crate::app::search::{Outcome, spawn_worker};
 use crate::app::{Effect, Model, Msg, input_msg, show_banner, update, view};
 use crate::clipboard;
+use crate::config::Config;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
@@ -46,6 +47,8 @@ pub struct App<T> {
     pub quit: bool,
     /// Colors from the config (FR-21).
     pub theme: Theme,
+    /// Whether the document view shows the footer rows (`ui.footer`).
+    pub footer: bool,
     /// A config problem, shown once the document opens.
     pub warning: Option<String>,
 }
@@ -65,15 +68,18 @@ impl<T: TreeIndex> App<T> {
             events: None,
             quit: false,
             theme: Theme::default(),
+            footer: true,
             warning: None,
         }
     }
 
-    /// Uses the config's theme and reports its problem, if any, in the status bar.
+    /// Uses the config's theme and footer setting, and reports its problem, if any, in the
+    /// status bar.
     #[must_use]
-    pub fn with_config(self, theme: Theme, warning: Option<String>) -> Self {
+    pub fn with_config(self, config: &Config, warning: Option<String>) -> Self {
         Self {
-            theme,
+            theme: config.theme,
+            footer: config.footer,
             warning,
             ..self
         }
@@ -118,6 +124,8 @@ fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T
     if let Screen::Ready(model) = &mut app.screen {
         model.theme = app.theme;
         model.status = app.warning.take();
+        model.footer = app.footer;
+        update(model, Msg::Resize(app.size.0, app.size.1));
     }
     if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
         attach_worker(model, events);

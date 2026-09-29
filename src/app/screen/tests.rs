@@ -6,6 +6,13 @@ use super::*;
 use crate::source::MemSource;
 use crate::tree::MemTree;
 
+fn with_theme(theme: Theme) -> crate::config::Config {
+    crate::config::Config {
+        theme,
+        ..crate::config::Config::default()
+    }
+}
+
 fn app() -> App<MemTree> {
     App::new(Arc::new(AtomicBool::new(false)))
 }
@@ -184,7 +191,10 @@ fn the_config_theme_and_warning_reach_the_document_view() {
         key: Style::new().fg(Color::Red),
         ..Theme::default()
     };
-    let mut app = app().with_config(theme, Some("config: unknown theme \"x\"".to_owned()));
+    let mut app = app().with_config(
+        &with_theme(theme),
+        Some("config: unknown theme \"x\"".to_owned()),
+    );
     update_app(&mut app, loaded(br#"{"a": 1}"#));
     let Screen::Ready(model) = &app.screen else {
         panic!("not ready")
@@ -248,7 +258,7 @@ fn every_colored_cell_comes_from_the_theme() {
         let stray: Vec<Color> = colors(app).into_iter().filter(|c| !from_theme(c)).collect();
         assert!(stray.is_empty(), "{when}: {stray:?}");
     };
-    let mut shown = self::app().with_config(theme, Some("config: warning".to_owned()));
+    let mut shown = self::app().with_config(&with_theme(theme), Some("config: warning".to_owned()));
     let progress = Progress {
         phase: Phase::Indexing,
         done: 1,
@@ -282,8 +292,25 @@ fn every_colored_cell_comes_from_the_theme() {
         corners(&shown).iter().all(|c| *c == Color::Rgb(7, 7, 7)),
         "borders use the badge color"
     );
-    let mut failed = self::app().with_config(theme, None);
+    let mut failed = self::app().with_config(&with_theme(theme), None);
     let failure = LoadFailure::plain(&"broken");
     update_app(&mut failed, AppEvent::Load(LoadEvent::Loaded(Err(failure))));
     check(&failed, "error screen");
+}
+
+#[test]
+fn the_footer_can_be_turned_off_in_the_config() {
+    let config = crate::config::Config {
+        footer: false,
+        ..crate::config::Config::default()
+    };
+    let mut app = app().with_config(&config, None);
+    update_app(&mut app, AppEvent::Input(Event::Resize(40, 5)));
+    update_app(&mut app, loaded(br#"{"a": [1, 2, 3]}"#));
+    let text = screen_text(&app);
+    assert!(!text.contains('─') && !text.contains("j/k move"), "{text}");
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready")
+    };
+    assert_eq!(model.height, 4, "only the status row is taken");
 }

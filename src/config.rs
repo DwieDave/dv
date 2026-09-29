@@ -10,13 +10,26 @@ use toml::{Table, Value};
 use crate::ui::theme::Theme;
 
 /// Settings from the config file; `None` keeps the built-in value.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub theme: Theme,
     /// Files larger than this open in streaming mode (`mode.threshold`).
     pub threshold: Option<u64>,
     /// Memory for streaming mode's caches and buffers (`mode.memory_budget`).
     pub memory_budget: Option<u64>,
+    /// The rule and key-hint rows under the tree (`ui.footer`).
+    pub footer: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            threshold: None,
+            memory_budget: None,
+            footer: true,
+        }
+    }
 }
 
 /// Why a config file was rejected; always one line, for the status bar.
@@ -36,6 +49,8 @@ pub enum ConfigError {
     NotTable(String),
     #[error("{0}: expected a size such as 256MB")]
     BadSize(String),
+    #[error("{0}: expected true or false")]
+    NotBool(String),
 }
 
 /// `$XDG_CONFIG_HOME/dv/config.toml`, else `~/.config/dv/config.toml`.
@@ -74,10 +89,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         Some(_) => return Err(ConfigError::NotText("theme".to_owned())),
     };
     let mode = table.get("mode").and_then(Value::as_table);
+    let ui = table.get("ui").and_then(Value::as_table);
     Ok(Config {
         theme: theme_named(table.get("themes"), name)?,
         threshold: size(mode, "threshold")?,
         memory_budget: size(mode, "memory_budget")?,
+        footer: flag(ui, "footer", true)?,
     })
 }
 
@@ -152,6 +169,15 @@ fn size(mode: Option<&Table>, key: &str) -> Result<Option<u64>, ConfigError> {
         Some(Value::Integer(n)) => u64::try_from(*n).map(Some).map_err(|_| bad()),
         Some(Value::String(text)) => parse_size(text).map(Some).ok_or_else(bad),
         Some(_) => Err(bad()),
+    }
+}
+
+/// `ui.<key>` as a boolean, `default` when unset.
+fn flag(ui: Option<&Table>, key: &str, default: bool) -> Result<bool, ConfigError> {
+    match ui.and_then(|ui| ui.get(key)) {
+        None => Ok(default),
+        Some(Value::Boolean(on)) => Ok(*on),
+        Some(_) => Err(ConfigError::NotBool(format!("ui.{key}"))),
     }
 }
 
@@ -303,6 +329,14 @@ mod tests {
             (config.threshold, config.memory_budget),
             (Some(100_000_000), Some(1_000_000_000))
         );
+    }
+
+    #[test]
+    fn the_footer_is_on_unless_turned_off() {
+        assert!(parse("").unwrap().footer);
+        assert!(!parse("[ui]\nfooter = false").unwrap().footer);
+        let err = parse("[ui]\nfooter = 1").unwrap_err().to_string();
+        assert!(err.contains("ui.footer"), "{err}");
     }
 
     #[test]

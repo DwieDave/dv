@@ -24,7 +24,6 @@ use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
 use crate::source::file::FileSource;
 use crate::stream_tree::StreamTree;
 use crate::tree::TreeIndex;
-use crate::ui::theme::Theme;
 
 /// Input format override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -116,7 +115,7 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
         }
         return index_only_input(input, budget).map(Some);
     }
-    tui(loader(input, budget), config.theme, warning).map(|()| None)
+    tui(loader(input, budget), &config, warning).map(|()| None)
 }
 
 /// The UI's loader thread body for `input`.
@@ -253,7 +252,7 @@ fn index_only(
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(loader: Loader, theme: Theme, warning: Option<String>) -> Result<(), CliError> {
+fn tui(loader: Loader, config: &Config, warning: Option<String>) -> Result<(), CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
@@ -263,7 +262,7 @@ fn tui(loader: Loader, theme: Theme, warning: Option<String>) -> Result<(), CliE
     });
     let mut app = App::new(cancel)
         .with_events(tx.clone())
-        .with_config(theme, warning);
+        .with_config(config, warning);
     thread::spawn(move || forward_input(&tx));
     let mut guard = TerminalGuard::enter()?;
     Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
