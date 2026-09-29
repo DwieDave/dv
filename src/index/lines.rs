@@ -1,14 +1,17 @@
 //! The NDJSON line index spilled to temporary files (streaming mode, FR-5, FR-23).
 
-use std::cmp::Ordering;
 use std::io;
 
 use tempfile::tempfile;
 
 use crate::error::ParseErrorKind;
-use crate::index::store::CHECKPOINT_EVERY;
+use crate::index::children::{Child, skip_value};
+use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
 use crate::index::u64file::U64File;
-use crate::source::SourceError;
+use crate::index::window::{OffsetStore, ReadWindow, trusted};
+use crate::index::{IndexError, to_usize};
+use crate::json::lex::{Kind, skip_ws};
+use crate::source::{Source, SourceError};
 
 /// A record that failed to parse; enumeration skips from `start` to `resume`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,25 +108,35 @@ impl LineStore {
         Ok(self.checkpoints.read(k..k + 1)?.first().copied())
     }
 
-    /// The bad record starting at `start`, found by binary search.
+    /// The bad record starting at `start`.
     ///
     /// # Errors
     /// Read failures.
     pub fn bad_at(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
+        Ok(self.bad_from(start)?.filter(|line| line.start == start))
+    }
+
+    /// The first bad record starting at or after `start`, found by binary search.
+    ///
+    /// # Errors
+    /// Read failures.
+    pub fn bad_from(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
         let (mut lo, mut hi) = (0, self.bad.len() / 3);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let line = self.bad_line(mid)?;
-            match line.map(|l| l.start.cmp(&start)) {
-                Some(Ordering::Equal) => return Ok(line),
-                Some(Ordering::Less) => lo = mid + 1,
-                _ => hi = mid,
+            if self.bad_line(mid)?.is_some_and(|l| l.start < start) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        Ok(None)
+        self.bad_line(lo)
     }
 
     fn bad_line(&self, i: u64) -> Result<Option<BadLine>, SourceError> {
+        if 3 * i >= self.bad.len() {
+            return Ok(None);
+        }
         let fields = self.bad.read(3 * i..3 * i + 3)?;
         Ok(match fields[..] {
             [start, resume, code] => ParseErrorKind::from_code(code).map(|kind| BadLine {
@@ -134,6 +147,125 @@ impl LineStore {
             _ => None,
         })
     }
+}
+
+/// NDJSON records read window by window; offsets are absolute.
+pub struct StreamRecords<'a, S, R> {
+    win: ReadWindow<'a, R>,
+    store: &'a S,
+    lines: &'a LineStore,
+    /// The first bad record not passed yet.
+    next_bad: Option<BadLine>,
+    pos: u64,
+    index: u64,
+    done: bool,
+}
+
+impl<S: NodeStore, R: Source> Iterator for StreamRecords<'_, S, R> {
+    type Item = Result<Child, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let step = self.step();
+        match &step {
+            Ok(Some(_)) => self.index += 1,
+            Ok(None) | Err(_) => self.done = true,
+        }
+        step.transpose()
+    }
+}
+
+impl<S: NodeStore, R: Source> StreamRecords<'_, S, R> {
+    /// The next record, re-reading and growing the window until it is trustworthy.
+    fn step(&mut self) -> Result<Option<Child>, IndexError> {
+        loop {
+            self.win.cover(self.pos)?;
+            let rel = skip_ws(&self.win.bytes, to_usize(self.pos - self.win.base));
+            self.pos = self.win.base + rel as u64;
+            if rel >= self.win.bytes.len() {
+                if self.win.at_eof() {
+                    return Ok(None);
+                }
+                continue;
+            }
+            if let Some(bad) = self.bad_here()? {
+                return Ok(Some(self.child(Kind::Invalid, bad.resume)));
+            }
+            let store = OffsetStore {
+                inner: self.store,
+                base: self.win.base,
+            };
+            match skip_value(&self.win.bytes, &store, rel) {
+                Ok((kind, end)) if trusted(&self.win, self.store, kind, rel as u64, end)? => {
+                    return Ok(Some(self.child(kind, self.win.base + end)));
+                }
+                Err(IndexError::Parse(e)) if e.kind != ParseErrorKind::UnexpectedEof => {
+                    return Err(e.into());
+                }
+                Err(IndexError::Source(e)) => return Err(e.into()),
+                _ if self.win.at_eof() => return Ok(None),
+                _ => self.win.grow(self.pos)?,
+            }
+        }
+    }
+
+    /// The bad record starting at the current position, if any.
+    fn bad_here(&mut self) -> Result<Option<BadLine>, IndexError> {
+        if self.next_bad.is_some_and(|b| b.start < self.pos) {
+            self.next_bad = self.lines.bad_from(self.pos)?;
+        }
+        Ok(self.next_bad.filter(|b| b.start == self.pos))
+    }
+
+    /// The record at the current position, ending at `end`; moves past it.
+    fn child(&mut self, kind: Kind, end: u64) -> Child {
+        let value = self.pos;
+        self.pos = end;
+        Child {
+            index: self.index,
+            key: None,
+            value,
+            kind,
+            end,
+        }
+    }
+}
+
+/// Records of an NDJSON document read through windows of at least `window` bytes,
+/// positioned at record `k`.
+///
+/// # Errors
+/// Storage failures or lexing errors while skipping.
+pub fn stream_records<'a, S: NodeStore, R: Source>(
+    source: &'a R,
+    store: &'a S,
+    lines: &'a LineStore,
+    k: u64,
+    window: usize,
+) -> Result<StreamRecords<'a, S, R>, IndexError> {
+    let cp = (k / CHECKPOINT_EVERY).min(lines.checkpoints().saturating_sub(1));
+    let (index, pos) = lines
+        .checkpoint(cp)?
+        .map_or((0, 0), |offset| (cp * CHECKPOINT_EVERY, offset));
+    let mut it = StreamRecords {
+        win: ReadWindow::new(source, window),
+        store,
+        lines,
+        next_bad: lines.bad_from(pos)?,
+        pos,
+        index,
+        done: false,
+    };
+    for _ in index..k {
+        match it.next() {
+            Some(Err(err)) => return Err(err),
+            Some(Ok(_)) => {}
+            None => break,
+        }
+    }
+    Ok(it)
 }
 
 #[cfg(test)]

@@ -35,9 +35,66 @@ impl<S: NodeStore> NodeStore for OffsetStore<'_, S> {
 /// Bytes a window must still hold past `pos` before it is re-read.
 const SLACK: usize = 64;
 
+/// A re-readable window over a source: `bytes` starts at absolute offset `base`.
+pub struct ReadWindow<'a, R> {
+    source: &'a R,
+    pub base: u64,
+    pub bytes: Vec<u8>,
+    size: usize,
+}
+
+impl<'a, R: Source> ReadWindow<'a, R> {
+    /// An empty window that reads at least `size` bytes at a time.
+    pub fn new(source: &'a R, size: usize) -> Self {
+        Self {
+            source,
+            base: 0,
+            bytes: Vec::new(),
+            size: size.max(1),
+        }
+    }
+
+    /// Whether the window reaches the end of the source.
+    #[must_use]
+    pub fn at_eof(&self) -> bool {
+        self.base + self.bytes.len() as u64 >= self.source.len()
+    }
+
+    /// Makes sure the window holds `pos` with some slack (or reaches EOF).
+    ///
+    /// # Errors
+    /// Read failures.
+    pub fn cover(&mut self, pos: u64) -> Result<(), IndexError> {
+        let end = self.base + self.bytes.len() as u64;
+        let slack_ok = end.saturating_sub(pos) >= SLACK as u64 || self.at_eof();
+        if pos < self.base || pos >= end || !slack_ok {
+            self.load(pos)?;
+        }
+        Ok(())
+    }
+
+    /// Re-reads from `pos` with twice the size.
+    ///
+    /// # Errors
+    /// Read failures.
+    pub fn grow(&mut self, pos: u64) -> Result<(), IndexError> {
+        self.size = self.size.saturating_mul(2);
+        self.load(pos)
+    }
+
+    fn load(&mut self, pos: u64) -> Result<(), IndexError> {
+        self.base = pos;
+        self.bytes = self
+            .source
+            .read(pos..pos.saturating_add(self.size as u64))?
+            .into_owned();
+        Ok(())
+    }
+}
+
 /// Children of a container read window by window; offsets are absolute.
 pub struct StreamChildren<'a, S, R> {
-    source: &'a R,
+    win: ReadWindow<'a, R>,
     store: &'a S,
     close: u8,
     /// Absolute position of the next child, or of the separator after `pending` values.
@@ -48,9 +105,6 @@ pub struct StreamChildren<'a, S, R> {
     separator: bool,
     /// The closing bracket was reached (not just the end of the source).
     complete: bool,
-    base: u64,
-    window: Vec<u8>,
-    size: usize,
 }
 
 impl<S: NodeStore, R: Source> Iterator for StreamChildren<'_, S, R> {
@@ -79,53 +133,51 @@ impl<S: NodeStore, R: Source> StreamChildren<'_, S, R> {
     /// The next child, re-reading and growing the window until the result is trustworthy.
     fn step(&mut self) -> Result<Option<Child>, IndexError> {
         loop {
-            self.cover(self.pos)?;
+            self.win.cover(self.pos)?;
             if self.separator && !self.skip_separator() {
-                self.grow()?;
+                self.win.grow(self.pos)?;
                 continue;
             }
-            let rel = to_usize(self.pos - self.base);
+            let rel = to_usize(self.pos - self.win.base);
             let store = OffsetStore {
                 inner: self.store,
-                base: self.base,
+                base: self.win.base,
             };
-            match lex_child(&self.window, &store, rel, self.close, self.index)? {
+            match lex_child(&self.win.bytes, &store, rel, self.close, self.index)? {
                 Lexed::End => {
                     self.complete = true;
                     return Ok(None);
                 }
-                Lexed::NeedMore if self.at_eof() => return Ok(None),
+                Lexed::NeedMore if self.win.at_eof() => return Ok(None),
                 Lexed::Child(child) if self.trusted(&child)? => {
                     return Ok(Some(self.accept(child)));
                 }
-                Lexed::NeedMore | Lexed::Child(_) => self.grow()?,
+                Lexed::NeedMore | Lexed::Child(_) => self.win.grow(self.pos)?,
             }
         }
     }
 
     /// Consumes the whitespace and comma after the previous child; false if the window ran out.
     fn skip_separator(&mut self) -> bool {
-        let rel = to_usize(self.pos - self.base);
-        match after_value(&self.window, rel) {
+        let rel = to_usize(self.pos - self.win.base);
+        match after_value(&self.win.bytes, rel) {
             Some(next) => {
-                self.pos = self.base + next as u64;
+                self.pos = self.win.base + next as u64;
                 self.separator = false;
                 true
             }
-            None => self.at_eof(),
+            None => self.win.at_eof(),
         }
     }
 
     /// Big containers are trusted from the store; anything lexed must end inside the window.
     fn trusted(&self, child: &Child) -> Result<bool, IndexError> {
-        let big = matches!(child.kind, Kind::Object | Kind::Array)
-            && self.store.node_at(child.value + self.base)?.is_some();
-        Ok(big || child.end < self.window.len() as u64 || self.at_eof())
+        trusted(&self.win, self.store, child.kind, child.value, child.end)
     }
 
     /// Converts a window-relative child to absolute offsets and moves past it.
     fn accept(&mut self, child: Child) -> Child {
-        let base = self.base;
+        let base = self.win.base;
         let child = Child {
             key: child.key.map(|k| k.start + base..k.end + base),
             value: child.value + base,
@@ -136,34 +188,23 @@ impl<S: NodeStore, R: Source> StreamChildren<'_, S, R> {
         self.separator = true;
         child
     }
+}
 
-    fn at_eof(&self) -> bool {
-        self.base + self.window.len() as u64 >= self.source.len()
-    }
-
-    /// Makes sure the window holds `pos` with some slack (or reaches EOF).
-    fn cover(&mut self, pos: u64) -> Result<(), IndexError> {
-        let end = self.base + self.window.len() as u64;
-        let slack_ok = end.saturating_sub(pos) >= SLACK as u64 || self.at_eof();
-        if pos < self.base || pos >= end || !slack_ok {
-            self.load(pos)?;
-        }
-        Ok(())
-    }
-
-    fn grow(&mut self) -> Result<(), IndexError> {
-        self.size = self.size.saturating_mul(2);
-        self.load(self.pos)
-    }
-
-    fn load(&mut self, pos: u64) -> Result<(), IndexError> {
-        self.base = pos;
-        self.window = self
-            .source
-            .read(pos..pos.saturating_add(self.size as u64))?
-            .into_owned();
-        Ok(())
-    }
+/// Whether a value lexed at window-relative `value..end` can be believed: big containers
+/// come from the store; anything else must end inside the window (or at EOF).
+///
+/// # Errors
+/// Store read failures.
+pub fn trusted<S: NodeStore, R: Source>(
+    win: &ReadWindow<'_, R>,
+    store: &S,
+    kind: Kind,
+    value: u64,
+    end: u64,
+) -> Result<bool, IndexError> {
+    let big =
+        matches!(kind, Kind::Object | Kind::Array) && store.node_at(value + win.base)?.is_some();
+    Ok(big || end < win.bytes.len() as u64 || win.at_eof())
 }
 
 /// Children of `node` read through windows of at least `window` bytes, positioned at child `k`.
@@ -183,20 +224,15 @@ pub fn stream_seek<'a, S: NodeStore, R: Source>(
         b']'
     };
     let (index, pos) = checkpoint_before(store, node.offset, k)?;
-    let size = window.max(1);
-    let (window, separator, base) = (Vec::new(), false, 0);
     let mut it = StreamChildren {
-        source,
+        win: ReadWindow::new(source, window),
         store,
         close,
         pos: pos as u64,
         index,
         done: false,
-        separator,
+        separator: false,
         complete: false,
-        base,
-        window,
-        size,
     };
     for _ in index..k {
         match it.next() {

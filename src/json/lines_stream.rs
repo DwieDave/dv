@@ -342,35 +342,7 @@ mod tests {
     use crate::index::store::{NodeStore, VecStoreBuilder};
     use crate::json::ndjson::parse_lines;
     use crate::source::MemSource;
-    use crate::test_support::{json_value, layout};
-
-    /// Records (some spread over lines), blank lines, then bytes inserted anywhere.
-    fn ndjson() -> impl Strategy<Value = Vec<u8>> {
-        let record = (
-            json_value(),
-            prop::sample::select(vec!["", " ", " \n", "\t\r"]),
-        );
-        let records = prop::collection::vec((record, any::<bool>()), 0..6);
-        let noise = prop::sample::select(b"\n\xff\xe2{}[]\",: 1e-tn\r".to_vec());
-        let inserts = prop::collection::vec((any::<prop::sample::Index>(), noise), 0..4);
-        (records, inserts, any::<bool>()).prop_map(|(records, inserts, final_newline)| {
-            let lines: Vec<String> = records
-                .iter()
-                .map(|((value, ws), blank)| {
-                    let (text, _) = layout(value, ws);
-                    if *blank { format!("{text}\n") } else { text }
-                })
-                .collect();
-            let mut bytes = lines.join("\n").into_bytes();
-            if final_newline {
-                bytes.push(b'\n');
-            }
-            for (at, byte) in inserts {
-                bytes.insert(at.index(bytes.len() + 1), byte);
-            }
-            bytes
-        })
-    }
+    use crate::test_support::ndjson;
 
     fn streamed(bytes: &[u8], initial: usize) -> StreamLines<VecStoreBuilder> {
         let limits = StreamLimits {
