@@ -26,12 +26,12 @@ fn fixture(name: &str) -> Option<PathBuf> {
 }
 
 fn loaded(names: &[&'static str]) -> Vec<(&'static str, Vec<u8>)> {
-    let load = |name: &'static str| match fixture(name).map(fs::read) {
-        Some(Ok(bytes)) => Some((name, bytes)),
-        _ => {
+    let load = |name: &'static str| {
+        let bytes = fixture(name).and_then(|path| fs::read(path).ok());
+        if bytes.is_none() {
             eprintln!("missing fixture {name}: run `just data`");
-            None
         }
+        bytes.map(|bytes| (name, bytes))
     };
     names.iter().filter_map(|&name| load(name)).collect()
 }
