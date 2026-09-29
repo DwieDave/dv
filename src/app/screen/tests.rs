@@ -64,9 +64,7 @@ fn a_loaded_tree_becomes_navigable() {
 #[test]
 fn failures_show_and_any_key_quits() {
     let mut app = app();
-    let failure = LoadFailure {
-        message: "unexpected end of input at 1:4".into(),
-    };
+    let failure = LoadFailure::plain(&"unexpected end of input at 1:4");
     update_app(&mut app, AppEvent::Load(LoadEvent::Loaded(Err(failure))));
     assert!(screen_text(&app).contains("unexpected end of input at 1:4"));
     update_app(&mut app, key('x'));

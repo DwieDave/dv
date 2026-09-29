@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::widgets::{Block, Gauge, Paragraph, Wrap};
+use ratatui::widgets::{Block, Gauge, Paragraph};
 
 use crate::app::{Model, Msg, input_msg, update, view};
 use crate::format::Format;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
+use crate::ui::error::error_lines;
 use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
 
@@ -79,11 +80,8 @@ fn ready_or_failed<T: TreeIndex>(
     format: Format,
     rows: u16,
 ) -> Screen<T> {
-    let model = result.and_then(|tree| {
-        Model::new(tree, format).map_err(|err| LoadFailure {
-            message: err.to_string(),
-        })
-    });
+    let model =
+        result.and_then(|tree| Model::new(tree, format).map_err(|err| LoadFailure::plain(&err)));
     match model {
         Ok(mut model) => {
             update(&mut model, Msg::Resize(rows));
@@ -126,13 +124,8 @@ pub fn view_app<T: TreeIndex>(app: &App<T>, frame: &mut Frame) {
             frame.render_widget(gauge(progress), centered(frame.area(), 3));
         }
         Screen::Failed(failure) => {
-            let text = format!("{}\n\npress any key to exit", failure.message);
-            frame.render_widget(
-                Paragraph::new(text)
-                    .style(Theme::default().error)
-                    .wrap(Wrap { trim: false }),
-                frame.area(),
-            );
+            let text = Paragraph::new(error_lines(failure, &Theme::default()));
+            frame.render_widget(text, frame.area());
         }
     }
 }

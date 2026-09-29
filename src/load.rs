@@ -8,8 +8,14 @@ use crate::error::{ParseError, ParseErrorKind};
 use crate::index::to_usize;
 use crate::json::parse::parse_with;
 use crate::position::Position;
+use crate::snippet::{Snippet, snippet};
 use crate::source::{MemSource, Source, SourceError};
 use crate::tree::MemTree;
+
+/// Lines of context shown on each side of a parse error.
+const SNIPPET_CONTEXT: usize = 2;
+/// Widest snippet line, in bytes.
+const SNIPPET_WIDTH: usize = 120;
 
 /// Bytes read between progress reports.
 pub const CHUNK: u64 = 8 << 20;
@@ -32,6 +38,19 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadFailure {
     pub message: String,
+    /// Source context around a parse error.
+    pub snippet: Option<Snippet>,
+}
+
+impl LoadFailure {
+    /// A failure with a message and no source context.
+    #[must_use]
+    pub fn plain(err: &impl std::fmt::Display) -> Self {
+        Self {
+            message: err.to_string(),
+            snippet: None,
+        }
+    }
 }
 
 /// What the loader reports.
@@ -73,10 +92,10 @@ fn read_all(
         let read = (&mut reader)
             .take(CHUNK)
             .read_to_end(&mut bytes)
-            .map_err(|e| failure(&e))?;
+            .map_err(|e| LoadFailure::plain(&e))?;
         let done = bytes.len() as u64;
         if done > max_len {
-            return Err(failure(&SourceError::TooLarge { max_len }));
+            return Err(LoadFailure::plain(&SourceError::TooLarge { max_len }));
         }
         sink(LoadEvent::Progress(Progress {
             phase: Phase::Reading,
@@ -115,16 +134,12 @@ fn index(
     }
 }
 
-fn failure(err: &impl std::fmt::Display) -> LoadFailure {
-    LoadFailure {
-        message: err.to_string(),
-    }
-}
-
 fn parse_failure(bytes: &[u8], err: ParseError) -> LoadFailure {
     let at = Position::locate(bytes, err.offset);
+    let snippet = Some(snippet(bytes, err.offset, SNIPPET_CONTEXT, SNIPPET_WIDTH));
     LoadFailure {
         message: format!("{} at {}:{}", err.kind, at.line, at.column),
+        snippet,
     }
 }
 
