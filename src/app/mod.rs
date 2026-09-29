@@ -75,6 +75,8 @@ pub struct Model<T> {
     pub banner: Option<String>,
     /// Show the rule and key-hint rows under the tree (KF-1, `[ui] footer`).
     pub footer: bool,
+    /// New lines of the file are being indexed as they arrive (FO-6).
+    pub following: bool,
     /// The help overlay's scroll offset, while it is open.
     pub help: Option<u16>,
     /// Where jumps came from, for `Ctrl-o` / `Tab` (HI-1).
@@ -114,6 +116,7 @@ impl<T: TreeIndex> Model<T> {
             note: None,
             banner: None,
             footer: true,
+            following: false,
             help: None,
             jumps: JumpList::default(),
             marks: Default::default(),
@@ -221,6 +224,8 @@ pub enum Msg {
     OpenPicker,
     /// The `?` overlay listing every key.
     OpenHelp,
+    /// `F`: start or stop following the file (FO-4).
+    ToggleFollow,
     /// Back or forward through the jump list.
     History(Step),
     /// `m{a-z}`: remember the cursor.
@@ -295,6 +300,8 @@ pub enum CopyWhat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Copy(String),
+    /// Start or stop following; only the app knows how (FO-4).
+    ToggleFollow,
 }
 
 /// Largest value copied to the clipboard.
@@ -407,6 +414,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Copy(what) => copy(model, what),
         Msg::OpenPicker => picker::open(model),
         Msg::OpenHelp => model.help = Some(0),
+        Msg::ToggleFollow => model.effects.push(Effect::ToggleFollow),
         Msg::Refresh => {
             if let Err(err) = model.state.refresh(&*model.tree) {
                 model.status = Some(err.to_string());
@@ -743,6 +751,7 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
         format: model.tree.format(),
         stats: model.tree.stats(),
         error: model.status.as_deref(),
+        following: model.following,
         note: model
             .note
             .as_deref()

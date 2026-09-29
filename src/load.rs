@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::document::Document;
@@ -256,21 +257,23 @@ pub fn load_stream(
     budget: StreamBudget,
 ) {
     let result = match format {
-        Format::Ndjson => stream_lines(file, sink, cancel, budget, false),
+        Format::Ndjson => stream_lines(file, sink, cancel, budget, None),
         Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
     };
     report(result, sink);
 }
 
 /// Streams an NDJSON `file` and keeps following it: appended lines are indexed as they arrive,
-/// until cancelled or the file shrinks (FO-2, FO-5).
+/// until cancelled or the file shrinks (FO-2, FO-5). Setting `stop` ends following and
+/// finishes the index normally (FO-4).
 pub fn load_follow(
     file: &File,
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
+    stop: Arc<AtomicBool>,
 ) {
-    report(stream_lines(file, sink, cancel, budget, true), sink);
+    report(stream_lines(file, sink, cancel, budget, Some(stop)), sink);
 }
 
 /// Sends the outcome of a streaming load (nothing when cancelled).
@@ -377,7 +380,7 @@ fn stream_lines(
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
-    follow: bool,
+    follow: Option<Arc<AtomicBool>>,
 ) -> Result<Option<Document>, LoadFailure> {
     let src = sources(file, budget)?;
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
@@ -391,15 +394,24 @@ fn stream_lines(
         pace(b, Some(lines), frontier, done, idle);
     };
     let (source, limits) = (&src.parse, budget.stream);
-    let parsed = if follow {
-        follow_lines_stream(source, builder, spill, limits, stopper(cancel), publish)
-    } else {
-        parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish)
+    let parsed = match follow {
+        Some(stop) => follow_lines_stream(
+            source,
+            builder,
+            spill,
+            limits,
+            stopper(cancel),
+            publish,
+            stop,
+        ),
+        None => parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish),
     };
     let Some(parsed) = finished(parsed)? else {
         return Ok(None);
     };
     let store = parsed.builder.finish().map_err(plain)?;
+    // A followed file grew since it was opened.
+    src.finished.refresh().map_err(plain)?;
     let tree = StreamTree::from_lines(src.finished, store, parsed.lines, parsed.values);
     Ok(Some(Document::Stream(Box::new(tree))))
 }
@@ -894,6 +906,7 @@ mod tests {
                 &mut sink,
                 &AtomicBool::new(false),
                 StreamBudget::testing(),
+                std::sync::Arc::default(),
             );
         });
         let Ok(LoadEvent::Live(doc)) = rx.recv_timeout(Duration::from_secs(5)) else {
@@ -940,6 +953,45 @@ mod tests {
                 Err(err) => panic!("no truncation reported: {err}"),
             }
         }
+    }
+
+    #[test]
+    fn stopping_a_follow_finishes_with_the_lines_so_far() {
+        use std::io::Write;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"1\n2\n").unwrap();
+        let reader = file.reopen().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let halt = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut sink = |e| drop(tx.send(e));
+            let cancel = AtomicBool::new(false);
+            load_follow(&reader, &mut sink, &cancel, StreamBudget::testing(), halt);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        file.write_all(b"3\n").unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let finished = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok())
+            .find_map(|e| match e {
+                LoadEvent::Loaded(doc) => Some(doc),
+                _ => None,
+            });
+        let Some(Ok(doc)) = finished else {
+            panic!("following did not finish")
+        };
+        let root = doc.root().unwrap();
+        assert_eq!(doc.child_count(root).unwrap(), crate::tree::Count::Known(3));
+        assert_eq!(
+            doc.children(root, 2..3).unwrap().len(),
+            1,
+            "the appended record is readable"
+        );
     }
 
     #[test]

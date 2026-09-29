@@ -14,6 +14,8 @@ pub struct Status<'a> {
     pub format: Format,
     pub stats: Stats,
     pub error: Option<&'a str>,
+    /// New lines are being indexed as they arrive (FO-6).
+    pub following: bool,
     /// Shown instead of the document facts (e.g. search results).
     pub note: Option<&'a str>,
 }
@@ -72,8 +74,9 @@ pub fn status_line(status: &Status<'_>, width: usize, theme: &Theme) -> Line<'st
 
 fn facts(status: &Status<'_>) -> String {
     let values = status.stats.values.map_or_else(|| "…".to_owned(), grouped);
+    let following = if status.following { "  following" } else { "" };
     format!(
-        "{}  {}  {values} values",
+        "{}  {}  {values} values{following}",
         status.format.label(),
         human_bytes(status.stats.bytes)
     )
@@ -133,8 +136,19 @@ mod tests {
             format: Format::Json,
             stats,
             error,
+            following: false,
             note: None,
         }
+    }
+
+    #[test]
+    fn following_shows_next_to_the_facts() {
+        let status = Status {
+            following: true,
+            ..status(None)
+        };
+        let shown = text(&status_line(&status, 70, &Theme::default()));
+        assert!(shown.ends_with("1,234,567 values  following"), "{shown}");
     }
 
     #[test]

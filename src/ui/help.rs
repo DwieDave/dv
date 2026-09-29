@@ -69,6 +69,7 @@ const PREVIEW: &[Row] = &[
     row("w", "wrap long lines in the preview", &["w"]),
     row("yp", "copy the path", &["yp"]),
     row("yy yY", "copy the value, minified / pretty", &["yy", "yY"]),
+    row("F", "follow the file as it grows (NDJSON)", &["F"]),
     row("?", "this help", &["?"]),
     row("q  ^c", "quit", &["q", "C-c"]),
 ];

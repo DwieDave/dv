@@ -219,3 +219,16 @@ fn yaml_cannot_be_streamed() {
         "{out:?}"
     );
 }
+
+#[test]
+fn follow_needs_an_ndjson_file() {
+    let json = temp_file(br#"{"a": 1}"#).unwrap();
+    let out = dv(&["--follow", json.path().to_str().unwrap()]).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--follow needs an NDJSON file"), "{stderr}");
+    let out = dv_stdin(&["--follow"], b"1\n2\n").unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--follow needs an NDJSON file"), "{stderr}");
+}

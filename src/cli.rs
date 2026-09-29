@@ -7,19 +7,19 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
 use crate::app::run::run as run_app;
-use crate::app::screen::{App, AppEvent};
+use crate::app::screen::{App, AppEvent, Follow};
 use crate::app::terminal::TerminalGuard;
 use crate::config::{self, Config};
 use crate::document::Document;
 use crate::format::{Format, SNIFF_LEN, detect};
-use crate::load::{LoadEvent, Request, StreamBudget, load_spooled, load_stream};
+use crate::load::{LoadEvent, Request, StreamBudget, load_follow, load_spooled, load_stream};
 use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
 use crate::source::file::FileSource;
 use crate::state_file::{self, FileKey, Positions};
@@ -58,6 +58,9 @@ pub struct Cli {
     /// Config file; defaults to `~/.config/dv/config.toml`.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Keep indexing lines appended to an NDJSON file (implies streaming).
+    #[arg(long)]
+    pub follow: bool,
     /// Load and index without starting the UI, then print a summary (benchmarks).
     #[arg(long, hide = true)]
     pub index_only: bool,
@@ -76,6 +79,8 @@ pub enum CliError {
     NoInput,
     #[error(transparent)]
     Mode(#[from] ModeError),
+    #[error("--follow needs an NDJSON file")]
+    FollowNeedsNdjson,
 }
 
 /// A readable input and the facts used to load it.
@@ -95,6 +100,12 @@ enum Input {
     },
 }
 
+/// An input and whether it is an NDJSON file, which `F` can follow (FO-4).
+struct Opened {
+    input: Input,
+    ndjson_file: bool,
+}
+
 /// In-memory mode never holds more than the u32 index can address (NFR-8).
 const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 
@@ -109,13 +120,18 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
     let budget = config
         .memory_budget
         .map_or_else(StreamBudget::default, StreamBudget::within);
-    let input = open_input(cli, limit)?;
+    let Opened { input, ndjson_file } = open_input(cli, limit)?;
     if cli.index_only {
         if let Some(warning) = &warning {
             eprintln!("dv: {warning}");
         }
         return index_only_input(input, budget).map(Some);
     }
+    let follow = match (cli.follow, ndjson_file) {
+        (true, _) => Follow::On(Arc::default()),
+        (false, true) => Follow::Available,
+        (false, false) => Follow::Off,
+    };
     let key = cli
         .path
         .as_deref()
@@ -126,7 +142,13 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
         .as_ref()
         .zip(state.as_ref())
         .and_then(|(key, state)| Positions::load(state).get(key).cloned());
-    let cursor = tui(loader(input, budget), &config, warning, restore)?;
+    let session = Session {
+        loader: loader(input, budget, stop_flag(&follow)),
+        follow,
+        restore,
+    };
+    let reopen = cli.path.as_deref().map(|path| (path, budget));
+    let cursor = tui(session, &config, warning, reopen)?;
     if let (Some(key), Some(state), Some(cursor)) = (key, state, cursor) {
         remember(&state, key, cursor);
     }
@@ -145,7 +167,15 @@ fn remember(state: &Path, key: FileKey, cursor: Vec<u64>) {
 /// The UI's loader thread body for `input`.
 type Loader = Box<dyn FnOnce(&mut dyn FnMut(LoadEvent<Document>), &AtomicBool) + Send>;
 
-fn loader(input: Input, budget: StreamBudget) -> Loader {
+/// The flag that stops following, when following.
+fn stop_flag(follow: &Follow) -> Option<Arc<AtomicBool>> {
+    match follow {
+        Follow::On(stop) => Some(Arc::clone(stop)),
+        Follow::Off | Follow::Available => None,
+    }
+}
+
+fn loader(input: Input, budget: StreamBudget, follow: Option<Arc<AtomicBool>>) -> Loader {
     match input {
         Input::Memory {
             reader,
@@ -155,8 +185,9 @@ fn loader(input: Input, budget: StreamBudget) -> Loader {
         } => Box::new(move |mut sink, cancel| {
             load_spooled(reader, &request, spool_at, &mut sink, cancel, budget);
         }),
-        Input::Stream { file, format, .. } => Box::new(move |mut sink, cancel| {
-            load_stream(&file, format, &mut sink, cancel, budget);
+        Input::Stream { file, format, .. } => Box::new(move |mut sink, cancel| match follow {
+            Some(stop) => load_follow(&file, &mut sink, cancel, budget, stop),
+            None => load_stream(&file, format, &mut sink, cancel, budget),
         }),
     }
 }
@@ -179,47 +210,69 @@ fn index_only_input(input: Input, budget: StreamBudget) -> Result<String, CliErr
 }
 
 /// The file named on the command line, or stdin when omitted or `-` (FR-1, FR-2).
-fn open_input(cli: &Cli, limit: u64) -> Result<Input, CliError> {
-    let format = cli.format.map(Format::from);
+fn open_input(cli: &Cli, limit: u64) -> Result<Opened, CliError> {
     let base = Request {
-        format,
+        format: cli.format.map(Format::from),
         max_len: MAX_IN_MEMORY,
         ..Request::default()
     };
     match cli.path.as_deref().filter(|p| *p != Path::new("-")) {
-        Some(path) => {
-            let label = path.display().to_string();
-            let file = File::open(path).map_err(|source| CliError::Open {
-                path: label.clone(),
-                source,
-            })?;
-            let size_hint = file.metadata().ok().map(|m| m.len());
-            let detected = detect(Some(path), &head(&file), format);
-            if choose(cli.mode, size_hint, limit, detected)? == Storage::Stream {
-                return Ok(Input::Stream {
-                    file,
-                    label,
-                    format: detected,
-                });
-            }
-            let request = Request {
-                path: Some(path.to_path_buf()),
-                size_hint,
-                ..base
-            };
-            Ok(Input::Memory {
-                reader: Box::new(file),
-                request,
-                label,
-                spool_at: u64::MAX,
-            })
-        }
+        Some(path) => open_path(cli, path, limit),
+        None if cli.follow => Err(CliError::FollowNeedsNdjson),
         None if io::stdin().is_terminal() => Err(CliError::NoInput),
-        None => Ok(Input::Memory {
-            reader: Box::new(io::stdin()),
-            request: base,
-            label: "<stdin>".to_owned(),
-            spool_at: stdin_spool(cli.mode, limit),
+        None => Ok(Opened {
+            input: Input::Memory {
+                reader: Box::new(io::stdin()),
+                request: base,
+                label: "<stdin>".to_owned(),
+                spool_at: stdin_spool(cli.mode, limit),
+            },
+            ndjson_file: false,
+        }),
+    }
+}
+
+/// A named file, streamed or read into memory (`--follow` needs NDJSON and streams).
+fn open_path(cli: &Cli, path: &Path, limit: u64) -> Result<Opened, CliError> {
+    let (file, label) = open_file(path)?;
+    let size_hint = file.metadata().ok().map(|m| m.len());
+    let format = detect(Some(path), &head(&file), cli.format.map(Format::from));
+    let ndjson_file = format == Format::Ndjson;
+    if cli.follow && !ndjson_file {
+        return Err(CliError::FollowNeedsNdjson);
+    }
+    let mode = if cli.follow { Mode::Stream } else { cli.mode };
+    let input = if choose(mode, size_hint, limit, format)? == Storage::Stream {
+        Input::Stream {
+            file,
+            label,
+            format,
+        }
+    } else {
+        let request = Request {
+            format: cli.format.map(Format::from),
+            max_len: MAX_IN_MEMORY,
+            path: Some(path.to_path_buf()),
+            size_hint,
+        };
+        let (reader, spool_at) = (Box::new(file), u64::MAX);
+        Input::Memory {
+            reader,
+            request,
+            label,
+            spool_at,
+        }
+    };
+    Ok(Opened { input, ndjson_file })
+}
+
+fn open_file(path: &Path) -> Result<(File, String), CliError> {
+    let label = path.display().to_string();
+    match File::open(path) {
+        Ok(file) => Ok((file, label)),
+        Err(source) => Err(CliError::Open {
+            path: label,
+            source,
         }),
     }
 }
@@ -275,33 +328,103 @@ fn index_only(
     }
 }
 
-/// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-/// Runs the UI; returns the final cursor of the open document.
-fn tui(
+/// One opening of the input in the UI.
+struct Session {
     loader: Loader,
-    config: &Config,
-    warning: Option<String>,
+    follow: Follow,
     restore: Option<Vec<u64>>,
+}
+
+/// Runs the UI; returns the final cursor of the open document. `F` on an NDJSON file
+/// reopens `reopen`'s path following it, keeping the cursor (FO-4).
+fn tui(
+    first: Session,
+    config: &Config,
+    mut warning: Option<String>,
+    reopen: Option<(&Path, StreamBudget)>,
 ) -> Result<Option<Vec<u64>>, CliError> {
     let (tx, rx) = mpsc::channel();
+    let input_tx = tx.clone();
+    thread::spawn(move || forward_input(&input_tx));
+    let mut guard = TerminalGuard::enter()?;
+    let mut session = first;
+    loop {
+        let ended = run_session(&mut guard, session, config, warning.take(), (&tx, &rx))?;
+        match reopen {
+            Some((path, budget)) if ended.reopen => {
+                session = following(path, budget, ended.cursor)?;
+            }
+            _ => return Ok(ended.cursor),
+        }
+    }
+}
+
+/// How a session ended.
+struct Ended {
+    cursor: Option<Vec<u64>>,
+    reopen: bool,
+}
+
+/// Opens the UI at once while a worker thread loads and indexes the input (FR-8).
+fn run_session(
+    guard: &mut TerminalGuard,
+    session: Session,
+    config: &Config,
+    warning: Option<String>,
+    (tx, rx): (&Sender<AppEvent<Document>>, &Receiver<AppEvent<Document>>),
+) -> Result<Ended, CliError> {
     let cancel = Arc::new(AtomicBool::new(false));
-    let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
-    thread::spawn(move || {
+    let (loader_tx, loader_cancel, loader) = (tx.clone(), Arc::clone(&cancel), session.loader);
+    let loading = thread::spawn(move || {
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
         loader(&mut sink, &loader_cancel);
     });
     let app = App::new(cancel)
         .with_events(tx.clone())
-        .with_config(config, warning);
-    let mut app = match restore {
+        .with_config(config, warning)
+        .with_follow(session.follow);
+    let mut app = match session.restore {
         Some(rows) => app.with_position(rows),
         None => app,
     };
-    thread::spawn(move || forward_input(&tx));
-    let mut guard = TerminalGuard::enter()?;
-    run_app(&mut guard.terminal, &mut app, &rx)?;
-    drop(guard);
-    Ok(app.final_cursor())
+    run_app(&mut guard.terminal, &mut app, rx)?;
+    let ended = Ended {
+        cursor: app.final_cursor(),
+        reopen: app.reopen,
+    };
+    if ended.reopen {
+        // The next session must not see this one's late events.
+        drop((app, loading.join()));
+        let keys: Vec<_> = rx
+            .try_iter()
+            .filter(|event| matches!(event, AppEvent::Input(_)))
+            .collect();
+        for event in keys {
+            drop(tx.send(event));
+        }
+    }
+    Ok(ended)
+}
+
+/// `path` reopened following, restoring `cursor`.
+fn following(
+    path: &Path,
+    budget: StreamBudget,
+    cursor: Option<Vec<u64>>,
+) -> Result<Session, CliError> {
+    let (file, label) = open_file(path)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let format = Format::Ndjson;
+    let input = Input::Stream {
+        file,
+        label,
+        format,
+    };
+    Ok(Session {
+        loader: loader(input, budget, Some(Arc::clone(&stop))),
+        follow: Follow::On(stop),
+        restore: cursor,
+    })
 }
 
 /// Streams and indexes a file without starting the UI (benchmarks, NFR-12).

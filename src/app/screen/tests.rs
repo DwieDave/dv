@@ -326,3 +326,110 @@ fn a_remembered_position_is_restored_once_its_rows_exist() {
     assert!(model.state.is_expanded(&[0]));
     assert_eq!(app.final_cursor(), Some(vec![0, 1]));
 }
+
+fn model(app: &App<MemTree>) -> &Model<MemTree> {
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready")
+    };
+    model
+}
+
+#[test]
+fn f_notes_that_follow_needs_an_ndjson_file() {
+    let mut app = app();
+    update_app(&mut app, loaded(b"[1]"));
+    update_app(&mut app, key('F'));
+    assert_eq!(
+        model(&app).note.as_deref(),
+        Some("follow works on NDJSON files")
+    );
+    assert!(!app.quit);
+}
+
+#[test]
+fn f_on_an_ndjson_file_reopens_it_following() {
+    let mut app = app().with_follow(Follow::Available);
+    update_app(&mut app, loaded(b"[1]"));
+    update_app(&mut app, key('F'));
+    assert!(app.quit && app.reopen);
+    assert!(
+        app.cancel.load(Ordering::Relaxed),
+        "the current load is abandoned"
+    );
+}
+
+#[test]
+fn f_while_following_stops_following() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut app = app().with_follow(Follow::On(Arc::clone(&stop)));
+    update_app(&mut app, loaded(b"[1]"));
+    assert!(model(&app).following);
+    assert!(
+        screen_text(&app).contains("following"),
+        "{}",
+        screen_text(&app)
+    );
+    update_app(&mut app, key('F'));
+    assert!(stop.load(Ordering::Relaxed));
+    assert!(!model(&app).following);
+    assert_eq!(model(&app).note.as_deref(), Some("stopped following"));
+    assert!(!app.quit);
+}
+
+#[test]
+fn following_keeps_the_cursor_on_the_newest_record() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    use crate::document::Document;
+    use crate::load::{StreamBudget, load_follow};
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(b"1\n2\n3\n").unwrap();
+    let reader = file.reopen().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let halt = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        let mut sink = |e| drop(tx.send(e));
+        let cancel = AtomicBool::new(false);
+        load_follow(&reader, &mut sink, &cancel, StreamBudget::testing(), halt);
+    });
+    let mut app: App<Document> =
+        App::new(Arc::new(AtomicBool::new(false))).with_follow(Follow::On(Arc::clone(&stop)));
+    let live = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    update_app(&mut app, AppEvent::Load(live));
+    let records = |app: &App<Document>| {
+        let Screen::Ready(model) = &app.screen else {
+            panic!("not ready")
+        };
+        let root = model.tree.root().unwrap();
+        model.tree.child_count(root).unwrap().available()
+    };
+    let wait_for = |app: &mut App<Document>, n: u64| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while records(app) != n {
+            assert!(Instant::now() < deadline, "stuck at {}", records(app));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let progress = Progress {
+            phase: Phase::Indexing,
+            done: 0,
+            total: 0,
+        };
+        update_app(app, AppEvent::Load(LoadEvent::Progress(progress)));
+    };
+    let cursor = |app: &App<Document>| app.final_cursor().unwrap();
+    wait_for(&mut app, 3);
+    let key = |c| AppEvent::Input(Event::Key(KeyEvent::from(KeyCode::Char(c))));
+    update_app(&mut app, key('G'));
+    assert_eq!(cursor(&app), vec![2]);
+    file.write_all(b"4\n5\n").unwrap();
+    wait_for(&mut app, 5);
+    assert_eq!(cursor(&app), vec![4], "the cursor follows the end");
+    update_app(&mut app, key('k'));
+    file.write_all(b"6\n").unwrap();
+    wait_for(&mut app, 6);
+    assert_eq!(cursor(&app), vec![3], "elsewhere the cursor stays");
+    stop.store(true, Ordering::Relaxed);
+}

@@ -47,20 +47,25 @@ impl Prefetch {
         source: &'env R,
         size: usize,
     ) -> Self {
-        Self::start(scope, source, size, Mode::Json)
+        Self::start(scope, source, size, Mode::Json, Arc::default())
     }
 
     /// Like [`Self::spawn`], but each chunk ends after its last newline (the rest opens the
     /// next one), and UTF-8 is left to the caller: blocks of whole NDJSON lines. With
-    /// `follow`, the reader waits at the end for the file to grow instead of ending (FO-2).
+    /// `follow`, the reader waits at the end for the file to grow instead of ending (FO-2),
+    /// until that flag is set.
     pub(crate) fn lines<'scope, 'env, R: Source + Sync>(
         scope: &'scope Scope<'scope, 'env>,
         source: &'env R,
         size: usize,
-        follow: bool,
+        follow: Option<Arc<AtomicBool>>,
     ) -> Self {
-        let mode = if follow { Mode::Follow } else { Mode::Lines };
-        Self::start(scope, source, size, mode)
+        let mode = if follow.is_some() {
+            Mode::Follow
+        } else {
+            Mode::Lines
+        };
+        Self::start(scope, source, size, mode, follow.unwrap_or_default())
     }
 
     fn start<'scope, 'env, R: Source + Sync>(
@@ -68,10 +73,10 @@ impl Prefetch {
         source: &'env R,
         size: usize,
         mode: Mode,
+        stop: Arc<AtomicBool>,
     ) -> Self {
         let (tx, chunks) = sync_channel(AHEAD);
         let (spare, spares) = channel();
-        let stop = Arc::new(AtomicBool::new(false));
         let reader = Reader {
             size,
             mode,

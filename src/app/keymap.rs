@@ -48,6 +48,7 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
     let nav = match (code, ctrl) {
         (KeyCode::Char('q'), false) => return Some(Msg::Quit),
         (KeyCode::Char('?'), false) => return Some(Msg::OpenHelp),
+        (KeyCode::Char('F'), false) => return Some(Msg::ToggleFollow),
         (KeyCode::Char(':'), false) => return Some(Msg::OpenPrompt(PromptKind::Query)),
         (KeyCode::Char('p'), false) => return Some(Msg::Preview(PreviewCmd::Toggle)),
         (KeyCode::Char('<'), false) => return Some(Msg::Preview(PreviewCmd::SplitLeft)),

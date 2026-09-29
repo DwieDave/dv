@@ -18,7 +18,7 @@ use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
 use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
-use crate::view::jump::reveal;
+use crate::view::jump::{bucket_rows, reveal};
 use crate::view::resolve::resolve;
 
 /// What is on screen.
@@ -35,6 +35,18 @@ pub enum AppEvent<T> {
     Input(Event),
     Load(LoadEvent<T>),
     Search(Outcome),
+}
+
+/// Whether the open file is followed as it grows (FO-4).
+#[derive(Debug, Default)]
+pub enum Follow {
+    /// Not an NDJSON file opened from a path.
+    #[default]
+    Off,
+    /// An NDJSON file that `F` reopens following.
+    Available,
+    /// Following, until this flag is set.
+    On(Arc<AtomicBool>),
 }
 
 #[derive(Debug)]
@@ -55,6 +67,11 @@ pub struct App<T> {
     pub warning: Option<String>,
     /// A remembered cursor to restore once its rows exist (HI-3).
     pub restore: Option<Vec<u64>>,
+    pub follow: Follow,
+    /// Set with `quit` when the file should be reopened following (FO-4).
+    pub reopen: bool,
+    /// The records on screen at the last refresh, to stick to the end (FO-3).
+    tail: u64,
 }
 
 impl<T: TreeIndex> App<T> {
@@ -75,7 +92,16 @@ impl<T: TreeIndex> App<T> {
             footer: true,
             warning: None,
             restore: None,
+            follow: Follow::Off,
+            reopen: false,
+            tail: 0,
         }
+    }
+
+    /// Sets what `F` does.
+    #[must_use]
+    pub fn with_follow(self, follow: Follow) -> Self {
+        Self { follow, ..self }
     }
 
     /// Restores the cursor at `rows` once the document has them.
@@ -146,13 +172,19 @@ fn apply_event<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: Ap
         AppEvent::Input(input) => on_input(app, &input),
         AppEvent::Load(LoadEvent::Progress(progress)) => match &mut app.screen {
             Screen::Loading(current) => *current = progress,
-            Screen::Ready(model) => update(model, Msg::Refresh),
+            Screen::Ready(model) => refresh(model, &mut app.tail),
             Screen::Failed(_) => {}
         },
         AppEvent::Load(LoadEvent::Live(doc)) => open(app, Ok(doc)),
         AppEvent::Load(LoadEvent::Loaded(result)) => match (&mut app.screen, result) {
-            (Screen::Ready(model), Ok(doc)) => swap(model, doc, app.events.as_ref()),
-            (Screen::Ready(model), Err(failure)) => show_banner(model, failure.message),
+            (Screen::Ready(model), Ok(doc)) => {
+                unfollow(model, &mut app.follow);
+                swap(model, doc, app.events.as_ref());
+            }
+            (Screen::Ready(model), Err(failure)) => {
+                unfollow(model, &mut app.follow);
+                show_banner(model, failure.message);
+            }
             (_, result) => open(app, result),
         },
         AppEvent::Search(outcome) => {
@@ -170,11 +202,51 @@ fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T
         model.theme = app.theme;
         model.status = app.warning.take();
         model.footer = app.footer;
+        model.following = matches!(app.follow, Follow::On(_));
         update(model, Msg::Resize(app.size.0, app.size.1));
     }
     if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
         attach_worker(model, events);
     }
+}
+
+/// Refreshes the view; while following, a cursor on the last record moves to the new last
+/// record (FO-3).
+fn refresh<T: TreeIndex>(model: &mut Model<T>, tail: &mut u64) {
+    let last = |n: u64| bucket_rows(n, n.saturating_sub(1));
+    let on_last = model.following && *tail > 0 && model.state.cursor == last(*tail);
+    update(model, Msg::Refresh);
+    let Ok(count) = model.tree.child_count(model.state.root.node) else {
+        return;
+    };
+    let records = count.available();
+    if on_last && records > *tail {
+        let moved = reveal(&*model.tree, &mut model.state, last(records), model.height);
+        model.status = moved.err().map(|err| err.to_string());
+    }
+    *tail = records;
+}
+
+/// Following has ended (stopped, finished or truncated); `F` can start it again.
+fn unfollow<T>(model: &mut Model<T>, follow: &mut Follow) {
+    if let Follow::On(stop) = follow {
+        stop.store(true, Ordering::Relaxed);
+        *follow = Follow::Available;
+    }
+    model.following = false;
+}
+
+/// `F`: stops following, or asks for a reopen (returns `true`) when it can start (FO-4).
+fn toggle_follow<T>(model: &mut Model<T>, follow: &mut Follow) -> bool {
+    match follow {
+        Follow::Off => model.note = Some("follow works on NDJSON files".to_owned()),
+        Follow::Available => return true,
+        Follow::On(_) => {
+            unfollow(model, follow);
+            model.note = Some("stopped following".to_owned());
+        }
+    }
+    false
 }
 
 /// Replaces a live document with the finished one, keeping the view.
@@ -191,10 +263,12 @@ fn swap<T: TreeIndex + Send + Sync + 'static>(
     update(model, Msg::Refresh);
 }
 
-/// Runs the model's queued side effects and notes their results.
-fn perform_effects<T>(model: &mut Model<T>) {
+/// Runs the model's queued side effects and notes their results; `true` asks for a reopen.
+fn perform_effects<T>(model: &mut Model<T>, follow: &mut Follow) -> bool {
+    let mut reopen = false;
     for effect in std::mem::take(&mut model.effects) {
         match effect {
+            Effect::ToggleFollow => reopen |= toggle_follow(model, follow),
             Effect::Copy(text) => {
                 let size = human_bytes(text.len() as u64);
                 model.note = Some(match clipboard::copy(&text) {
@@ -204,6 +278,7 @@ fn perform_effects<T>(model: &mut Model<T>) {
             }
         }
     }
+    reopen
 }
 
 /// Starts the search worker, reporting outcomes as app events.
@@ -249,9 +324,9 @@ fn on_input<T: TreeIndex>(app: &mut App<T>, input: &Event) {
         Screen::Ready(model) => {
             if let Some(msg) = input_msg(input) {
                 update(model, msg);
-                perform_effects(model);
+                app.reopen |= perform_effects(model, &mut app.follow);
             }
-            model.quit
+            model.quit || app.reopen
         }
     };
     if quit {

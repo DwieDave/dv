@@ -2,6 +2,8 @@
 //! bad lines isolated exactly as in [`crate::json::ndjson::parse_lines`] (FR-5, FR-23, NFR-12).
 
 use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{Scope, scope};
 
@@ -54,13 +56,14 @@ pub fn parse_lines_stream<R: Source + Sync, B: Builder>(
 ) -> Result<StreamLines<B>, IndexError> {
     let stream = LineStream {
         limits,
-        follow: false,
+        follow: None,
     };
     stream.run(source, builder, lines, hook, publish)
 }
 
 /// Like [`parse_lines_stream`], but at the end it waits for the file to grow and indexes
-/// appended lines as they arrive (FO-2); it ends only when cancelled or the file shrinks.
+/// appended lines as they arrive (FO-2). Setting `stop` ends it normally; it also ends when
+/// cancelled or the file shrinks.
 ///
 /// # Errors
 /// As [`parse_lines_stream`], plus `Truncated` when the file shrinks.
@@ -71,10 +74,11 @@ pub fn follow_lines_stream<R: Source + Sync, B: Builder>(
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
     publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, Moment),
+    stop: Arc<AtomicBool>,
 ) -> Result<StreamLines<B>, IndexError> {
     let stream = LineStream {
         limits,
-        follow: true,
+        follow: Some(stop),
     };
     stream.run(source, builder, lines, hook, publish)
 }
@@ -82,7 +86,8 @@ pub fn follow_lines_stream<R: Source + Sync, B: Builder>(
 /// How an NDJSON stream is read.
 struct LineStream {
     limits: StreamLimits,
-    follow: bool,
+    /// Following until this flag is set.
+    follow: Option<Arc<AtomicBool>>,
 }
 
 impl LineStream {
@@ -104,7 +109,7 @@ impl LineStream {
             max: limits.max,
         };
         let result = scope(|scope| {
-            let blocks = Prefetch::lines(scope, source, limits.initial.max(1), self.follow);
+            let blocks = Prefetch::lines(scope, source, limits.initial.max(1), self.follow.clone());
             run(scope, &blocks, &mut merge, hook, &mut publish)
         });
         let mut pending = PendingLines {
