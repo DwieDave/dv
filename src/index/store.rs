@@ -62,6 +62,65 @@ struct FanoutRow {
 #[derive(Debug)]
 pub struct Slot(u32);
 
+/// Receives containers from the parser: opened in preorder, closed in postorder.
+pub trait Builder {
+    type Slot;
+    type Mark;
+
+    /// Reserves a slot for the container opening at `start`.
+    fn open(&mut self, start: u64) -> Self::Slot;
+
+    /// Offset of the opening bracket of `slot`.
+    fn start(&self, slot: &Self::Slot) -> u64;
+
+    /// Records a child of `slot` beginning at `offset`.
+    fn add_child(&mut self, slot: &Self::Slot, offset: u64);
+
+    /// Completes `slot`; `end` is one past the closing bracket.
+    fn close(&mut self, slot: Self::Slot, end: u64);
+
+    /// Remembers the current state so a failed value can be undone.
+    fn mark(&self) -> Self::Mark;
+
+    /// Drops everything recorded since `mark`.
+    fn rollback(&mut self, mark: Self::Mark);
+}
+
+impl Builder for VecStoreBuilder {
+    type Slot = Slot;
+    type Mark = Mark;
+
+    fn open(&mut self, start: u64) -> Slot {
+        VecStoreBuilder::open(self, offset32_u64(start))
+    }
+
+    fn start(&self, slot: &Slot) -> u64 {
+        u64::from(VecStoreBuilder::start(self, slot))
+    }
+
+    fn add_child(&mut self, slot: &Slot, offset: u64) {
+        VecStoreBuilder::add_child(self, slot, offset32_u64(offset));
+    }
+
+    fn close(&mut self, slot: Slot, end: u64) {
+        VecStoreBuilder::close(self, slot, offset32_u64(end));
+    }
+
+    fn mark(&self) -> Mark {
+        VecStoreBuilder::mark(self)
+    }
+
+    fn rollback(&mut self, mark: Mark) {
+        VecStoreBuilder::rollback(self, mark);
+    }
+}
+
+/// In-memory offsets fit in u32 once `ensure_addressable` passed (NFR-8).
+#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
+fn offset32_u64(offset: u64) -> u32 {
+    offset as u32
+}
+
 /// Builder lengths captured by [`VecStoreBuilder::mark`].
 #[derive(Debug, Clone, Copy)]
 pub struct Mark {

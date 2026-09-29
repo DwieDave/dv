@@ -3,7 +3,8 @@
 use std::ops::ControlFlow;
 
 use crate::error::{ParseError, ParseErrorKind};
-use crate::index::store::{Slot, VecStore, VecStoreBuilder};
+use crate::index::store::{Builder, VecStore, VecStoreBuilder};
+use crate::index::to_usize;
 use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
 
 /// A parsed document: the root value's offset and the container index.
@@ -50,29 +51,21 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, ParseError> {
     parse_with(bytes, |_| ControlFlow::Continue(()))
 }
 
-pub(crate) struct Parser<'a, H> {
+pub(crate) struct Parser<'a, H, B: Builder = VecStoreBuilder> {
     pub(crate) bytes: &'a [u8],
     hook: H,
     /// Offset at which the hook is called next.
     next_report: u64,
     pub(crate) pos: usize,
-    pub(crate) builder: VecStoreBuilder,
-    /// Open containers; per-container state lives in the builder's reserved span.
-    stack: Vec<Slot>,
+    pub(crate) builder: B,
+    /// Open containers; per-container state lives in the builder.
+    stack: Vec<B::Slot>,
     pub(crate) values: u64,
 }
 
 impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
     pub(crate) fn new(bytes: &'a [u8], hook: H) -> Self {
-        Self {
-            bytes,
-            hook,
-            next_report: REPORT_EVERY,
-            pos: 0,
-            builder: VecStoreBuilder::default(),
-            stack: Vec::new(),
-            values: 0,
-        }
+        Self::with_builder(bytes, hook, VecStoreBuilder::default())
     }
 
     fn run(mut self) -> Result<Parsed, ParseError> {
@@ -90,12 +83,26 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
             values: self.values,
         })
     }
+}
+
+impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
+    pub(crate) fn with_builder(bytes: &'a [u8], hook: H, builder: B) -> Self {
+        Self {
+            bytes,
+            hook,
+            next_report: REPORT_EVERY,
+            pos: 0,
+            builder,
+            stack: Vec::new(),
+            values: 0,
+        }
+    }
 
     /// Parses one complete value starting at `pos`.
     pub(crate) fn value(&mut self) -> Result<(), ParseError> {
         self.start_value()?;
         while let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) {
-            if self.pos == start as usize + 1 {
+            if self.pos == to_usize(start) + 1 {
                 self.first_child()?;
             } else {
                 self.after_child()?;
@@ -134,7 +141,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
         self.values += 1;
         match scan_scalar(self.bytes, self.pos)? {
             (Kind::Object | Kind::Array, _) => {
-                self.stack.push(self.builder.open(offset32(self.pos)));
+                self.stack.push(self.builder.open(self.pos as u64));
                 self.pos += 1;
             }
             (_, end) => self.pos = end,
@@ -145,7 +152,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
     /// The closing bracket expected by the innermost open container.
     fn close_byte(&self) -> u8 {
         let start = self.stack.last().map_or(0, |slot| self.builder.start(slot));
-        match self.bytes.get(start as usize) {
+        match self.bytes.get(to_usize(start)) {
             Some(b'{') => b'}',
             _ => b']',
         }
@@ -181,7 +188,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
     fn start_child(&mut self) -> Result<(), ParseError> {
         let is_object = self.close_byte() == b'}';
         if let Some(slot) = self.stack.last() {
-            self.builder.add_child(slot, offset32(self.pos));
+            self.builder.add_child(slot, self.pos as u64);
         }
         if is_object {
             self.member_key()?;
@@ -201,15 +208,9 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
     fn close(&mut self) {
         if let Some(slot) = self.stack.pop() {
             self.pos += 1;
-            self.builder.close(slot, offset32(self.pos));
+            self.builder.close(slot, self.pos as u64);
         }
     }
-}
-
-/// Offsets fit in u32 once `ensure_addressable` passed.
-#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable (NFR-8)
-fn offset32(pos: usize) -> u32 {
-    pos as u32
 }
 
 #[cfg(test)]
