@@ -250,7 +250,7 @@ impl MemTree {
 }
 
 /// Binary search over `n` checkpoints for the last one at or before `offset`, as a child index.
-fn last_at_or_before(
+pub(crate) fn last_at_or_before(
     n: u64,
     at: impl Fn(u64) -> Result<Option<u64>, IndexError>,
     offset: u64,

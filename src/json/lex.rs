@@ -173,22 +173,37 @@ pub fn expect(bytes: &[u8], pos: usize, byte: u8) -> Result<(), ParseError> {
     }
 }
 
+/// The kind of value a first byte starts, if any.
+#[must_use]
+pub fn kind_of(byte: u8) -> Option<Kind> {
+    match byte {
+        b'"' => Some(Kind::String),
+        b'-' | b'0'..=b'9' => Some(Kind::Number),
+        b'n' => Some(Kind::Null),
+        b't' | b'f' => Some(Kind::Bool),
+        b'{' => Some(Kind::Object),
+        b'[' => Some(Kind::Array),
+        _ => None,
+    }
+}
+
 /// Scans the scalar at `pos`; containers return their kind with `end == pos`.
 ///
 /// # Errors
 /// Any lexing error of the scalar at `pos`.
 pub fn scan_scalar(bytes: &[u8], pos: usize) -> Result<(Kind, usize), ParseError> {
-    match bytes.get(pos) {
-        Some(b'"') => Ok((Kind::String, scan_string(bytes, pos)?)),
-        Some(b'-' | b'0'..=b'9') => Ok((Kind::Number, scan_number(bytes, pos)?)),
-        Some(b'n') => Ok((Kind::Null, scan_literal(bytes, pos, b"null")?)),
-        Some(b't') => Ok((Kind::Bool, scan_literal(bytes, pos, b"true")?)),
-        Some(b'f') => Ok((Kind::Bool, scan_literal(bytes, pos, b"false")?)),
-        Some(b'{') => Ok((Kind::Object, pos)),
-        Some(b'[') => Ok((Kind::Array, pos)),
-        Some(&b) => Err(fail(ParseErrorKind::UnexpectedByte(b), pos)),
-        None => Err(fail(ParseErrorKind::UnexpectedEof, pos)),
-    }
+    let Some(&byte) = bytes.get(pos) else {
+        return Err(fail(ParseErrorKind::UnexpectedEof, pos));
+    };
+    let kind = kind_of(byte).ok_or(fail(ParseErrorKind::UnexpectedByte(byte), pos))?;
+    let end = match kind {
+        Kind::String => scan_string(bytes, pos)?,
+        Kind::Number => scan_number(bytes, pos)?,
+        Kind::Null => scan_literal(bytes, pos, b"null")?,
+        Kind::Bool => scan_literal(bytes, pos, if byte == b't' { b"true" } else { b"false" })?,
+        Kind::Object | Kind::Array | Kind::Invalid => pos,
+    };
+    Ok((kind, end))
 }
 
 #[cfg(test)]
