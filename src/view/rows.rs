@@ -62,6 +62,35 @@ impl Expansion {
         true
     }
 
+    /// Replaces the level of the expanded item at `path` (`[]` is this item). Expanded rows stay
+    /// when only rows were appended (same step); otherwise the item's descendants collapse.
+    pub fn set_level(&mut self, path: &[u64], level: Level) -> bool {
+        let Some(item) = self.get(path) else {
+            return false;
+        };
+        let keep = item.level.step() == level.step() && level.len() >= item.level.len();
+        let old = item.total;
+        let new = if keep {
+            old - item.level.len() + level.len()
+        } else {
+            1 + level.len()
+        };
+        let shift = |t: u64| {
+            if new >= old {
+                t + (new - old)
+            } else {
+                t - (old - new)
+            }
+        };
+        if let Some(node) = self.adjust(path, shift) {
+            node.level = level;
+            if !keep {
+                node.kids.clear();
+            }
+        }
+        true
+    }
+
     /// Collapses the expanded row at `path` (non-empty). Returns false if it was not expanded.
     pub fn collapse(&mut self, path: &[u64]) -> bool {
         let Some((&last, prefix)) = path.split_last() else {
@@ -85,6 +114,21 @@ impl Expansion {
         }
         node.total = f(node.total);
         Some(node)
+    }
+
+    /// Paths of every expanded item, this one (`[]`) first, parents before children.
+    #[must_use]
+    pub fn expanded_paths(&self) -> Vec<Vec<u64>> {
+        let mut out = vec![Vec::new()];
+        let mut i = 0;
+        while i < out.len() {
+            let path = out[i].clone();
+            if let Some(item) = self.get(&path) {
+                out.extend(item.kids.keys().map(|&k| [path.as_slice(), &[k]].concat()));
+            }
+            i += 1;
+        }
+        out
     }
 
     /// The path of visible row `r`.

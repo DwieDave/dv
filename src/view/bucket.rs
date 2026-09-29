@@ -31,6 +31,12 @@ impl Level {
         Self { range, step }
     }
 
+    /// Rows per bucket at this level (1 when rows are children).
+    #[must_use]
+    pub fn step(&self) -> u64 {
+        self.step
+    }
+
     #[must_use]
     pub fn len(&self) -> u64 {
         self.range

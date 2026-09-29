@@ -86,3 +86,38 @@ fn expanding_twice_or_out_of_range_is_rejected() {
     assert!(root.collapse(&[1]));
     assert_eq!(root.total(), 4);
 }
+
+#[test]
+fn growing_a_level_keeps_expanded_rows() {
+    let mut root = Expansion::new(Level::of(0..3));
+    assert!(root.expand(&[1], Level::of(0..2)));
+    assert!(root.set_level(&[], Level::of(0..10)));
+    assert_eq!(root.total(), 1 + 10 + 2);
+    assert!(root.get(&[1]).is_some());
+    assert!(root.set_level(&[1], Level::of(0..5)));
+    assert_eq!(root.total(), 1 + 10 + 5);
+}
+
+#[test]
+fn a_new_bucket_step_collapses_descendants() {
+    let mut root = Expansion::new(Level::of(0..1000));
+    assert!(root.expand(&[7], Level::of(0..4)));
+    assert!(root.set_level(&[], Level::of(0..5000)));
+    assert_eq!((root.total(), root.get(&[7])), (1 + 5, None));
+    assert!(!root.set_level(&[3, 3], Level::of(0..1)), "not expanded");
+}
+
+proptest! {
+    #[test]
+    fn set_level_keeps_totals_consistent(ops in proptest::collection::vec(op(), 0..20), grow in 0u64..3000) {
+        let mut root = Expansion::new(level_for(&[]));
+        for op in &ops {
+            apply(&mut root, op);
+        }
+        let current = root.level().len();
+        root.set_level(&[], Level::of(0..current + grow));
+        let mut flat = Vec::new();
+        flatten(&root, &mut Vec::new(), &mut flat);
+        prop_assert_eq!(root.total(), flat.len() as u64);
+    }
+}
