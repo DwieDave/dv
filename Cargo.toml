@@ -14,3 +14,12 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[dev-dependencies]
+proptest = "1.11.0"
+saphyr = "0.1.0"
+serde_json = "1.0.151"
+
+[[example]]
+name = "gen"
+test = true
