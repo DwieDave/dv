@@ -24,6 +24,17 @@ pub struct Fanout {
 }
 
 impl Fanout {
+    /// A fanout whose checkpoints start at index `first` of a store's checkpoint list.
+    #[must_use]
+    pub(crate) fn new(count: u64, first: u64) -> Self {
+        Self { count, first }
+    }
+
+    #[must_use]
+    pub(crate) fn first(&self) -> u64 {
+        self.first
+    }
+
     #[must_use]
     pub fn checkpoints(&self) -> u64 {
         self.count.div_ceil(CHECKPOINT_EVERY)

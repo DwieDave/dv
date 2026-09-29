@@ -1,0 +1,428 @@
+//! A node store spilled to temporary files, for documents larger than memory (FR-23, D-14).
+
+use std::cmp::Ordering;
+use std::fs::File;
+use std::io;
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
+
+use tempfile::tempfile;
+
+use crate::index::store::{BigNode, Builder, CHECKPOINT_EVERY, Fanout, MIN_NODE_LEN, NodeStore};
+use crate::index::to_usize;
+use crate::source::file::FileSource;
+use crate::source::{Source, SourceError};
+
+/// Bytes per node record: start, len, child count, first checkpoint.
+pub const RECORD: u64 = 32;
+
+/// Tuning for the builder's RAM use.
+#[derive(Debug, Clone, Copy)]
+pub struct SpillLimits {
+    /// Records kept in RAM before a sequential flush.
+    pub window: usize,
+    /// Open checkpoints kept in RAM before spilling.
+    pub stack: usize,
+    /// Read-cache budget for the finished store.
+    pub cache: u64,
+}
+
+impl Default for SpillLimits {
+    fn default() -> Self {
+        Self {
+            window: 64 << 10,
+            stack: 1 << 20,
+            cache: 64 << 20,
+        }
+    }
+}
+
+/// A container being built; `Slot` for the parser.
+#[derive(Debug)]
+pub struct SpillSlot(u64);
+
+/// Builder state captured by `mark`.
+#[derive(Debug, Clone, Copy)]
+pub struct SpillMark {
+    next: u64,
+    open: usize,
+    stack: u64,
+    cps: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Open {
+    slot: u64,
+    start: u64,
+    count: u64,
+    cp_base: u64,
+}
+
+/// Writes node records by preorder slot and checkpoints in close order.
+#[derive(Debug)]
+pub struct SpillBuilder {
+    next: u64,
+    open: Vec<Open>,
+    records: Records,
+    /// Checkpoints of open containers; each one's run is contiguous from its `cp_base`.
+    stack: U64File,
+    /// Checkpoints of finished big containers.
+    cps: U64File,
+    cache: u64,
+    error: Option<io::Error>,
+}
+
+impl SpillBuilder {
+    /// # Errors
+    /// Temp file creation failures.
+    pub fn new(limits: SpillLimits) -> Result<Self, SourceError> {
+        Ok(Self {
+            next: 0,
+            open: Vec::new(),
+            records: Records::new(tempfile()?, limits.window),
+            stack: U64File::new(tempfile()?, limits.stack),
+            cps: U64File::new(tempfile()?, limits.stack),
+            cache: limits.cache,
+            error: None,
+        })
+    }
+
+    /// Flushes everything and opens the store for reading.
+    ///
+    /// # Errors
+    /// The first write failure, or failures opening the readers.
+    pub fn finish(mut self) -> Result<SpillStore, SourceError> {
+        self.records
+            .flush()
+            .and_then(|()| self.cps.flush())
+            .unwrap_or_else(|err| self.fail(err));
+        if let Some(err) = self.error {
+            return Err(err.into());
+        }
+        let nodes = FileSource::new(self.records.file, self.cache / 2)?;
+        let cps = FileSource::new(self.cps.file, self.cache / 2)?;
+        Ok(SpillStore {
+            nodes,
+            cps,
+            count: self.next,
+        })
+    }
+
+    fn fail(&mut self, err: io::Error) {
+        self.error.get_or_insert(err);
+    }
+
+    fn record(&mut self, open: Open, end: u64) -> io::Result<()> {
+        let first = if open.count > CHECKPOINT_EVERY {
+            let run = self.stack.read(open.cp_base..self.stack.len())?;
+            let first = self.cps.len();
+            run.into_iter().try_for_each(|cp| self.cps.push(cp))?;
+            first
+        } else {
+            0
+        };
+        self.records.put(
+            open.slot,
+            encode([open.start, end - open.start, open.count, first]),
+        )
+    }
+}
+
+impl Builder for SpillBuilder {
+    type Slot = SpillSlot;
+    type Mark = SpillMark;
+
+    fn open(&mut self, start: u64) -> SpillSlot {
+        let slot = self.next;
+        self.next += 1;
+        self.open.push(Open {
+            slot,
+            start,
+            count: 0,
+            cp_base: self.stack.len(),
+        });
+        SpillSlot(slot)
+    }
+
+    fn start(&self, slot: &SpillSlot) -> u64 {
+        self.open
+            .iter()
+            .rev()
+            .find(|o| o.slot == slot.0)
+            .map_or(0, |o| o.start)
+    }
+
+    fn add_child(&mut self, _slot: &SpillSlot, offset: u64) {
+        let Some(top) = self.open.last_mut() else {
+            return;
+        };
+        let checkpoint = top.count.is_multiple_of(CHECKPOINT_EVERY);
+        top.count += 1;
+        if checkpoint {
+            let pushed = self.stack.push(offset);
+            pushed.unwrap_or_else(|err| self.fail(err));
+        }
+    }
+
+    fn close(&mut self, _slot: SpillSlot, end: u64) {
+        let Some(open) = self.open.pop() else { return };
+        if end - open.start < MIN_NODE_LEN {
+            if open.slot + 1 == self.next {
+                self.next = open.slot;
+                self.records.rewind(self.next);
+            }
+        } else {
+            let recorded = self.record(open, end);
+            recorded.unwrap_or_else(|err| self.fail(err));
+        }
+        self.stack.truncate(open.cp_base);
+    }
+
+    fn mark(&self) -> SpillMark {
+        SpillMark {
+            next: self.next,
+            open: self.open.len(),
+            stack: self.stack.len(),
+            cps: self.cps.len(),
+        }
+    }
+
+    fn rollback(&mut self, mark: SpillMark) {
+        self.next = mark.next;
+        self.records.rewind(mark.next);
+        self.open.truncate(mark.open);
+        self.stack.truncate(mark.stack);
+        self.cps.truncate(mark.cps);
+    }
+}
+
+fn encode(fields: [u64; 4]) -> [u8; 32] {
+    let mut out = [0; 32];
+    for (chunk, field) in out.as_chunks_mut::<8>().0.iter_mut().zip(fields) {
+        *chunk = field.to_le_bytes();
+    }
+    out
+}
+
+fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    let mut word = [0; 8];
+    if let Some(src) = bytes.get(at..at + 8) {
+        word.copy_from_slice(src);
+    }
+    u64::from_le_bytes(word)
+}
+
+/// Node records by slot: recent slots in RAM, flushed sequentially; late closes written in place.
+#[derive(Debug)]
+struct Records {
+    file: File,
+    /// First slot held in `window`.
+    low: u64,
+    window: Vec<[u8; 32]>,
+    limit: usize,
+}
+
+impl Records {
+    fn new(file: File, limit: usize) -> Self {
+        Self {
+            file,
+            low: 0,
+            window: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn put(&mut self, slot: u64, record: [u8; 32]) -> io::Result<()> {
+        if slot < self.low {
+            return self.file.write_all_at(&record, slot * RECORD);
+        }
+        let i = to_usize(slot - self.low);
+        if self.window.len() <= i {
+            self.window.resize(i + 1, [0; 32]);
+        }
+        self.window[i] = record;
+        if self.window.len() >= self.limit {
+            self.flush()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Slots from `next` on are free again.
+    fn rewind(&mut self, next: u64) {
+        if next < self.low {
+            self.low = next;
+            self.window.clear();
+        } else {
+            self.window.truncate(to_usize(next - self.low));
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let bytes: Vec<u8> = self.window.iter().flatten().copied().collect();
+        self.file.write_all_at(&bytes, self.low * RECORD)?;
+        self.low += self.window.len() as u64;
+        self.window.clear();
+        Ok(())
+    }
+}
+
+/// An append/truncate list of u64 whose older part lives in a file.
+#[derive(Debug)]
+struct U64File {
+    file: File,
+    flushed: u64,
+    tail: Vec<u64>,
+    limit: usize,
+}
+
+impl U64File {
+    fn new(file: File, limit: usize) -> Self {
+        Self {
+            file,
+            flushed: 0,
+            tail: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        self.flushed + self.tail.len() as u64
+    }
+
+    fn push(&mut self, value: u64) -> io::Result<()> {
+        self.tail.push(value);
+        if self.tail.len() >= self.limit {
+            self.flush()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn truncate(&mut self, len: u64) {
+        if len >= self.flushed {
+            self.tail.truncate(to_usize(len - self.flushed));
+        } else {
+            self.flushed = len;
+            self.tail.clear();
+        }
+    }
+
+    fn read(&self, range: Range<u64>) -> io::Result<Vec<u64>> {
+        let from_file = range.start.min(self.flushed)..range.end.min(self.flushed);
+        let mut bytes = vec![0; to_usize(from_file.end - from_file.start) * 8];
+        self.file.read_exact_at(&mut bytes, from_file.start * 8)?;
+        let mut values: Vec<u64> = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect();
+        let tail = to_usize(range.start.max(self.flushed) - self.flushed)
+            ..to_usize(range.end.max(self.flushed) - self.flushed);
+        values.extend_from_slice(&self.tail[tail]);
+        Ok(values)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let bytes: Vec<u8> = self.tail.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.file.write_all_at(&bytes, self.flushed * 8)?;
+        self.flushed += self.tail.len() as u64;
+        self.tail.clear();
+        Ok(())
+    }
+}
+
+/// The finished store, read through bounded caches.
+#[derive(Debug)]
+pub struct SpillStore {
+    nodes: FileSource,
+    cps: FileSource,
+    count: u64,
+}
+
+impl SpillStore {
+    fn record(&self, index: u64) -> Result<[u64; 4], SourceError> {
+        let bytes = self.nodes.read(index * RECORD..(index + 1) * RECORD)?;
+        Ok([0, 8, 16, 24].map(|at| u64_at(&bytes, at)))
+    }
+}
+
+impl NodeStore for SpillStore {
+    fn node_at(&self, start: u64) -> Result<Option<BigNode>, SourceError> {
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let [node_start, len, count, first] = self.record(mid)?;
+            match node_start.cmp(&start) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                Ordering::Equal => {
+                    let fanout = (count > CHECKPOINT_EVERY).then(|| Fanout::new(count, first));
+                    return Ok(Some(BigNode {
+                        start,
+                        end: start + len,
+                        fanout,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn checkpoint(&self, fanout: &Fanout, k: u64) -> Result<Option<u64>, SourceError> {
+        if k >= fanout.checkpoints() {
+            return Ok(None);
+        }
+        let at = (fanout.first() + k) * 8;
+        Ok(Some(u64_at(&self.cps.read(at..at + 8)?, 0)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::ControlFlow;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::index::store::VecStoreBuilder;
+    use crate::json::parse::Parser;
+    use crate::test_support::{json_value, layout};
+
+    fn both(text: &str, limits: SpillLimits) -> (crate::index::store::VecStore, SpillStore) {
+        let hook = |_| ControlFlow::Continue(());
+        let (_, vec, _) = Parser::with_builder(text.as_bytes(), hook, VecStoreBuilder::default())
+            .run_with()
+            .unwrap();
+        let (_, spill, _) =
+            Parser::with_builder(text.as_bytes(), hook, SpillBuilder::new(limits).unwrap())
+                .run_with()
+                .unwrap();
+        (vec.finish(), spill.finish().unwrap())
+    }
+
+    fn checkpoints(store: &impl NodeStore, node: Option<BigNode>) -> Option<Vec<u64>> {
+        let fanout = node?.fanout?;
+        Some(
+            (0..fanout.checkpoints())
+                .map(|k| store.checkpoint(&fanout, k).unwrap().unwrap())
+                .collect(),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn spilled_store_equals_the_in_memory_store(value in json_value(), window in 1usize..8, stack in 1usize..8) {
+            let (text, _) = layout(&value, " ");
+            let (vec, spill) = both(&text, SpillLimits { window, stack, cache: 4096 });
+            for offset in 0..=text.len() as u64 {
+                let (a, b) = (vec.node_at(offset).unwrap(), spill.node_at(offset).unwrap());
+                prop_assert_eq!(a.map(|n| (n.start, n.end)), b.map(|n| (n.start, n.end)), "offset {}", offset);
+                prop_assert_eq!(a.and_then(|n| n.fanout.map(|f| f.count)), b.and_then(|n| n.fanout.map(|f| f.count)));
+                prop_assert_eq!(checkpoints(&vec, a), checkpoints(&spill, b));
+            }
+        }
+    }
+}

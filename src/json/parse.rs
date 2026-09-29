@@ -98,6 +98,20 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
         }
     }
 
+    /// Parses a whole document; returns the root offset, the builder and the value count.
+    #[cfg(test)]
+    pub(crate) fn run_with(mut self) -> Result<(u64, B, u64), ParseError> {
+        self.pos = skip_ws(self.bytes, 0);
+        let root = self.pos as u64;
+        self.value()?;
+        self.pos = skip_ws(self.bytes, self.pos);
+        if self.pos < self.bytes.len() {
+            return Err(fail(ParseErrorKind::TrailingData, self.pos));
+        }
+        self.final_report();
+        Ok((root, self.builder, self.values))
+    }
+
     /// Parses one complete value starting at `pos`.
     pub(crate) fn value(&mut self) -> Result<(), ParseError> {
         self.start_value()?;

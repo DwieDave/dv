@@ -13,6 +13,7 @@ ratatui = "0.30.2"
 regex = "1.13.1"
 saphyr = "0.1.0"
 saphyr-parser = "0.1.0"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 
 [lints.rust]
@@ -30,7 +31,6 @@ dhat = "0.3.3"
 insta = "1.48.0"
 proptest = "1.11.0"
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
-tempfile = "3.27.0"
 
 [[example]]
 name = "gen"
