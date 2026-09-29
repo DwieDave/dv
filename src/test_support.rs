@@ -172,3 +172,55 @@ pub fn ndjson() -> impl Strategy<Value = Vec<u8>> {
         bytes
     })
 }
+
+/// Any tree, answering as if it were read in streaming mode.
+pub struct Streamed<T>(pub T);
+
+impl<T: TreeIndex> TreeIndex for Streamed<T> {
+    fn root(&self) -> Result<NodeRef, crate::index::IndexError> {
+        self.0.root()
+    }
+
+    fn child_count(&self, node: NodeRef) -> Result<Count, crate::index::IndexError> {
+        self.0.child_count(node)
+    }
+
+    fn children(
+        &self,
+        node: NodeRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<crate::index::children::Child>, crate::index::IndexError> {
+        self.0.children(node, range)
+    }
+
+    fn child_containing(
+        &self,
+        node: NodeRef,
+        offset: u64,
+    ) -> Result<Option<crate::index::children::Child>, crate::index::IndexError> {
+        self.0.child_containing(node, offset)
+    }
+
+    fn bytes(
+        &self,
+        range: std::ops::Range<u64>,
+    ) -> Result<std::borrow::Cow<'_, [u8]>, crate::index::IndexError> {
+        self.0.bytes(range)
+    }
+
+    fn value_end(&self, node: NodeRef) -> Result<u64, crate::index::IndexError> {
+        self.0.value_end(node)
+    }
+
+    fn stats(&self) -> crate::tree::Stats {
+        self.0.stats()
+    }
+
+    fn format(&self) -> crate::format::Format {
+        self.0.format()
+    }
+
+    fn streamed(&self) -> bool {
+        true
+    }
+}

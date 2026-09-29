@@ -26,7 +26,6 @@ use crate::index::IndexError;
 use crate::json::format::Style;
 use crate::json::lex::Kind;
 use crate::path::{parse, render};
-use crate::schema::Seg;
 use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
 use crate::ui::preview::PreviewWidget;
@@ -148,7 +147,7 @@ pub enum Msg {
 pub enum LastFind {
     None,
     Text,
-    Schema(Vec<Seg>),
+    Schema(picker::Target),
 }
 
 /// What `y` chords copy.
@@ -456,16 +455,26 @@ fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) 
             }
         })),
     }
-    let title = match (picker.collecting, picker.truncated) {
-        (true, _) => " keys · collecting… ",
-        (false, true) => " keys · partial list (collection capped) ",
-        (false, false) => " keys ",
-    };
+    let title = picker_title(picker);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(title)),
         popup,
     );
+}
+
+/// ` keys in .users · collecting… `: the scope, then the collection state.
+fn picker_title(picker: &Picker) -> String {
+    let name = match picker.scope.as_ref().map(|s| s.label.as_str()) {
+        None | Some("") => "keys".to_owned(),
+        Some(label) => format!("keys in {label}"),
+    };
+    let state = match (picker.collecting, picker.truncated) {
+        (true, _) => " · collecting…",
+        (false, true) => " · partial list (collection capped)",
+        (false, false) => "",
+    };
+    format!(" {name}{state} ")
 }
 
 /// The cursor item's preview, sized to the pane's inner height.

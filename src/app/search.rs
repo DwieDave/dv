@@ -74,7 +74,7 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
         }
         (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
         (Work::Schema, _) => collect(tree, &job.root, pulse)
-            .map(|collected| JobResult::Schema(collected.map(|c| catalog(c, true))))
+            .map(|collected| JobResult::Schema(collected.map(|c| catalog(c, true, job.root))))
             .map_err(SearchError::from),
         (Work::Find(_) | Work::Count, None) => {
             Ok(JobResult::Failed("no search pattern".to_owned()))
@@ -88,7 +88,7 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
 }
 
 /// Schema paths paired with their rendering, for the picker.
-fn catalog(collected: Collected, done: bool) -> Catalog {
+fn catalog(collected: Collected, done: bool, root: RootItem) -> Catalog {
     let entries = collected
         .paths
         .into_iter()
@@ -97,6 +97,7 @@ fn catalog(collected: Collected, done: bool) -> Catalog {
         entries: Arc::new(entries.collect()),
         truncated: collected.truncated,
         done,
+        root,
     }
 }
 
@@ -105,6 +106,8 @@ struct WorkerPulse<'a> {
     generation: &'a AtomicU64,
     job: u64,
     notify: &'a dyn Fn(Outcome),
+    /// The job's root, which partial schema lists are collected under.
+    root: RootItem,
 }
 
 impl Pulse for WorkerPulse<'_> {
@@ -117,7 +120,7 @@ impl Pulse for WorkerPulse<'_> {
     }
 
     fn schema(&self, partial: Collected) {
-        self.interim(JobResult::Schema(Some(catalog(partial, false))));
+        self.interim(JobResult::Schema(Some(catalog(partial, false, self.root))));
     }
 }
 
@@ -147,6 +150,7 @@ pub fn spawn_worker<T: TreeIndex + Send + Sync + 'static>(
                 generation: &generation,
                 job: job_generation,
                 notify: &notify,
+                root: job.root,
             };
             if pulse.cancelled() {
                 continue;
@@ -267,9 +271,9 @@ fn restore<T: TreeIndex>(model: &mut Model<T>, rows: Vec<u64>) {
 
 /// `n` / `N`: the next or previous match, from the last hit if the cursor is still on it.
 pub fn step<T: TreeIndex>(model: &mut Model<T>, direction: Direction) {
-    if let LastFind::Schema(segs) = &model.last_find {
-        let (segs, from) = (segs.clone(), offset_of(model, &model.state.cursor));
-        return picker::step(model, &segs, direction, from);
+    if let LastFind::Schema(target) = &model.last_find {
+        let (target, from) = (target.clone(), offset_of(model, &model.state.cursor));
+        return picker::step(model, &target, direction, from);
     }
     let Some(search) = model.search.as_ref() else {
         return;
@@ -292,7 +296,8 @@ fn dispatch<T: TreeIndex>(model: &mut Model<T>, work: Work, from: Option<u64>) {
         Ok(matcher) => matcher,
         Err(err) => return note(model, err.to_string()),
     };
-    submit_job(model, work, Some(matcher), from);
+    let root = model.state.root;
+    submit_job(model, work, Some(matcher), from, root);
 }
 
 /// Starts a job of a new generation, on the worker or inline.
@@ -301,12 +306,13 @@ pub(crate) fn submit_job<T: TreeIndex>(
     work: Work,
     matcher: Option<Matcher>,
     from: Option<u64>,
+    root: RootItem,
 ) {
     let generation = model.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let job = Job {
         generation,
         matcher,
-        root: model.state.root,
+        root,
         from,
         work,
     };
@@ -629,10 +635,12 @@ mod tests {
     fn the_worker_pulse_reports_only_for_the_current_generation() {
         let (generation, sent) = (AtomicU64::new(7), std::cell::RefCell::new(Vec::new()));
         let notify = |outcome: Outcome| sent.borrow_mut().push(outcome);
+        let root = TreeState::new(&tree()).unwrap().root;
         let pulse = WorkerPulse {
             generation: &generation,
             job: 7,
             notify: &notify,
+            root,
         };
         let scanned = Scanned {
             bytes: 1,

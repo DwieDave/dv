@@ -224,6 +224,9 @@ impl<R: Source> TreeIndex for LiveTree<R> {
         let bad = self.bad_at(node.offset).ok().flatten()?;
         (node.kind == Kind::Invalid).then_some(bad.kind)
     }
+    fn streamed(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

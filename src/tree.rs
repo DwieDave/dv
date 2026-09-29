@@ -109,6 +109,11 @@ pub trait TreeIndex {
     fn problem(&self, _node: NodeRef) -> Option<ParseErrorKind> {
         None
     }
+
+    /// Whether the document is read in streaming mode (on demand from disk).
+    fn streamed(&self) -> bool {
+        false
+    }
 }
 
 /// Offset of the NDJSON root, which has no bytes of its own.

@@ -72,6 +72,10 @@ impl TreeIndex for Document {
     fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {
         self.inner().problem(node)
     }
+
+    fn streamed(&self) -> bool {
+        self.inner().streamed()
+    }
 }
 
 #[cfg(test)]
@@ -91,5 +95,35 @@ mod tests {
             (doc.format(), doc.stats().bytes),
             (Format::Json, text.len() as u64)
         );
+    }
+
+    #[test]
+    fn only_file_backed_documents_are_streamed() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicBool;
+
+        use crate::load::{LoadEvent, StreamBudget, load_stream};
+        let text = br#"{"a": [1, 2, 3]}"#;
+        assert!(!Document::Mem(MemTree::parse(MemSource::new(text.to_vec())).unwrap()).streamed());
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text).unwrap();
+        let mut docs = Vec::new();
+        let sink = &mut |e| {
+            if let LoadEvent::Live(doc) | LoadEvent::Loaded(Ok(doc)) = e {
+                docs.push(doc);
+            }
+        };
+        load_stream(
+            &file,
+            Format::Json,
+            sink,
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        assert!(matches!(
+            &docs[..],
+            [Document::Live(_), Document::Stream(_)]
+        ));
+        assert!(docs.iter().all(TreeIndex::streamed));
     }
 }

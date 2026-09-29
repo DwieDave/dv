@@ -7,10 +7,13 @@ use neo_frizbee::{Config, Matcher};
 
 use crate::app::search::{Work, offset_of, submit_job};
 use crate::app::{LastFind, Model};
+use crate::json::lex::Kind;
+use crate::path::render as render_path;
 use crate::schema::{self, Seg};
 use crate::search::Direction;
 use crate::tree::TreeIndex;
 use crate::view::jump::reveal;
+use crate::view::resolve::{RootItem, RowKind, chain, segments};
 
 /// Rendered schema paths with their segments, shared with the model.
 pub type Entries = Arc<Vec<(String, Vec<Seg>)>>;
@@ -22,6 +25,26 @@ pub struct Catalog {
     pub truncated: bool,
     /// `false` for a partial list sent while collection runs.
     pub done: bool,
+    /// The root the paths were collected under.
+    pub root: RootItem,
+}
+
+/// Where schema paths are collected: the whole document or, in streaming mode, the
+/// innermost container at the cursor (FR-17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subtree {
+    /// Rows from the document root to the subtree's root.
+    pub rows: Vec<u64>,
+    pub root: RootItem,
+    /// The subtree's jq path; empty for the whole document.
+    pub label: String,
+}
+
+/// A picked schema path and the subtree it was picked in; `n`/`N` repeat it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub scope: Subtree,
+    pub segs: Vec<Seg>,
 }
 
 /// Most matches kept and shown.
@@ -45,6 +68,8 @@ pub struct Picker {
     pub truncated: bool,
     /// Collection is still running; more entries may arrive.
     pub collecting: bool,
+    /// Where the entries come from; `None` means the whole document.
+    pub scope: Option<Subtree>,
     /// Indices into `entries`, best match first.
     pub matches: Vec<usize>,
     pub selected: usize,
@@ -117,17 +142,53 @@ impl Picker {
     }
 }
 
-/// Opens the picker, collecting the schema the first time.
+/// Opens the picker, collecting the schema of its scope unless it is cached.
 pub fn open<T: TreeIndex>(model: &mut Model<T>) {
-    let mut picker = Picker::default();
-    let cached = model.schema.clone();
+    let scope = subtree_of(model);
+    let cached = model.schema.clone().filter(|c| c.root == scope.root);
+    let mut picker = Picker {
+        scope: Some(scope.clone()),
+        ..Picker::default()
+    };
     if let Some(catalog) = &cached {
         picker.set_catalog(catalog);
     }
     model.picker = Some(picker);
     if cached.is_none() {
-        submit_job(model, Work::Schema, None, None);
+        submit_job(model, Work::Schema, None, None, scope.root);
     }
+}
+
+/// The whole document or, in streaming mode, the innermost container at the cursor.
+fn subtree_of<T: TreeIndex>(model: &Model<T>) -> Subtree {
+    let whole = Subtree {
+        rows: Vec::new(),
+        root: model.state.root,
+        label: String::new(),
+    };
+    if !model.tree.streamed() {
+        return whole;
+    }
+    let (tree, root) = (&*model.tree, &model.state.root);
+    container_at(tree, root, &model.state.cursor).unwrap_or(whole)
+}
+
+/// The innermost container on the path to `cursor`, below the document root.
+fn container_at(tree: &impl TreeIndex, root: &RootItem, cursor: &[u64]) -> Option<Subtree> {
+    let items = chain(tree, root, cursor).ok()?;
+    let is_container = |kind: &RowKind| matches!(kind, RowKind::Value { node, .. } if matches!(node.kind, Kind::Object | Kind::Array));
+    let depth = items.iter().rposition(|item| is_container(&item.kind))?;
+    let (node, end) = match &items.get(depth)?.kind {
+        RowKind::Value { node, end, .. } if depth > 0 => (*node, *end),
+        _ => return None,
+    };
+    let label = render_path(&segments(tree, &items[..=depth]).ok()?);
+    let rows = cursor.get(..depth)?.to_vec();
+    Some(Subtree {
+        rows,
+        root: RootItem { node, end },
+        label,
+    })
 }
 
 /// Shows collected schema paths if the picker is open; keeps finished lists for next time.
@@ -145,25 +206,28 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
     match model.picker.as_mut().and_then(|picker| picker.key(key)) {
         Some(PickerAction::Close) => model.picker = None,
         Some(PickerAction::Pick(segs)) => {
-            model.picker = None;
-            model.last_find = LastFind::Schema(segs.clone());
+            let scope = model.picker.take().and_then(|p| p.scope);
+            let scope = scope.unwrap_or_else(|| subtree_of(model));
+            let target = Target { scope, segs };
+            model.last_find = LastFind::Schema(target.clone());
             let from = offset_of(model, &model.state.cursor).and_then(|o| o.checked_sub(1));
-            step(model, &segs, Direction::Forward, from);
+            step(model, &target, Direction::Forward, from);
         }
         Some(PickerAction::Edited | PickerAction::Moved) | None => {}
     }
 }
 
-/// Moves to the next or previous occurrence of a schema path.
+/// Moves to the next or previous occurrence of a schema path within its subtree.
 pub fn step<T: TreeIndex>(
     model: &mut Model<T>,
-    segs: &[Seg],
+    target: &Target,
     direction: Direction,
     from: Option<u64>,
 ) {
-    let tree = &*model.tree;
-    match schema::find(tree, &model.state.root, segs, from, direction) {
+    let (tree, scope) = (&*model.tree, &target.scope);
+    match schema::find(tree, &scope.root, &target.segs, from, direction) {
         Ok(Some(rows)) => {
+            let rows = [scope.rows.clone(), rows].concat();
             let result = reveal(tree, &mut model.state, rows, model.height);
             model.status = result.err().map(|err| err.to_string());
         }
@@ -277,7 +341,7 @@ mod flow_tests {
         );
     }
 
-    fn cursor(model: &Model<MemTree>) -> String {
+    fn cursor<T: crate::tree::TreeIndex>(model: &Model<T>) -> String {
         let tree = &*model.tree;
         render(
             &segments(
@@ -304,7 +368,7 @@ mod flow_tests {
         assert_eq!(cursor(&model), ".users[2].name");
     }
 
-    fn screen(model: &Model<MemTree>) -> String {
+    fn screen<T: crate::tree::TreeIndex>(model: &Model<T>) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
         terminal.draw(|frame| view(model, frame)).unwrap();
@@ -324,10 +388,12 @@ mod flow_tests {
         open(&mut model);
         assert!(!screen(&model).contains("partial"));
         let entries = std::sync::Arc::new(vec![(".a".to_owned(), Vec::new())]);
+        let root = model.state.root;
         let truncated = super::Catalog {
             entries,
             truncated: true,
             done: true,
+            root,
         };
         super::receive(&mut model, truncated);
         assert!(
@@ -348,6 +414,7 @@ mod flow_tests {
             entries,
             truncated: false,
             done: false,
+            root: model.state.root,
         };
         super::receive(&mut model, partial.clone());
         let shown = screen(&model);
@@ -363,6 +430,40 @@ mod flow_tests {
         super::receive(&mut model, done.clone());
         assert!(!screen(&model).contains("collecting"));
         assert_eq!(model.schema, Some(done));
+    }
+
+    #[test]
+    fn streamed_documents_scope_the_picker_to_the_cursor_container() {
+        use crate::test_support::Streamed;
+        let tree = Streamed(MemTree::parse(MemSource::new(DOC.to_vec())).unwrap());
+        let mut model = Model::new(tree).unwrap();
+        update(&mut model, Msg::Resize(40, 12));
+        model.state.cursor = vec![1];
+        update(
+            &mut model,
+            Msg::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        );
+        let entries = model
+            .picker
+            .as_ref()
+            .and_then(|p| p.entries.clone())
+            .unwrap();
+        let shown: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(shown, [".[]", ".[].name", ".[].x"]);
+        assert!(
+            screen(&model).contains("keys in .users"),
+            "{}",
+            screen(&model)
+        );
+        for c in "].name".chars() {
+            update(&mut model, Msg::Key(KeyCode::Char(c).into()));
+        }
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert_eq!(cursor(&model), ".users[0].name");
+        update(&mut model, Msg::Key(KeyCode::Char('n').into()));
+        assert_eq!(cursor(&model), ".users[2].name");
+        update(&mut model, Msg::Key(KeyCode::Char('n').into()));
+        assert_eq!(cursor(&model), ".users[0].name");
     }
 
     #[test]
