@@ -1,6 +1,7 @@
 //! The Elm-style application core: model, messages, update and view (D-8).
 
 pub mod keymap;
+pub mod prompt;
 pub mod run;
 pub mod screen;
 pub mod terminal;
@@ -8,16 +9,18 @@ pub mod terminal;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use crate::app::keymap::Keymap;
+use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
-use crate::path::render;
+use crate::path::{parse, render};
 use crate::tree::TreeIndex;
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
+use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
 use crate::view::resolve::{RowKind, chain, segments};
 use crate::view::state::TreeState;
@@ -36,6 +39,8 @@ pub struct Model<T> {
     pub height: u64,
     /// The last error, shown in the status bar.
     pub status: Option<String>,
+    /// An open input line, which takes all keys.
+    pub prompt: Option<Prompt>,
     pub quit: bool,
 }
 
@@ -52,6 +57,7 @@ impl<T: TreeIndex> Model<T> {
             theme,
             height: 1,
             status: None,
+            prompt: None,
             quit: false,
         })
     }
@@ -66,6 +72,7 @@ pub enum Msg {
     Resize(u16),
     Nav(Nav),
     Mouse(MouseEvent),
+    OpenPrompt(PromptKind),
 }
 
 /// Applies `msg` to `model`; no I/O happens here.
@@ -73,6 +80,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     match msg {
         Msg::Quit => model.quit = true,
         Msg::Redraw => {}
+        Msg::Key(key) if model.prompt.is_some() => prompt_key(model, key),
         Msg::Key(key) => {
             if let Some(next) = model.keymap.press(key) {
                 update(model, next);
@@ -84,6 +92,33 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             model.status = result.err().map(|err| err.to_string());
         }
         Msg::Mouse(mouse) => on_mouse(model, mouse),
+        Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
+    }
+}
+
+fn prompt_key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
+    let action = model.prompt.as_mut().and_then(|prompt| prompt.key(key));
+    match action {
+        Some(PromptAction::Cancel) => model.prompt = None,
+        Some(PromptAction::Submit(text)) => submit(model, &text),
+        Some(PromptAction::Edited) | None => {}
+    }
+}
+
+/// Runs the prompt's command; failures stay in the prompt for correction.
+fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
+    let result = parse(text)
+        .map_err(|err| err.to_string())
+        .and_then(|steps| {
+            jump(&model.tree, &mut model.state, &steps, model.height).map_err(|err| err.to_string())
+        });
+    match result {
+        Ok(()) => model.prompt = None,
+        Err(error) => {
+            if let Some(prompt) = model.prompt.as_mut() {
+                prompt.error = Some(error);
+            }
+        }
     }
 }
 
@@ -123,7 +158,26 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
         theme: &model.theme,
     };
     frame.render_widget(widget, tree_area);
-    frame.render_widget(status(model, status_area.width.into()), status_area);
+    match &model.prompt {
+        Some(prompt) => {
+            frame.render_widget(prompt_line(prompt, &model.theme), status_area);
+            let column = u16::try_from(prompt.text.chars().count() + 1).unwrap_or(u16::MAX);
+            frame.set_cursor_position((status_area.x.saturating_add(column), status_area.y));
+        }
+        None => frame.render_widget(status(model, status_area.width.into()), status_area),
+    }
+}
+
+fn prompt_line(prompt: &Prompt, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw(format!(
+        "{}{}",
+        prompt.kind.symbol(),
+        prompt.text
+    ))];
+    if let Some(error) = &prompt.error {
+        spans.push(Span::styled(format!("  {error}"), theme.error));
+    }
+    Line::from(spans)
 }
 
 fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
@@ -210,6 +264,65 @@ mod tests {
         assert!(model.state.is_expanded(&[0]));
         update(&mut model, mouse(MouseEventKind::ScrollDown, 0, 0));
         assert_eq!(model.state.top, 3);
+    }
+
+    fn typed(model: &mut Model<MemTree>, text: &str) {
+        for c in text.chars() {
+            update(model, Msg::Key(KeyCode::Char(c).into()));
+        }
+    }
+
+    #[test]
+    fn the_query_prompt_jumps_to_a_path() {
+        let mut model = model();
+        typed(&mut model, ":.a[1]");
+        assert_eq!(
+            model.prompt.as_ref().map(|p| p.text.as_str()),
+            Some(".a[1]")
+        );
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert_eq!(
+            (model.prompt.clone(), model.state.cursor.clone()),
+            (None, vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn prompt_errors_stay_visible_and_esc_cancels() {
+        let mut model = model();
+        typed(&mut model, ":.nope");
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert_eq!(
+            model.prompt.as_ref().and_then(|p| p.error.clone()),
+            Some("no key \"nope\"".to_owned())
+        );
+        typed(&mut model, "[");
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert!(
+            model
+                .prompt
+                .as_ref()
+                .and_then(|p| p.error.clone())
+                .is_some_and(|e| e.contains("column"))
+        );
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        assert_eq!(
+            (model.prompt.clone(), model.state.cursor.clone()),
+            (None, vec![])
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_drawn_in_the_status_row() {
+        let mut model = model();
+        typed(&mut model, ":.a");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
+        terminal.draw(|frame| view(&model, frame)).unwrap();
+        let row: String = (0..20)
+            .map(|x| terminal.backend().buffer()[(x, 2)].symbol())
+            .collect();
+        assert_eq!(row.trim_end(), ":.a");
     }
 
     #[test]

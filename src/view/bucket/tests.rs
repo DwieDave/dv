@@ -72,3 +72,17 @@ fn half_a_million_children_become_1024_sized_buckets() {
     assert_eq!(level.row(0), Some(Row::Bucket(0..1024)));
     assert_eq!(level.row(488), Some(Row::Bucket(499_712..500_000)));
 }
+
+proptest! {
+    #[test]
+    fn locate_finds_the_row_holding_a_child(n in 1u64..5_000_000, pick in any::<prop::sample::Index>()) {
+        let k = pick.index(usize::try_from(n).unwrap()) as u64;
+        let level = Level::of(0..n);
+        let (row, bucket) = level.locate(k).unwrap();
+        match level.row(row).unwrap() {
+            Row::Child(c) => prop_assert!(c == k && bucket.is_none()),
+            Row::Bucket(r) => prop_assert!(r.contains(&k) && bucket == Some(r)),
+        }
+        prop_assert_eq!(level.locate(n), None);
+    }
+}

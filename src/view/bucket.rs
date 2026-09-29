@@ -44,6 +44,20 @@ impl Level {
         self.len() == 0
     }
 
+    /// The row holding child `k`, and that row's bucket range when it is a bucket.
+    #[must_use]
+    pub fn locate(&self, k: u64) -> Option<(u64, Option<Range<u64>>)> {
+        if !self.range.contains(&k) {
+            return None;
+        }
+        let row = (k - self.range.start) / self.step;
+        let bucket = match self.row(row)? {
+            Row::Bucket(range) => Some(range),
+            Row::Child(_) => None,
+        };
+        Some((row, bucket))
+    }
+
     #[must_use]
     pub fn row(&self, i: u64) -> Option<Row> {
         if i >= self.len() {

@@ -97,7 +97,11 @@ fn expandable(
     Ok(Some(level_of(tree, &item)?).filter(|level| !level.is_empty()))
 }
 
-fn expand(tree: &impl TreeIndex, state: &mut TreeState, path: &[u64]) -> Result<bool, IndexError> {
+pub(crate) fn expand(
+    tree: &impl TreeIndex,
+    state: &mut TreeState,
+    path: &[u64],
+) -> Result<bool, IndexError> {
     if state.is_expanded(path) {
         return Ok(false);
     }
@@ -180,7 +184,7 @@ fn collapse_all(tree: &impl TreeIndex, state: &mut TreeState) -> Result<(), Inde
     Ok(())
 }
 
-fn scroll_into_view(state: &mut TreeState, height: u64) {
+pub(crate) fn scroll_into_view(state: &mut TreeState, height: u64) {
     let row = state.row_of(&state.cursor).unwrap_or(0);
     let top = state.top.min(state.total_rows() - 1).min(row);
     state.top = top.max((row + 1).saturating_sub(height));
