@@ -55,6 +55,14 @@ impl TreeState {
     }
 
     #[must_use]
+    pub fn row_of(&self, path: &[u64]) -> Option<u64> {
+        match &self.expansion {
+            Some(e) => e.row_of(path),
+            None => path.is_empty().then_some(0),
+        }
+    }
+
+    #[must_use]
     pub fn next(&self, path: &[u64]) -> Option<Vec<u64>> {
         self.expansion.as_ref().and_then(|e| e.next(path))
     }
