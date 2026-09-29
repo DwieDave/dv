@@ -262,6 +262,26 @@ impl MemTree {
     }
 }
 
+/// The first child of `kids` whose span holds `offset`; stops once children start past it.
+///
+/// # Errors
+/// Whatever the iterator yields.
+pub(crate) fn containing(
+    kids: impl Iterator<Item = Result<Child, IndexError>>,
+    offset: u64,
+) -> Result<Option<Child>, IndexError> {
+    for child in kids {
+        let child = child?;
+        if child.start() > offset {
+            return Ok(None);
+        }
+        if offset < child.end {
+            return Ok(Some(child));
+        }
+    }
+    Ok(None)
+}
+
 /// Binary search over `n` checkpoints for the last one at or before `offset`, as a child index.
 pub(crate) fn last_at_or_before(
     n: u64,
@@ -322,16 +342,7 @@ impl TreeIndex for MemTree {
             return Ok(None);
         }
         let first = self.checkpoint_index(node, offset)?;
-        for child in self.kids(node, first)? {
-            let child = child?;
-            if child.start() > offset {
-                return Ok(None);
-            }
-            if offset < child.end {
-                return Ok(Some(child));
-            }
-        }
-        Ok(None)
+        containing(self.kids(node, first)?, offset)
     }
 
     fn bytes(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, IndexError> {

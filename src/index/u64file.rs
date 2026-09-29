@@ -75,3 +75,13 @@ impl U64File {
         Ok(())
     }
 }
+
+/// Value `i` of a list written by [`U64File`], read straight from its file.
+///
+/// # Errors
+/// Read failures, including reading past the end.
+pub(crate) fn read_u64(file: &File, i: u64) -> io::Result<u64> {
+    let mut word = [0; 8];
+    file.read_exact_at(&mut word, i * 8)?;
+    Ok(u64::from_le_bytes(word))
+}

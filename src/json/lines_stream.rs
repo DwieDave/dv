@@ -24,6 +24,9 @@ pub struct StreamLines<B> {
 /// Validates and indexes NDJSON without holding it in memory; malformed records are
 /// recorded, not fatal, exactly as in [`crate::json::ndjson::parse_lines`].
 ///
+/// `publish(builder, frontier, last)` runs before each refill, and once with `last` at the
+/// end or before a fatal error; the frontier is always a record boundary.
+///
 /// # Errors
 /// Read or spill failures, a token longer than `limits.max`, or `Cancelled`.
 pub fn parse_lines_stream<R: Source, B: Builder>(
@@ -32,32 +35,50 @@ pub fn parse_lines_stream<R: Source, B: Builder>(
     mut lines: LineSpill,
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
+    mut publish: impl FnMut(&mut B, u64, bool),
 ) -> Result<StreamLines<B>, IndexError> {
     let mut window = Window::unchecked(source, limits);
-    window.refill(0)?;
     let mut parser = Parser::with_builder(&[][..], hook, builder);
-    let mut at = At::Gap;
-    loop {
-        let mut bound = parser.rebind(&window.bytes, window.base, window.eof);
-        let outcome = run(&mut bound, &mut lines, &mut at, window.eof);
-        let pos = bound.pos;
-        parser = bound.rebind(&[], 0, false);
-        match outcome {
+    let (mut at, mut frontier) = (At::Gap, 0);
+    let mut result = window.refill(0);
+    while result.is_ok() {
+        let (next, outcome, pos) = run_window(parser, &window, &mut lines, &mut at);
+        parser = next;
+        frontier = at.frontier(window.base + pos as u64);
+        result = match outcome {
             Ok(()) => break,
             Err(Stop::More) => {
                 at.feed(&window.bytes[..pos], window.base);
-                window.refill(pos)?;
+                lines.publish(at.pending(), false);
+                publish(&mut parser.builder, frontier, false);
+                window.refill(pos)
             }
-            Err(Stop::Seek(offset)) => window.seek(offset)?,
-            Err(Stop::Fatal(err)) => return Err(err.into()),
-        }
+            Err(Stop::Seek(offset)) => window.seek(offset),
+            Err(Stop::Fatal(err)) => Err(err.into()),
+        };
         parser.pos = 0;
     }
+    lines.publish(at.pending(), true);
+    publish(&mut parser.builder, frontier, true);
+    result?;
     Ok(StreamLines {
         builder: parser.builder,
         lines: lines.finish()?,
         values: parser.values + 1,
     })
+}
+
+/// Runs the parser over the current window; returns it with the outcome and position.
+fn run_window<H: FnMut(u64) -> ControlFlow<()>, B: Builder, R: Source>(
+    parser: Parser<'static, H, B>,
+    window: &Window<'_, R>,
+    lines: &mut LineSpill,
+    at: &mut At<B::Mark>,
+) -> (Parser<'static, H, B>, Result<(), Stop>, usize) {
+    let mut bound = parser.rebind(&window.bytes, window.base, window.eof);
+    let outcome = run(&mut bound, lines, at, window.eof);
+    let pos = bound.pos;
+    (bound.rebind(&[], 0, false), outcome, pos)
 }
 
 /// Why parsing paused.
@@ -100,6 +121,23 @@ enum At<M> {
 }
 
 impl<M> At<M> {
+    /// Whether a record has started but is not finished.
+    fn pending(&self) -> bool {
+        matches!(
+            self,
+            Self::Open(_) | Self::Body(_) | Self::Tail(_) | Self::Skip(_)
+        )
+    }
+
+    /// The last record boundary at or before absolute position `here`.
+    fn frontier(&self, here: u64) -> u64 {
+        match self {
+            Self::Open(r) | Self::Body(r) | Self::Tail(r) => r.start,
+            Self::Skip(bad) => bad.start,
+            Self::Gap | Self::Done => here,
+        }
+    }
+
     /// Validates the record's bytes before the buffer drops them.
     fn feed(&mut self, bytes: &[u8], base: u64) {
         if let Self::Open(r) | Self::Body(r) | Self::Tail(r) = self {
@@ -339,10 +377,53 @@ mod tests {
 
     use super::*;
     use crate::error::ParseErrorKind;
+    use crate::index::children::Child;
+    use crate::index::lines::{Lines, LiveLines};
     use crate::index::store::{NodeStore, VecStoreBuilder};
+    use crate::json::lex::Kind;
     use crate::json::ndjson::parse_lines;
     use crate::source::MemSource;
     use crate::test_support::ndjson;
+    use crate::tree::{MemTree, TreeIndex};
+
+    /// Every record of the in-memory tree.
+    fn all_records(bytes: &[u8]) -> Vec<Child> {
+        let tree = MemTree::parse_lines(MemSource::new(bytes.to_vec())).unwrap();
+        let root = tree.root().unwrap();
+        let n = tree.child_count(root).unwrap().available();
+        tree.children(root, 0..n).unwrap()
+    }
+
+    fn check_live(
+        live: &LiveLines,
+        records: &[Child],
+        frontier: u64,
+        last: bool,
+    ) -> Result<(), TestCaseError> {
+        prop_assert!(
+            records
+                .iter()
+                .all(|r| !(r.value < frontier && frontier < r.end)),
+            "frontier {} inside a record",
+            frontier
+        );
+        let before: Vec<&Child> = records.iter().filter(|r| r.value < frontier).collect();
+        prop_assert_eq!(live.count(), before.len() as u64);
+        prop_assert_eq!(live.checkpoints(), (before.len() as u64).div_ceil(16));
+        for (k, r) in before.iter().step_by(16).enumerate() {
+            prop_assert_eq!(live.checkpoint(k as u64).unwrap(), Some(r.value));
+        }
+        for r in &before {
+            prop_assert_eq!(
+                live.bad_at(r.value).unwrap().is_some(),
+                r.kind == Kind::Invalid
+            );
+        }
+        prop_assert_eq!(live.bad_from(frontier).unwrap(), None);
+        prop_assert_eq!(live.done(), last);
+        prop_assert!(!last || before.len() == records.len());
+        Ok(())
+    }
 
     fn streamed(bytes: &[u8], initial: usize) -> StreamLines<VecStoreBuilder> {
         let limits = StreamLimits {
@@ -351,9 +432,15 @@ mod tests {
         };
         let spill = LineSpill::new(3).unwrap();
         let source = MemSource::new(bytes.to_vec());
-        parse_lines_stream(&source, VecStoreBuilder::default(), spill, limits, |_| {
-            ControlFlow::Continue(())
-        })
+        let hook = |_| ControlFlow::Continue(());
+        parse_lines_stream(
+            &source,
+            VecStoreBuilder::default(),
+            spill,
+            limits,
+            hook,
+            |_, _, _| {},
+        )
         .unwrap()
     }
 
@@ -375,6 +462,27 @@ mod tests {
                 "initial {initial}"
             );
             assert_eq!(bad(9), None);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn live_lines_are_final_up_to_each_frontier(bytes in ndjson(), initial in 1usize..48) {
+            let records = all_records(&bytes);
+            let (spill, live) = LineSpill::live(3).unwrap();
+            let mut failure = None;
+            let publish = |_: &mut VecStoreBuilder, frontier: u64, last: bool| {
+                if failure.is_none() {
+                    failure = check_live(&live, &records, frontier, last).err();
+                }
+            };
+            let limits = StreamLimits { initial, max: 1 << 20 };
+            let source = MemSource::new(bytes.clone());
+            parse_lines_stream(&source, VecStoreBuilder::default(), spill, limits, |_| ControlFlow::Continue(()), publish).unwrap();
+            if let Some(err) = failure {
+                return Err(err);
+            }
         }
     }
 

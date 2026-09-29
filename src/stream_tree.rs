@@ -6,16 +6,16 @@ use std::ops::{ControlFlow, Range};
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::Format;
 use crate::index::children::Child;
-use crate::index::lines::{LineSpill, LineStore, StreamRecords, stream_records};
+use crate::index::lines::{Kids, LineSpill, LineStore, Lines, checkpoint_index, kids};
 use crate::index::spill::{SpillBuilder, SpillLimits, SpillStore};
 use crate::index::store::{Fanout, NodeStore};
-use crate::index::window::{StreamChildren, stream_seek, value_end};
+use crate::index::window::value_end;
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, kind_of};
 use crate::json::lines_stream::parse_lines_stream;
 use crate::json::stream::{StreamLimits, parse_stream};
 use crate::source::Source;
-use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, last_at_or_before};
+use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 
 /// A document indexed without being held in memory.
 #[derive(Debug)]
@@ -84,7 +84,7 @@ impl<R: Source> StreamTree<R, SpillStore> {
     ) -> Result<Self, IndexError> {
         let builder = SpillBuilder::new(spill)?;
         let lines = LineSpill::new(spill.stack)?;
-        let parsed = parse_lines_stream(&source, builder, lines, limits, hook)?;
+        let parsed = parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _| {})?;
         let store = parsed.builder.finish()?;
         Ok(Self {
             lines: Some(Box::new(parsed.lines)),
@@ -93,61 +93,15 @@ impl<R: Source> StreamTree<R, SpillStore> {
     }
 }
 
-/// Children of a container or the records of an NDJSON document.
-enum Kids<'a, S, R> {
-    Container(StreamChildren<'a, S, R>),
-    Records(StreamRecords<'a, S, R>),
-}
-
-impl<S: NodeStore, R: Source> Iterator for Kids<'_, S, R> {
-    type Item = Result<Child, IndexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Container(it) => it.next(),
-            Self::Records(it) => it.next(),
-        }
-    }
-}
-
 impl<R: Source, S: NodeStore> StreamTree<R, S> {
-    fn kids(&self, node: NodeRef, k: u64) -> Result<Kids<'_, S, R>, IndexError> {
-        Ok(match self.lines_of(node) {
-            Some(lines) => Kids::Records(stream_records(
-                &self.source,
-                &self.store,
-                lines,
-                k,
-                self.window,
-            )?),
-            None => Kids::Container(stream_seek(
-                &self.source,
-                &self.store,
-                node,
-                k,
-                self.window,
-            )?),
-        })
+    fn kids(&self, node: NodeRef, k: u64) -> Result<Kids<'_, S, R, LineStore>, IndexError> {
+        let lines = self.lines_of(node);
+        kids(&self.source, &self.store, lines, node, k, self.window)
     }
 
     /// The line index, when `node` is the NDJSON root.
     fn lines_of(&self, node: NodeRef) -> Option<&LineStore> {
         self.lines.as_deref().filter(|_| node.offset == LINES_ROOT)
-    }
-
-    /// Child index of the last checkpoint at or before `offset` (0 without checkpoints).
-    fn checkpoint_index(&self, node: NodeRef, offset: u64) -> Result<u64, IndexError> {
-        if let Some(lines) = self.lines_of(node) {
-            return last_at_or_before(lines.checkpoints(), |k| Ok(lines.checkpoint(k)?), offset);
-        }
-        match self.fanout(node)? {
-            Some(fanout) => last_at_or_before(
-                fanout.checkpoints(),
-                |k| Ok(self.store.checkpoint(&fanout, k)?),
-                offset,
-            ),
-            None => Ok(0),
-        }
     }
 
     /// The bad NDJSON record starting at `offset`, if any.
@@ -215,17 +169,8 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
         if !is_container(node) {
             return Ok(None);
         }
-        let first = self.checkpoint_index(node, offset)?;
-        for child in self.kids(node, first)? {
-            let child = child?;
-            if child.start() > offset {
-                return Ok(None);
-            }
-            if offset < child.end {
-                return Ok(Some(child));
-            }
-        }
-        Ok(None)
+        let first = checkpoint_index(&self.store, self.lines_of(node), node, offset)?;
+        containing(self.kids(node, first)?, offset)
     }
 
     fn bytes(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, IndexError> {
@@ -363,9 +308,9 @@ mod tests {
                 let node = child.node();
                 prop_assert_eq!(stream.value_end(node).unwrap(), mem.value_end(node).unwrap());
                 prop_assert_eq!(stream.problem(node), mem.problem(node));
-                if node.kind != Kind::Invalid {
-                    prop_assert_eq!(to_value(&stream, node), to_value(&mem, node));
-                }
+                prop_assert_eq!(stream.child_count(node).unwrap(), mem.child_count(node).unwrap());
+                let span = node.offset..child.end;
+                prop_assert_eq!(stream.bytes(span.clone()).unwrap(), mem.bytes(span).unwrap());
             }
             for offset in 0..=bytes.len() as u64 {
                 prop_assert_eq!(stream.child_containing(root, offset).unwrap(), mem.child_containing(root, offset).unwrap(), "offset {}", offset);

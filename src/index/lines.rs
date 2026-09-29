@@ -1,17 +1,20 @@
 //! The NDJSON line index spilled to temporary files (streaming mode, FR-5, FR-23).
 
+use std::fs::File;
 use std::io;
+use std::sync::{Arc, RwLock};
 
 use tempfile::tempfile;
 
 use crate::error::ParseErrorKind;
 use crate::index::children::{Child, skip_value};
 use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
-use crate::index::u64file::U64File;
-use crate::index::window::{OffsetStore, ReadWindow, trusted};
+use crate::index::u64file::{U64File, read_u64};
+use crate::index::window::{OffsetStore, ReadWindow, StreamChildren, stream_seek, trusted};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, skip_ws};
 use crate::source::{Source, SourceError};
+use crate::tree::{NodeRef, last_at_or_before};
 
 /// A record that failed to parse; enumeration skips from `start` to `resume`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub struct LineSpill {
     /// `(start, resume, kind code)` triples in start order.
     bad: U64File,
     error: Option<io::Error>,
+    /// Set when readers follow the build; writes then wait for `publish`.
+    live: Option<Arc<Shared>>,
 }
 
 impl LineSpill {
@@ -42,7 +47,43 @@ impl LineSpill {
             checkpoints: U64File::new(tempfile()?, limit),
             bad: U64File::new(tempfile()?, limit),
             error: None,
+            live: None,
         })
+    }
+
+    /// A spill whose published part can be read while it is built.
+    ///
+    /// # Errors
+    /// Temp file creation failures.
+    pub fn live(limit: usize) -> Result<(Self, LiveLines), SourceError> {
+        let mut spill = Self::new(limit)?;
+        spill.checkpoints.defer = true;
+        spill.bad.defer = true;
+        let shared = Arc::new(Shared {
+            view: RwLock::new(View::default()),
+            checkpoints: spill.checkpoints.file.try_clone()?,
+            bad: spill.bad.file.try_clone()?,
+        });
+        spill.live = Some(Arc::clone(&shared));
+        Ok((spill, LiveLines { shared }))
+    }
+
+    /// Makes the records before the frontier visible; `pending` means the last record
+    /// started is still being parsed.
+    pub fn publish(&mut self, pending: bool, done: bool) {
+        let Some(shared) = self.live.clone() else {
+            return;
+        };
+        let Ok(mut view) = shared.view.write() else {
+            return;
+        };
+        let flushed = self.checkpoints.flush().and_then(|()| self.bad.flush());
+        flushed.unwrap_or_else(|err| self.fail(err));
+        *view = View {
+            count: self.count - u64::from(pending),
+            bad: self.bad.len() / 3,
+            done,
+        };
     }
 
     pub fn record_start(&mut self, start: u64) {
@@ -78,41 +119,46 @@ impl LineSpill {
     }
 }
 
-/// The finished line index, read with positional reads.
-#[derive(Debug)]
-pub struct LineStore {
-    count: u64,
-    checkpoints: U64File,
-    bad: U64File,
-}
+/// Read access to an NDJSON line index, finished or live.
+pub trait Lines {
+    /// Records indexed.
+    fn count(&self) -> u64;
 
-impl LineStore {
-    #[must_use]
-    pub fn count(&self) -> u64 {
-        self.count
-    }
+    /// Bad records indexed.
+    fn bad_count(&self) -> u64;
 
-    #[must_use]
-    pub fn checkpoints(&self) -> u64 {
-        self.checkpoints.len()
+    /// Value `i` of the checkpoint list (`i < checkpoints()`).
+    ///
+    /// # Errors
+    /// Read failures.
+    fn checkpoint_value(&self, i: u64) -> Result<u64, SourceError>;
+
+    /// The `(start, resume, kind code)` of bad record `i` (`i < bad_count()`).
+    ///
+    /// # Errors
+    /// Read failures.
+    fn bad_fields(&self, i: u64) -> Result<[u64; 3], SourceError>;
+
+    fn checkpoints(&self) -> u64 {
+        self.count().div_ceil(CHECKPOINT_EVERY)
     }
 
     /// Start of record `k * CHECKPOINT_EVERY`.
     ///
     /// # Errors
     /// Read failures.
-    pub fn checkpoint(&self, k: u64) -> Result<Option<u64>, SourceError> {
+    fn checkpoint(&self, k: u64) -> Result<Option<u64>, SourceError> {
         if k >= self.checkpoints() {
             return Ok(None);
         }
-        Ok(self.checkpoints.read(k..k + 1)?.first().copied())
+        self.checkpoint_value(k).map(Some)
     }
 
     /// The bad record starting at `start`.
     ///
     /// # Errors
     /// Read failures.
-    pub fn bad_at(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
+    fn bad_at(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
         Ok(self.bad_from(start)?.filter(|line| line.start == start))
     }
 
@@ -120,8 +166,8 @@ impl LineStore {
     ///
     /// # Errors
     /// Read failures.
-    pub fn bad_from(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
-        let (mut lo, mut hi) = (0, self.bad.len() / 3);
+    fn bad_from(&self, start: u64) -> Result<Option<BadLine>, SourceError> {
+        let (mut lo, mut hi) = (0, self.bad_count());
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if self.bad_line(mid)?.is_some_and(|l| l.start < start) {
@@ -133,27 +179,115 @@ impl LineStore {
         self.bad_line(lo)
     }
 
+    /// Bad record `i`, if there is one.
+    ///
+    /// # Errors
+    /// Read failures.
     fn bad_line(&self, i: u64) -> Result<Option<BadLine>, SourceError> {
-        if 3 * i >= self.bad.len() {
+        if i >= self.bad_count() {
             return Ok(None);
         }
-        let fields = self.bad.read(3 * i..3 * i + 3)?;
-        Ok(match fields[..] {
-            [start, resume, code] => ParseErrorKind::from_code(code).map(|kind| BadLine {
-                start,
-                resume,
-                kind,
-            }),
-            _ => None,
-        })
+        let [start, resume, code] = self.bad_fields(i)?;
+        Ok(ParseErrorKind::from_code(code).map(|kind| BadLine {
+            start,
+            resume,
+            kind,
+        }))
+    }
+}
+
+/// The finished line index, read with positional reads.
+#[derive(Debug)]
+pub struct LineStore {
+    count: u64,
+    checkpoints: U64File,
+    bad: U64File,
+}
+
+impl Lines for LineStore {
+    fn count(&self) -> u64 {
+        self.count
+    }
+
+    fn bad_count(&self) -> u64 {
+        self.bad.len() / 3
+    }
+
+    fn checkpoint_value(&self, i: u64) -> Result<u64, SourceError> {
+        Ok(self
+            .checkpoints
+            .read(i..i + 1)?
+            .first()
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn bad_fields(&self, i: u64) -> Result<[u64; 3], SourceError> {
+        match self.bad.read(3 * i..3 * i + 3)?[..] {
+            [start, resume, code] => Ok([start, resume, code]),
+            _ => Ok([0, 0, u64::MAX]),
+        }
+    }
+}
+
+/// What readers of a live line index may see.
+#[derive(Debug, Default, Clone, Copy)]
+struct View {
+    count: u64,
+    bad: u64,
+    done: bool,
+}
+
+/// State shared between a live spill and its readers.
+#[derive(Debug)]
+struct Shared {
+    view: RwLock<View>,
+    checkpoints: File,
+    bad: File,
+}
+
+/// The published part of a line index still being built.
+#[derive(Debug, Clone)]
+pub struct LiveLines {
+    shared: Arc<Shared>,
+}
+
+impl LiveLines {
+    fn view(&self) -> View {
+        self.shared.view.read().map(|v| *v).unwrap_or_default()
+    }
+
+    /// Whether indexing has finished (successfully or not).
+    #[must_use]
+    pub fn done(&self) -> bool {
+        self.view().done
+    }
+}
+
+impl Lines for LiveLines {
+    fn count(&self) -> u64 {
+        self.view().count
+    }
+
+    fn bad_count(&self) -> u64 {
+        self.view().bad
+    }
+
+    fn checkpoint_value(&self, i: u64) -> Result<u64, SourceError> {
+        Ok(read_u64(&self.shared.checkpoints, i)?)
+    }
+
+    fn bad_fields(&self, i: u64) -> Result<[u64; 3], SourceError> {
+        let field = |k| read_u64(&self.shared.bad, 3 * i + k);
+        Ok([field(0)?, field(1)?, field(2)?])
     }
 }
 
 /// NDJSON records read window by window; offsets are absolute.
-pub struct StreamRecords<'a, S, R> {
+pub struct StreamRecords<'a, S, R, L> {
     win: ReadWindow<'a, R>,
     store: &'a S,
-    lines: &'a LineStore,
+    lines: &'a L,
     /// The first bad record not passed yet.
     next_bad: Option<BadLine>,
     pos: u64,
@@ -161,7 +295,7 @@ pub struct StreamRecords<'a, S, R> {
     done: bool,
 }
 
-impl<S: NodeStore, R: Source> Iterator for StreamRecords<'_, S, R> {
+impl<S: NodeStore, R: Source, L: Lines> Iterator for StreamRecords<'_, S, R, L> {
     type Item = Result<Child, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -177,7 +311,7 @@ impl<S: NodeStore, R: Source> Iterator for StreamRecords<'_, S, R> {
     }
 }
 
-impl<S: NodeStore, R: Source> StreamRecords<'_, S, R> {
+impl<S: NodeStore, R: Source, L: Lines> StreamRecords<'_, S, R, L> {
     /// The next record, re-reading and growing the window until it is trustworthy.
     fn step(&mut self) -> Result<Option<Child>, IndexError> {
         loop {
@@ -238,13 +372,13 @@ impl<S: NodeStore, R: Source> StreamRecords<'_, S, R> {
 ///
 /// # Errors
 /// Storage failures or lexing errors while skipping.
-pub fn stream_records<'a, S: NodeStore, R: Source>(
+pub fn stream_records<'a, S: NodeStore, R: Source, L: Lines>(
     source: &'a R,
     store: &'a S,
-    lines: &'a LineStore,
+    lines: &'a L,
     k: u64,
     window: usize,
-) -> Result<StreamRecords<'a, S, R>, IndexError> {
+) -> Result<StreamRecords<'a, S, R, L>, IndexError> {
     let cp = (k / CHECKPOINT_EVERY).min(lines.checkpoints().saturating_sub(1));
     let (index, pos) = lines
         .checkpoint(cp)?
@@ -266,6 +400,65 @@ pub fn stream_records<'a, S: NodeStore, R: Source>(
         }
     }
     Ok(it)
+}
+
+/// Children of a container, or the records of an NDJSON document.
+pub enum Kids<'a, S, R, L> {
+    Container(StreamChildren<'a, S, R>),
+    Records(StreamRecords<'a, S, R, L>),
+}
+
+impl<S: NodeStore, R: Source, L: Lines> Iterator for Kids<'_, S, R, L> {
+    type Item = Result<Child, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Container(it) => it.next(),
+            Self::Records(it) => it.next(),
+        }
+    }
+}
+
+/// Children of `node` positioned at child `k`: records when `lines` is given (the NDJSON root).
+///
+/// # Errors
+/// Storage failures or lexing errors while skipping.
+pub fn kids<'a, S: NodeStore, R: Source, L: Lines>(
+    source: &'a R,
+    store: &'a S,
+    lines: Option<&'a L>,
+    node: NodeRef,
+    k: u64,
+    window: usize,
+) -> Result<Kids<'a, S, R, L>, IndexError> {
+    Ok(match lines {
+        Some(lines) => Kids::Records(stream_records(source, store, lines, k, window)?),
+        None => Kids::Container(stream_seek(source, store, node, k, window)?),
+    })
+}
+
+/// Child index of the last checkpoint at or before `offset` (0 without checkpoints),
+/// from the line index when given, else from the node's fanout.
+///
+/// # Errors
+/// Storage failures.
+pub fn checkpoint_index<S: NodeStore, L: Lines>(
+    store: &S,
+    lines: Option<&L>,
+    node: NodeRef,
+    offset: u64,
+) -> Result<u64, IndexError> {
+    if let Some(lines) = lines {
+        return last_at_or_before(lines.checkpoints(), |k| Ok(lines.checkpoint(k)?), offset);
+    }
+    match store.node_at(node.offset)?.and_then(|n| n.fanout) {
+        Some(fanout) => last_at_or_before(
+            fanout.checkpoints(),
+            |k| Ok(store.checkpoint(&fanout, k)?),
+            offset,
+        ),
+        None => Ok(0),
+    }
 }
 
 #[cfg(test)]
