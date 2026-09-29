@@ -1,5 +1,7 @@
 //! Byte sources the index reads from: in memory now, file-backed in streaming mode.
 
+pub mod file;
+
 use std::borrow::Cow;
 use std::io::{self, Read};
 use std::ops::Range;
