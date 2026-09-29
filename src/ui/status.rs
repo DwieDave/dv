@@ -14,6 +14,8 @@ pub struct Status<'a> {
     pub format: Format,
     pub stats: Stats,
     pub error: Option<&'a str>,
+    /// Shown instead of the document facts (e.g. search results).
+    pub note: Option<&'a str>,
 }
 
 /// `15.2 MB`-style sizes in decimal units.
@@ -50,9 +52,10 @@ pub fn grouped(n: u64) -> String {
 /// Lays out the status bar for `width` columns.
 #[must_use]
 pub fn status_line(status: &Status<'_>, width: usize, theme: &Theme) -> Line<'static> {
-    let (right, right_style) = match status.error {
-        Some(error) => (error.to_owned(), theme.error),
-        None => (facts(status), theme.badge),
+    let (right, right_style) = match (status.error, status.note) {
+        (Some(error), _) => (error.to_owned(), theme.error),
+        (None, Some(note)) => (note.to_owned(), theme.key),
+        (None, None) => (facts(status), theme.badge),
     };
     let room = width
         .saturating_sub(right.chars().count() + 2)
@@ -130,6 +133,7 @@ mod tests {
             format: Format::Json,
             stats,
             error,
+            note: None,
         }
     }
 

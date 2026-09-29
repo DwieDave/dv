@@ -4,7 +4,12 @@ pub mod keymap;
 pub mod prompt;
 pub mod run;
 pub mod screen;
+pub mod search;
 pub mod terminal;
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -13,9 +18,11 @@ use ratatui::text::{Line, Span};
 
 use crate::app::keymap::Keymap;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
+use crate::app::search::{Job, Outcome, SearchState};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
 use crate::path::{parse, render};
+use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
@@ -31,7 +38,8 @@ const STATUS_ROWS: u16 = 1;
 /// Everything the UI shows.
 #[derive(Debug)]
 pub struct Model<T> {
-    pub tree: T,
+    /// Shared with the search worker.
+    pub tree: Arc<T>,
     pub state: TreeState,
     pub keymap: Keymap,
     pub theme: Theme,
@@ -41,6 +49,11 @@ pub struct Model<T> {
     pub status: Option<String>,
     /// An open input line, which takes all keys.
     pub prompt: Option<Prompt>,
+    pub search: Option<SearchState>,
+    /// The search worker; jobs run inline without one.
+    pub jobs: Option<Sender<Job>>,
+    /// Current search generation; older jobs and outcomes are stale.
+    pub generation: Arc<AtomicU64>,
     pub quit: bool,
 }
 
@@ -49,6 +62,7 @@ impl<T: TreeIndex> Model<T> {
     /// Storage or lexing failures while reading the root.
     pub fn new(tree: T) -> Result<Self, IndexError> {
         let state = TreeState::new(&tree)?;
+        let tree = Arc::new(tree);
         let (keymap, theme) = (Keymap::default(), Theme::default());
         Ok(Self {
             tree,
@@ -58,13 +72,16 @@ impl<T: TreeIndex> Model<T> {
             height: 1,
             status: None,
             prompt: None,
+            search: None,
+            jobs: None,
+            generation: Arc::new(AtomicU64::new(0)),
             quit: false,
         })
     }
 }
 
 /// Things that can happen to the model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Quit,
     Redraw,
@@ -73,6 +90,8 @@ pub enum Msg {
     Nav(Nav),
     Mouse(MouseEvent),
     OpenPrompt(PromptKind),
+    SearchStep(Direction),
+    SearchOutcome(Outcome),
 }
 
 /// Applies `msg` to `model`; no I/O happens here.
@@ -80,6 +99,14 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     match msg {
         Msg::Quit => model.quit = true,
         Msg::Redraw => {}
+        Msg::Key(key)
+            if model
+                .prompt
+                .as_ref()
+                .is_some_and(|p| p.kind == PromptKind::Search) =>
+        {
+            search::prompt_key(model, key);
+        }
         Msg::Key(key) if model.prompt.is_some() => prompt_key(model, key),
         Msg::Key(key) => {
             if let Some(next) = model.keymap.press(key) {
@@ -88,11 +115,14 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         }
         Msg::Resize(height) => model.height = u64::from(height.saturating_sub(STATUS_ROWS)).max(1),
         Msg::Nav(action) => {
-            let result = nav::apply(&model.tree, &mut model.state, action, model.height);
+            let result = nav::apply(&*model.tree, &mut model.state, action, model.height);
             model.status = result.err().map(|err| err.to_string());
         }
         Msg::Mouse(mouse) => on_mouse(model, mouse),
+        Msg::OpenPrompt(PromptKind::Search) => search::open(model),
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
+        Msg::SearchStep(direction) => search::step(model, direction),
+        Msg::SearchOutcome(outcome) => search::apply(model, outcome),
     }
 }
 
@@ -110,7 +140,8 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
     let result = parse(text)
         .map_err(|err| err.to_string())
         .and_then(|steps| {
-            jump(&model.tree, &mut model.state, &steps, model.height).map_err(|err| err.to_string())
+            jump(&*model.tree, &mut model.state, &steps, model.height)
+                .map_err(|err| err.to_string())
         });
     match result {
         Ok(()) => model.prompt = None,
@@ -128,7 +159,7 @@ fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
         MouseEventKind::ScrollUp => update(model, Msg::Nav(Nav::ScrollUp)),
         MouseEventKind::Down(MouseButton::Left) => {
             let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
-            let result = nav::click(&model.tree, &mut model.state, row, column, model.height);
+            let result = nav::click(&*model.tree, &mut model.state, row, column, model.height);
             model.status = result.err().map(|err| err.to_string());
         }
         _ => {}
@@ -153,14 +184,22 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
         Layout::vertical([Constraint::Fill(1), Constraint::Length(STATUS_ROWS)])
             .areas(frame.area());
     let widget = TreeWidget {
-        tree: &model.tree,
+        tree: &*model.tree,
         state: &model.state,
         theme: &model.theme,
     };
     frame.render_widget(widget, tree_area);
     match &model.prompt {
         Some(prompt) => {
-            frame.render_widget(prompt_line(prompt, &model.theme), status_area);
+            let flags = model
+                .search
+                .as_ref()
+                .filter(|_| prompt.kind == PromptKind::Search)
+                .map(|s| flags(&s.query));
+            frame.render_widget(
+                prompt_line(prompt, flags.as_deref(), &model.theme),
+                status_area,
+            );
             let column = u16::try_from(prompt.text.chars().count() + 1).unwrap_or(u16::MAX);
             frame.set_cursor_position((status_area.x.saturating_add(column), status_area.y));
         }
@@ -168,12 +207,30 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
     }
 }
 
-fn prompt_line(prompt: &Prompt, theme: &Theme) -> Line<'static> {
+/// `[regex] [Aa] [keys]`-style markers for the non-default search options.
+fn flags(query: &Query) -> String {
+    let scope = match query.scope {
+        Scope::Both => None,
+        Scope::Keys => Some("[keys]"),
+        Scope::Values => Some("[values]"),
+    };
+    let marks = [
+        query.regex.then_some("[regex]"),
+        query.case_sensitive.then_some("[Aa]"),
+        scope,
+    ];
+    marks.into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::raw(format!(
         "{}{}",
         prompt.kind.symbol(),
         prompt.text
     ))];
+    if let Some(flags) = flags.filter(|f| !f.is_empty()) {
+        spans.push(Span::styled(format!("  {flags}"), theme.badge));
+    }
     if let Some(error) = &prompt.error {
         spans.push(Span::styled(format!("  {error}"), theme.error));
     }
@@ -188,14 +245,15 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
         format: model.tree.format(),
         stats: model.tree.stats(),
         error: model.status.as_deref(),
+        note: model.search.as_ref().and_then(|s| s.note.as_deref()),
     };
     status_line(&status, width, &model.theme)
 }
 
 /// The jq path and type name of the cursor row.
 fn cursor_facts<T: TreeIndex>(model: &Model<T>) -> Result<(String, String), IndexError> {
-    let items = chain(&model.tree, &model.state.root, &model.state.cursor)?;
-    let path = render(&segments(&model.tree, &items)?);
+    let items = chain(&*model.tree, &model.state.root, &model.state.cursor)?;
+    let path = render(&segments(&*model.tree, &items)?);
     let kind = match items.last().map(|item| &item.kind) {
         Some(RowKind::Value { node, .. }) => kind_name(node.kind),
         Some(RowKind::Bucket { .. }) | None => "bucket",

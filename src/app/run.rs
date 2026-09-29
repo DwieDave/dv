@@ -13,7 +13,7 @@ use crate::tree::TreeIndex;
 ///
 /// # Errors
 /// Drawing failures, or the event channel closing before the app quits.
-pub fn run<B: Backend, T: TreeIndex>(
+pub fn run<B: Backend, T: TreeIndex + Send + Sync + 'static>(
     terminal: &mut Terminal<B>,
     app: &mut App<T>,
     events: &Receiver<AppEvent<T>>,

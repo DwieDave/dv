@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::Msg;
 use crate::app::prompt::PromptKind;
+use crate::search::Direction;
 use crate::view::nav::Nav;
 
 /// Remembers a pending chord prefix (`g`, `z`).
@@ -42,6 +43,9 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
     let nav = match (code, ctrl) {
         (KeyCode::Char('q'), false) => return Some(Msg::Quit),
         (KeyCode::Char(':'), false) => return Some(Msg::OpenPrompt(PromptKind::Query)),
+        (KeyCode::Char('/'), false) => return Some(Msg::OpenPrompt(PromptKind::Search)),
+        (KeyCode::Char('n'), false) => return Some(Msg::SearchStep(Direction::Forward)),
+        (KeyCode::Char('N'), false) => return Some(Msg::SearchStep(Direction::Backward)),
         (KeyCode::Char('d'), true) => Nav::HalfDown,
         (KeyCode::Char('u'), true) => Nav::HalfUp,
         (KeyCode::Char('j') | KeyCode::Down, false) => Nav::Down,

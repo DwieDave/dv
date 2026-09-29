@@ -64,6 +64,19 @@ pub fn jump(
     height: u64,
 ) -> Result<(), JumpError> {
     let rows = row_path(tree, &state.root, steps)?;
+    Ok(reveal(tree, state, rows, height)?)
+}
+
+/// Expands every ancestor of `rows`, puts the cursor there and scrolls it into view.
+///
+/// # Errors
+/// Storage or lexing failures while expanding.
+pub fn reveal(
+    tree: &impl TreeIndex,
+    state: &mut TreeState,
+    rows: Vec<u64>,
+    height: u64,
+) -> Result<(), IndexError> {
     for depth in 0..rows.len() {
         expand(tree, state, &rows[..depth])?;
     }

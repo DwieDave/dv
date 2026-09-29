@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     Query,
+    Search,
 }
 
 impl PromptKind {
@@ -13,6 +14,7 @@ impl PromptKind {
     pub fn symbol(self) -> char {
         match self {
             Self::Query => ':',
+            Self::Search => '/',
         }
     }
 }

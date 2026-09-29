@@ -91,3 +91,24 @@ fn ctrl_c_quits_from_the_document() {
     );
     assert!(app.quit);
 }
+
+#[test]
+fn searches_run_on_the_worker_and_come_back_as_events() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = app().with_events(tx);
+    update_app(&mut app, loaded(br#"{"a": 1, "b": "needle"}"#));
+    for c in "/needle".chars() {
+        update_app(&mut app, key(c));
+    }
+    let mut received = 0;
+    while let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        assert!(matches!(event, AppEvent::Search(_)));
+        update_app(&mut app, event);
+        received += 1;
+    }
+    assert!(received >= 1);
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready")
+    };
+    assert_eq!(model.state.cursor, vec![1]);
+}

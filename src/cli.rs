@@ -155,9 +155,9 @@ fn tui(file: impl Read + Send + 'static, request: Request) -> Result<(), CliErro
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
         load(file, &request, &mut sink, &loader_cancel);
     });
+    let mut app = App::new(cancel).with_events(tx.clone());
     thread::spawn(move || forward_input(&tx));
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(cancel);
     Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
 }
 

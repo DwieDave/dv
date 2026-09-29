@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Gauge, Paragraph};
 
+use crate::app::search::{Outcome, spawn_worker};
 use crate::app::{Model, Msg, input_msg, update, view};
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
@@ -28,6 +30,7 @@ pub enum Screen<T> {
 pub enum AppEvent<T> {
     Input(Event),
     Load(LoadEvent<T>),
+    Search(Outcome),
 }
 
 #[derive(Debug)]
@@ -37,6 +40,8 @@ pub struct App<T> {
     pub cancel: Arc<AtomicBool>,
     /// Terminal rows, passed to the model once it exists.
     pub rows: u16,
+    /// The event channel; when set, searches run on a worker that reports here.
+    pub events: Option<Sender<AppEvent<T>>>,
     pub quit: bool,
 }
 
@@ -52,13 +57,23 @@ impl<T: TreeIndex> App<T> {
             screen: Screen::Loading(progress),
             cancel,
             rows: 1,
+            events: None,
             quit: false,
+        }
+    }
+
+    /// Lets searches run on a background worker that reports through `events`.
+    #[must_use]
+    pub fn with_events(self, events: Sender<AppEvent<T>>) -> Self {
+        Self {
+            events: Some(events),
+            ..self
         }
     }
 }
 
 /// Applies one event to the app.
-pub fn update_app<T: TreeIndex>(app: &mut App<T>, event: AppEvent<T>) {
+pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: AppEvent<T>) {
     match event {
         AppEvent::Input(input) => on_input(app, &input),
         AppEvent::Load(LoadEvent::Progress(progress)) => {
@@ -68,8 +83,30 @@ pub fn update_app<T: TreeIndex>(app: &mut App<T>, event: AppEvent<T>) {
         }
         AppEvent::Load(LoadEvent::Loaded(result)) => {
             app.screen = ready_or_failed(result, app.rows);
+            if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
+                attach_worker(model, events);
+            }
+        }
+        AppEvent::Search(outcome) => {
+            if let Screen::Ready(model) = &mut app.screen {
+                update(model, Msg::SearchOutcome(outcome));
+            }
         }
     }
+}
+
+/// Starts the search worker, reporting outcomes as app events.
+fn attach_worker<T: TreeIndex + Send + Sync + 'static>(
+    model: &mut Model<T>,
+    events: &Sender<AppEvent<T>>,
+) {
+    let events = events.clone();
+    let notify = move |outcome| drop(events.send(AppEvent::Search(outcome)));
+    model.jobs = Some(spawn_worker(
+        Arc::clone(&model.tree),
+        Arc::clone(&model.generation),
+        notify,
+    ));
 }
 
 fn ready_or_failed<T: TreeIndex>(result: Result<T, LoadFailure>, rows: u16) -> Screen<T> {
