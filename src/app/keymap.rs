@@ -2,8 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::Msg;
 use crate::app::prompt::PromptKind;
+use crate::app::{Msg, PreviewCmd};
 use crate::search::Direction;
 use crate::view::nav::Nav;
 
@@ -43,6 +43,11 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
     let nav = match (code, ctrl) {
         (KeyCode::Char('q'), false) => return Some(Msg::Quit),
         (KeyCode::Char(':'), false) => return Some(Msg::OpenPrompt(PromptKind::Query)),
+        (KeyCode::Char('p'), false) => return Some(Msg::Preview(PreviewCmd::Toggle)),
+        (KeyCode::Char('<'), false) => return Some(Msg::Preview(PreviewCmd::SplitLeft)),
+        (KeyCode::Char('>'), false) => return Some(Msg::Preview(PreviewCmd::SplitRight)),
+        (KeyCode::Char('J'), false) => return Some(Msg::Preview(PreviewCmd::ScrollDown)),
+        (KeyCode::Char('K'), false) => return Some(Msg::Preview(PreviewCmd::ScrollUp)),
         (KeyCode::Char('/'), false) => return Some(Msg::OpenPrompt(PromptKind::Search)),
         (KeyCode::Char('n'), false) => return Some(Msg::SearchStep(Direction::Forward)),
         (KeyCode::Char('N'), false) => return Some(Msg::SearchStep(Direction::Backward)),

@@ -21,7 +21,8 @@ pub fn run<B: Backend, T: TreeIndex + Send + Sync + 'static>(
 where
     B::Error: Send + Sync + 'static,
 {
-    app.rows = terminal.size().map_err(io::Error::other)?.height;
+    let size = terminal.size().map_err(io::Error::other)?;
+    app.size = (size.width, size.height);
     while !app.quit {
         terminal
             .draw(|frame| view_app(app, frame))

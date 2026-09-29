@@ -368,7 +368,7 @@ mod tests {
 
     fn model() -> Model<MemTree> {
         let mut model = Model::new(MemTree::parse(MemSource::new(DOC.to_vec())).unwrap()).unwrap();
-        update(&mut model, Msg::Resize(20));
+        update(&mut model, Msg::Resize(40, 20));
         model
     }
 

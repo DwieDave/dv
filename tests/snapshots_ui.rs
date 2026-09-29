@@ -91,3 +91,11 @@ fn error_screen() {
     update_app(&mut app, AppEvent::Load(LoadEvent::Loaded(Err(failure))));
     insta::assert_snapshot!(render(&app, 60, 12));
 }
+
+#[test]
+fn tree_and_preview() {
+    let mut app = loaded_app(10).unwrap();
+    update_app(&mut app, AppEvent::Input(Event::Resize(70, 10)));
+    keys(&mut app, "jl");
+    insta::assert_snapshot!(render(&app, 70, 10));
+}

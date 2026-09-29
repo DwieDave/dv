@@ -13,7 +13,7 @@ use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 
 use crate::app::keymap::Keymap;
@@ -24,12 +24,14 @@ use crate::json::lex::Kind;
 use crate::path::{parse, render};
 use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
+use crate::ui::preview::PreviewWidget;
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
-use crate::view::resolve::{RowKind, chain, segments};
+use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines};
+use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
 
 /// Rows reserved for the status bar.
@@ -45,6 +47,9 @@ pub struct Model<T> {
     pub theme: Theme,
     /// Rows available to the tree view.
     pub height: u64,
+    /// Terminal columns.
+    pub width: u16,
+    pub preview: PreviewState,
     /// The last error, shown in the status bar.
     pub status: Option<String>,
     /// An open input line, which takes all keys.
@@ -70,6 +75,8 @@ impl<T: TreeIndex> Model<T> {
             keymap,
             theme,
             height: 1,
+            width: 80,
+            preview: PreviewState::default(),
             status: None,
             prompt: None,
             search: None,
@@ -86,16 +93,63 @@ pub enum Msg {
     Quit,
     Redraw,
     Key(KeyEvent),
-    Resize(u16),
+    /// Terminal columns and rows.
+    Resize(u16, u16),
     Nav(Nav),
     Mouse(MouseEvent),
     OpenPrompt(PromptKind),
     SearchStep(Direction),
     SearchOutcome(Outcome),
+    Preview(PreviewCmd),
 }
+
+/// Preview pane commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCmd {
+    Toggle,
+    /// Moves the split left: a narrower tree.
+    SplitLeft,
+    /// Moves the split right: a wider tree.
+    SplitRight,
+    ScrollDown,
+    ScrollUp,
+}
+
+/// Preview pane layout and scroll position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewState {
+    pub visible: bool,
+    /// Share of the width given to the tree.
+    pub tree_percent: u16,
+    pub scroll: u64,
+    /// The cursor the scroll belongs to; a new cursor resets it.
+    pub for_cursor: Vec<u64>,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            tree_percent: 50,
+            scroll: 0,
+            for_cursor: Vec::new(),
+        }
+    }
+}
+
+/// Narrowest terminal that still shows the preview pane.
+const MIN_PREVIEW_WIDTH: u16 = 60;
 
 /// Applies `msg` to `model`; no I/O happens here.
 pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
+    handle(model, msg);
+    if model.preview.for_cursor != model.state.cursor {
+        model.preview.for_cursor.clone_from(&model.state.cursor);
+        model.preview.scroll = 0;
+    }
+}
+
+fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     match msg {
         Msg::Quit => model.quit = true,
         Msg::Redraw => {}
@@ -113,7 +167,10 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
                 update(model, next);
             }
         }
-        Msg::Resize(height) => model.height = u64::from(height.saturating_sub(STATUS_ROWS)).max(1),
+        Msg::Resize(width, height) => {
+            model.width = width;
+            model.height = u64::from(height.saturating_sub(STATUS_ROWS)).max(1);
+        }
         Msg::Nav(action) => {
             let result = nav::apply(&*model.tree, &mut model.state, action, model.height);
             model.status = result.err().map(|err| err.to_string());
@@ -123,6 +180,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
         Msg::SearchStep(direction) => search::step(model, direction),
         Msg::SearchOutcome(outcome) => search::apply(model, outcome),
+        Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
     }
 }
 
@@ -153,10 +211,49 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
     }
 }
 
+fn preview_cmd(preview: &mut PreviewState, cmd: PreviewCmd, lines: u64) {
+    match cmd {
+        PreviewCmd::Toggle => preview.visible = !preview.visible,
+        PreviewCmd::SplitRight => preview.tree_percent = (preview.tree_percent + 5).min(80),
+        PreviewCmd::SplitLeft => {
+            preview.tree_percent = preview.tree_percent.saturating_sub(5).max(20);
+        }
+        PreviewCmd::ScrollDown => preview.scroll = (preview.scroll + lines).min(MAX_PREVIEW_LINES),
+        PreviewCmd::ScrollUp => preview.scroll = preview.scroll.saturating_sub(lines),
+    }
+}
+
+/// The tree and (when shown) preview areas within `area`.
+fn panes(preview: &PreviewState, area: Rect) -> (Rect, Option<Rect>) {
+    if !preview.visible || area.width < MIN_PREVIEW_WIDTH {
+        return (area, None);
+    }
+    let [tree, pane] = Layout::horizontal([
+        Constraint::Percentage(preview.tree_percent),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    (tree, Some(pane))
+}
+
+/// Whether `column` falls inside the preview pane.
+fn over_preview<T>(model: &Model<T>, column: u16) -> bool {
+    let (tree, _) = panes(&model.preview, Rect::new(0, 0, model.width, 1));
+    model.preview.visible && model.width >= MIN_PREVIEW_WIDTH && column >= tree.right()
+}
+
 fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
+    let over_preview = over_preview(model, mouse.column);
     match mouse.kind {
+        MouseEventKind::ScrollDown if over_preview => {
+            preview_cmd(&mut model.preview, PreviewCmd::ScrollDown, 3);
+        }
+        MouseEventKind::ScrollUp if over_preview => {
+            preview_cmd(&mut model.preview, PreviewCmd::ScrollUp, 3);
+        }
         MouseEventKind::ScrollDown => update(model, Msg::Nav(Nav::ScrollDown)),
         MouseEventKind::ScrollUp => update(model, Msg::Nav(Nav::ScrollUp)),
+        MouseEventKind::Down(MouseButton::Left) if over_preview => {}
         MouseEventKind::Down(MouseButton::Left) => {
             let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
             let result = nav::click(&*model.tree, &mut model.state, row, column, model.height);
@@ -172,7 +269,7 @@ pub fn input_msg(event: &crossterm::event::Event) -> Option<Msg> {
     use crossterm::event::Event;
     match event {
         Event::Key(key) if key.is_press() => Some(Msg::Key(*key)),
-        Event::Resize(_, height) => Some(Msg::Resize(*height)),
+        Event::Resize(width, height) => Some(Msg::Resize(*width, *height)),
         Event::Mouse(mouse) => Some(Msg::Mouse(*mouse)),
         _ => None,
     }
@@ -180,15 +277,19 @@ pub fn input_msg(event: &crossterm::event::Event) -> Option<Msg> {
 
 /// Renders `model` into `frame`: the tree above, the status bar in the last row.
 pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
-    let [tree_area, status_area] =
+    let [main_area, status_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(STATUS_ROWS)])
             .areas(frame.area());
+    let (tree_area, preview_area) = panes(&model.preview, main_area);
     let widget = TreeWidget {
         tree: &*model.tree,
         state: &model.state,
         theme: &model.theme,
     };
     frame.render_widget(widget, tree_area);
+    if let Some(area) = preview_area {
+        render_preview(model, frame, area);
+    }
     match &model.prompt {
         Some(prompt) => {
             let flags = model
@@ -220,6 +321,31 @@ fn flags(query: &Query) -> String {
         scope,
     ];
     marks.into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+/// The cursor item's preview, sized to the pane's inner height.
+fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
+    // Two border rows plus one for the `…` marker.
+    let take = usize::from(area.height.saturating_sub(3));
+    let tree = &*model.tree;
+    let preview = resolve(tree, &model.state.root, &model.state.cursor)
+        .and_then(|item| {
+            item.map(|item| preview_lines(tree, &item, model.preview.scroll, take))
+                .transpose()
+        })
+        .map_or_else(
+            |err| Preview {
+                lines: vec![err.to_string()],
+                more: false,
+            },
+            Option::unwrap_or_default,
+        );
+    let widget = PreviewWidget {
+        lines: &preview.lines,
+        more: preview.more,
+        theme: &model.theme,
+    };
+    frame.render_widget(widget, area);
 }
 
 fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'static> {
@@ -305,7 +431,7 @@ mod tests {
     #[test]
     fn mouse_clicks_and_wheel_drive_the_tree() {
         let mut model = model();
-        update(&mut model, Msg::Resize(11));
+        update(&mut model, Msg::Resize(40, 11));
         let mouse = |kind, column, row| {
             Msg::Mouse(MouseEvent {
                 kind,
@@ -381,6 +507,45 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 2)].symbol())
             .collect();
         assert_eq!(row.trim_end(), ":.a");
+    }
+
+    #[test]
+    fn preview_keys_toggle_resize_and_scroll() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(100, 20));
+        assert!(model.preview.visible);
+        typed(&mut model, ">>>>>>>>");
+        assert_eq!(model.preview.tree_percent, 80);
+        typed(&mut model, "<<<<<<<<<<<<<<");
+        assert_eq!(model.preview.tree_percent, 20);
+        typed(&mut model, "JJK");
+        assert_eq!(model.preview.scroll, 1);
+        typed(&mut model, "j");
+        assert_eq!(
+            model.preview.scroll, 0,
+            "moving the cursor resets the preview"
+        );
+        typed(&mut model, "p");
+        assert!(!model.preview.visible);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_the_mouse() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(100, 4));
+        let wheel = |column| {
+            Msg::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        update(&mut model, wheel(70));
+        assert_eq!((model.preview.scroll, model.state.top), (3, 0));
+        update(&mut model, Msg::Key(KeyCode::Char('l').into()));
+        update(&mut model, wheel(10));
+        assert_eq!(model.state.top, 1);
     }
 
     #[test]

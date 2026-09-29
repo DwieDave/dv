@@ -38,8 +38,8 @@ pub struct App<T> {
     pub screen: Screen<T>,
     /// Shared with the loader thread; set to abandon loading.
     pub cancel: Arc<AtomicBool>,
-    /// Terminal rows, passed to the model once it exists.
-    pub rows: u16,
+    /// Terminal columns and rows, passed to the model once it exists.
+    pub size: (u16, u16),
     /// The event channel; when set, searches run on a worker that reports here.
     pub events: Option<Sender<AppEvent<T>>>,
     pub quit: bool,
@@ -56,7 +56,7 @@ impl<T: TreeIndex> App<T> {
         Self {
             screen: Screen::Loading(progress),
             cancel,
-            rows: 1,
+            size: (80, 24),
             events: None,
             quit: false,
         }
@@ -82,7 +82,7 @@ pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event:
             }
         }
         AppEvent::Load(LoadEvent::Loaded(result)) => {
-            app.screen = ready_or_failed(result, app.rows);
+            app.screen = ready_or_failed(result, app.size);
             if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
                 attach_worker(model, events);
             }
@@ -109,11 +109,14 @@ fn attach_worker<T: TreeIndex + Send + Sync + 'static>(
     ));
 }
 
-fn ready_or_failed<T: TreeIndex>(result: Result<T, LoadFailure>, rows: u16) -> Screen<T> {
+fn ready_or_failed<T: TreeIndex>(
+    result: Result<T, LoadFailure>,
+    (cols, rows): (u16, u16),
+) -> Screen<T> {
     let model = result.and_then(|tree| Model::new(tree).map_err(|err| LoadFailure::plain(&err)));
     match model {
         Ok(mut model) => {
-            update(&mut model, Msg::Resize(rows));
+            update(&mut model, Msg::Resize(cols, rows));
             Screen::Ready(Box::new(model))
         }
         Err(failure) => Screen::Failed(failure),
@@ -121,8 +124,8 @@ fn ready_or_failed<T: TreeIndex>(result: Result<T, LoadFailure>, rows: u16) -> S
 }
 
 fn on_input<T: TreeIndex>(app: &mut App<T>, input: &Event) {
-    if let Event::Resize(_, rows) = input {
-        app.rows = *rows;
+    if let Event::Resize(cols, rows) = input {
+        app.size = (*cols, *rows);
     }
     let key = input.as_key_press_event();
     let ctrl_c = key.is_some_and(|k| {
