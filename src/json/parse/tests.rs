@@ -1,6 +1,8 @@
 use proptest::prelude::*;
 use serde_json::Value;
 
+use std::ops::ControlFlow;
+
 use super::*;
 use crate::index::store::{CHECKPOINT_EVERY, MIN_NODE_LEN, NodeStore};
 use crate::test_support::{Container, json_value, layout};
@@ -108,4 +110,30 @@ fn lengths_beyond_u32_are_too_large() {
         ParseErrorKind::TooLarge
     );
     assert!(ensure_addressable(too_big - 1).is_ok());
+}
+
+fn big_doc() -> String {
+    let items: Vec<String> = (0..1_500_000).map(|i| i.to_string()).collect();
+    format!("[{}]", items.join(","))
+}
+
+#[test]
+fn progress_is_monotonic_and_reaches_the_end() {
+    let text = big_doc();
+    let mut seen = Vec::new();
+    parse_with(text.as_bytes(), |at| {
+        seen.push(at);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert!(seen.len() >= 2, "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(seen.last(), Some(&(text.len() as u64)));
+}
+
+#[test]
+fn breaking_the_hook_cancels() {
+    let text = big_doc();
+    let err = parse_with(text.as_bytes(), |_| ControlFlow::Break(())).unwrap_err();
+    assert_eq!(err.kind, ParseErrorKind::Cancelled);
 }

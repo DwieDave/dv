@@ -1,5 +1,7 @@
 //! Single-pass validating JSON parser that builds the semi-index (D-2, D-3).
 
+use std::ops::ControlFlow;
+
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::store::{Slot, VecStore, VecStoreBuilder};
 use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
@@ -24,18 +26,35 @@ pub fn ensure_addressable(len: usize) -> Result<(), ParseError> {
     }
 }
 
+/// Bytes between two progress reports.
+pub const REPORT_EVERY: u64 = 4 << 20;
+
+/// Like [`parse`], reporting the current offset to `hook` about every [`REPORT_EVERY`] bytes.
+///
+/// # Errors
+/// As [`parse`], plus `Cancelled` when `hook` breaks.
+pub fn parse_with(
+    bytes: &[u8],
+    hook: impl FnMut(u64) -> ControlFlow<()>,
+) -> Result<Parsed, ParseError> {
+    ensure_addressable(bytes.len())?;
+    std::str::from_utf8(bytes).map_err(|e| fail(ParseErrorKind::InvalidUtf8, e.valid_up_to()))?;
+    Parser::new(bytes, hook).run()
+}
+
 /// Validates `bytes` as one JSON document and indexes its big containers.
 ///
 /// # Errors
 /// The first syntax, UTF-8 or size error, with its byte offset.
 pub fn parse(bytes: &[u8]) -> Result<Parsed, ParseError> {
-    ensure_addressable(bytes.len())?;
-    std::str::from_utf8(bytes).map_err(|e| fail(ParseErrorKind::InvalidUtf8, e.valid_up_to()))?;
-    Parser::new(bytes).run()
+    parse_with(bytes, |_| ControlFlow::Continue(()))
 }
 
-struct Parser<'a> {
+struct Parser<'a, H> {
     bytes: &'a [u8],
+    hook: H,
+    /// Offset at which the hook is called next.
+    next_report: u64,
     pos: usize,
     builder: VecStoreBuilder,
     /// Open containers; per-container state lives in the builder's reserved span.
@@ -43,10 +62,12 @@ struct Parser<'a> {
     values: u64,
 }
 
-impl<'a> Parser<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
+    fn new(bytes: &'a [u8], hook: H) -> Self {
         Self {
             bytes,
+            hook,
+            next_report: REPORT_EVERY,
             pos: 0,
             builder: VecStoreBuilder::default(),
             stack: Vec::new(),
@@ -64,16 +85,32 @@ impl<'a> Parser<'a> {
             } else {
                 self.after_child()?;
             }
+            self.maybe_report()?;
         }
         self.pos = skip_ws(self.bytes, self.pos);
         if self.pos < self.bytes.len() {
             return Err(fail(ParseErrorKind::TrailingData, self.pos));
+        }
+        if self.next_report - REPORT_EVERY < self.pos as u64 {
+            let _ = (self.hook)(self.pos as u64);
         }
         Ok(Parsed {
             root,
             store: self.builder.finish(),
             values: self.values,
         })
+    }
+
+    fn maybe_report(&mut self) -> Result<(), ParseError> {
+        let at = self.pos as u64;
+        if at < self.next_report {
+            return Ok(());
+        }
+        self.next_report = at + REPORT_EVERY;
+        match (self.hook)(at) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(()) => Err(fail(ParseErrorKind::Cancelled, self.pos)),
+        }
     }
 
     /// Consumes a scalar or opens a container at `pos`.

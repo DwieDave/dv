@@ -2,6 +2,7 @@
 
 pub mod keymap;
 pub mod run;
+pub mod screen;
 pub mod terminal;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -99,6 +100,18 @@ fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
             model.status = result.err().map(|err| err.to_string());
         }
         _ => {}
+    }
+}
+
+/// The model message for a terminal event, if any.
+#[must_use]
+pub fn input_msg(event: &crossterm::event::Event) -> Option<Msg> {
+    use crossterm::event::Event;
+    match event {
+        Event::Key(key) if key.is_press() => Some(Msg::Key(*key)),
+        Event::Resize(_, height) => Some(Msg::Resize(*height)),
+        Event::Mouse(mouse) => Some(Msg::Mouse(*mouse)),
+        _ => None,
     }
 }
 

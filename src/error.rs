@@ -21,6 +21,8 @@ pub enum ParseErrorKind {
     TrailingData,
     #[error("input too large for in-memory mode")]
     TooLarge,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// A parse failure at a byte offset in the source.

@@ -32,14 +32,16 @@ proptest! {
 
     #[test]
     fn paths_concatenate_segments(segments in proptest::collection::vec(segment(), 1..6)) {
-        let joined: String = segments.iter().map(|s| render(std::slice::from_ref(s))).collect();
-        prop_assert_eq!(render(&segments), joined);
+        let joined: String = segments.iter().map(fragment).collect();
+        let expected = if joined.starts_with('[') { format!(".{joined}") } else { joined };
+        prop_assert_eq!(render(&segments), expected);
     }
 }
 
 #[test]
 fn renders_root_and_indices() {
     assert_eq!(render(&[]), ".");
+    assert_eq!(render(&[Segment::Index(1), Segment::Index(2)]), ".[1][2]");
     let path = [
         Segment::Key("users".into()),
         Segment::Index(3),

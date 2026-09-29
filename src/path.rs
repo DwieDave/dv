@@ -29,20 +29,15 @@ impl Segment {
     }
 }
 
-/// Renders `segments` as a jq path; the root is `.`.
+/// Renders `segments` as a jq path; the root is `.`, and a leading index reads `.[i]`.
 #[must_use]
 pub fn render(segments: &[Segment]) -> String {
-    if segments.is_empty() {
-        return ".".to_owned();
+    let joined: String = segments.iter().map(fragment).collect();
+    if joined.is_empty() || joined.starts_with('[') {
+        format!(".{joined}")
+    } else {
+        joined
     }
-    segments.iter().fold(String::new(), |mut out, segment| {
-        match segment {
-            Segment::Index(i) => write!(out, "[{i}]").unwrap_or_default(),
-            Segment::Key(k) if is_identifier(k) => write!(out, ".{k}").unwrap_or_default(),
-            Segment::Key(k) => write!(out, ".{}", quote(k)).unwrap_or_default(),
-        }
-        out
-    })
 }
 
 fn is_identifier(key: &str) -> bool {
@@ -69,6 +64,15 @@ fn quote(key: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// One segment as it appears after its predecessor.
+fn fragment(segment: &Segment) -> String {
+    match segment {
+        Segment::Index(i) => format!("[{i}]"),
+        Segment::Key(k) if is_identifier(k) => format!(".{k}"),
+        Segment::Key(k) => format!(".{}", quote(k)),
+    }
 }
 
 #[cfg(test)]

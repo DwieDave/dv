@@ -98,6 +98,12 @@ impl MemTree {
         let parsed = crate::json::parse::parse(source.as_bytes())?;
         Ok(Self { source, parsed })
     }
+
+    /// Pairs a source with the index parsed from it.
+    #[must_use]
+    pub fn from_parts(source: MemSource, parsed: Parsed) -> Self {
+        Self { source, parsed }
+    }
 }
 
 impl MemTree {
