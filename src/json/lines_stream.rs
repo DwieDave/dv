@@ -30,15 +30,28 @@ pub struct StreamLines<B> {
 ///
 /// # Errors
 /// Read or spill failures, a token longer than `limits.max`, or `Cancelled`.
-pub fn parse_lines_stream<R: Source, B: Builder>(
+pub fn parse_lines_stream<R: Source + Sync, B: Builder>(
     source: &R,
     builder: B,
-    mut lines: LineSpill,
+    lines: LineSpill,
     limits: StreamLimits,
+    hook: impl FnMut(u64) -> ControlFlow<()>,
+    publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, bool),
+) -> Result<StreamLines<B>, IndexError> {
+    std::thread::scope(|scope| {
+        let window = Window::unchecked(scope, source, limits);
+        parse_lines_window(window, builder, lines, hook, publish)
+    })
+}
+
+/// [`parse_lines_stream`] over a window whose reader runs in its own thread.
+fn parse_lines_window<R: Source, B: Builder>(
+    mut window: Window<'_, R>,
+    builder: B,
+    mut lines: LineSpill,
     hook: impl FnMut(u64) -> ControlFlow<()>,
     mut publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, bool),
 ) -> Result<StreamLines<B>, IndexError> {
-    let mut window = Window::unchecked(source, limits);
     let mut parser = Parser::with_builder(&[][..], hook, builder);
     let (mut at, mut frontier) = (At::Gap, 0);
     let mut result = window.refill(0);
@@ -49,7 +62,7 @@ pub fn parse_lines_stream<R: Source, B: Builder>(
         result = match outcome {
             Ok(()) => break,
             Err(Stop::More) => {
-                at.feed(&window.bytes[..pos], window.base);
+                at.feed(&window.bytes()[..pos], window.base);
                 let mut pending = PendingLines {
                     spill: &mut lines,
                     pending: at.pending(),
@@ -82,7 +95,7 @@ fn run_window<H: FnMut(u64) -> ControlFlow<()>, B: Builder, R: Source>(
     lines: &mut LineSpill,
     at: &mut At<B::Mark>,
 ) -> (Parser<'static, H, B>, Result<(), Stop>, usize) {
-    let mut bound = parser.rebind(&window.bytes, window.base, window.eof);
+    let mut bound = parser.rebind(window.bytes(), window.base, window.eof);
     let outcome = run(&mut bound, lines, at, window.eof);
     let pos = bound.pos;
     (bound.rebind(&[], 0, false), outcome, pos)

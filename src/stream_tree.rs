@@ -44,7 +44,7 @@ impl<R: Source, S: NodeStore> StreamTree<R, S> {
     }
 }
 
-impl<R: Source> StreamTree<R, SpillStore> {
+impl<R: Source + Sync> StreamTree<R, SpillStore> {
     /// Streams `source` into a spilled index.
     ///
     /// # Errors

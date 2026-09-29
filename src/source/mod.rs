@@ -29,6 +29,16 @@ pub trait Source {
     /// # Errors
     /// Fails when the underlying storage cannot be read.
     fn read(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, SourceError>;
+
+    /// Fills `out` from offset `at`, returning how many bytes were read (fewer only at the end).
+    ///
+    /// # Errors
+    /// Fails when the underlying storage cannot be read.
+    fn read_into(&self, at: u64, out: &mut [u8]) -> Result<usize, SourceError> {
+        let data = self.read(at..at.saturating_add(out.len() as u64))?;
+        out[..data.len()].copy_from_slice(&data);
+        Ok(data.len())
+    }
 }
 
 /// A document held entirely in memory.

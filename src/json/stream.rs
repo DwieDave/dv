@@ -1,11 +1,13 @@
 //! Parsing a document of any size through a sliding buffer (streaming mode, FR-23).
 
 use std::ops::ControlFlow;
+use std::thread::{Scope, scope};
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::IndexError;
 use crate::index::store::Builder;
 use crate::json::parse::{Parser, Phase, first_error};
+use crate::json::prefetch::{Chunk, Prefetch};
 use crate::source::Source;
 
 /// Buffer sizes for streaming.
@@ -38,19 +40,29 @@ pub struct StreamParsed<B> {
 ///
 /// # Errors
 /// Syntax, UTF-8 or read errors, a token longer than `limits.max`, or `Cancelled`.
-pub fn parse_stream<R: Source, B: Builder>(
+pub fn parse_stream<R: Source + Sync, B: Builder>(
     source: &R,
     builder: B,
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
+    publish: impl FnMut(&mut B, u64, bool),
+) -> Result<StreamParsed<B>, IndexError> {
+    scope(|scope| parse_window(Window::new(scope, source, limits), builder, hook, publish))
+}
+
+/// [`parse_stream`] over a window whose reader runs in its own thread.
+fn parse_window<R: Source, B: Builder>(
+    mut window: Window<'_, R>,
+    builder: B,
+    hook: impl FnMut(u64) -> ControlFlow<()>,
     mut publish: impl FnMut(&mut B, u64, bool),
 ) -> Result<StreamParsed<B>, IndexError> {
-    let mut window = Window::new(source, limits);
+    let source_len = window.source.len();
     let mut parser = Parser::with_builder(&[][..], hook, builder);
     let mut phase = Phase::Start;
     let mut result = window.refill(0);
     while result.is_ok() {
-        let mut bound = parser.rebind(&window.bytes, window.base, window.eof);
+        let mut bound = parser.rebind(window.bytes(), window.base, window.eof);
         let outcome = bound.advance(&mut phase);
         let pos = bound.pos;
         parser = bound.rebind(&[], 0, false);
@@ -74,7 +86,7 @@ pub fn parse_stream<R: Source, B: Builder>(
     });
     let root = window.earliest(root);
     let frontier = match &root {
-        Ok(_) => source.len(),
+        Ok(_) => source_len,
         Err(IndexError::Parse(err)) => err.offset,
         Err(IndexError::Source(_)) => window.base,
     };
@@ -94,80 +106,137 @@ fn eof(offset: u64) -> ParseError {
     }
 }
 
-/// The sliding buffer: `bytes` starts at absolute offset `base`.
+/// The sliding buffer: `bytes()` starts at absolute offset `base`. Chunks come from a
+/// read-ahead thread; after a backward seek, reads are direct.
 pub(crate) struct Window<'s, R> {
     source: &'s R,
-    pub(crate) bytes: Vec<u8>,
+    buf: Vec<u8>,
+    start: usize,
+    end: usize,
     pub(crate) base: u64,
     size: usize,
     max: usize,
     pub(crate) eof: bool,
-    /// Whole-document UTF-8 validation; `None` when the caller validates.
-    utf8: Option<Utf8>,
+    feed: Feed,
     /// The first invalid UTF-8 read so far; reported only if no earlier error turns up.
     utf8_error: Option<ParseError>,
 }
 
-impl<'s, R: Source> Window<'s, R> {
-    pub(crate) fn new(source: &'s R, limits: StreamLimits) -> Self {
+/// Where the next bytes come from.
+enum Feed {
+    Ahead(Prefetch),
+    /// Synchronous reads, unchecked (only unchecked windows seek).
+    Direct,
+}
+
+impl<'s, R: Source + Sync> Window<'s, R> {
+    /// A window whose reader also validates UTF-8.
+    pub(crate) fn new<'scope>(
+        scope: &'scope Scope<'scope, 's>,
+        source: &'s R,
+        limits: StreamLimits,
+    ) -> Self {
+        Self::spawn(scope, source, limits, true)
+    }
+
+    /// A window that leaves UTF-8 validation to the caller.
+    pub(crate) fn unchecked<'scope>(
+        scope: &'scope Scope<'scope, 's>,
+        source: &'s R,
+        limits: StreamLimits,
+    ) -> Self {
+        Self::spawn(scope, source, limits, false)
+    }
+
+    fn spawn<'scope>(
+        scope: &'scope Scope<'scope, 's>,
+        source: &'s R,
+        limits: StreamLimits,
+        validate: bool,
+    ) -> Self {
         let size = limits.initial.max(1);
         Self {
             source,
-            bytes: Vec::new(),
+            buf: Vec::new(),
+            start: 0,
+            end: 0,
             base: 0,
             size,
             max: limits.max.max(size),
             eof: false,
-            utf8: Some(Utf8::default()),
+            feed: Feed::Ahead(Prefetch::spawn(scope, source, size, validate)),
             utf8_error: None,
         }
     }
+}
 
-    /// A window that leaves UTF-8 validation to the caller.
-    pub(crate) fn unchecked(source: &'s R, limits: StreamLimits) -> Self {
-        Self {
-            utf8: None,
-            ..Self::new(source, limits)
-        }
+impl<R: Source> Window<'_, R> {
+    /// The bytes held, from `base` on.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.buf[self.start..self.end]
     }
 
-    /// Restarts the buffer at absolute offset `at`.
+    /// Restarts at absolute offset `at` with direct reads (the read-ahead only moves forward).
     pub(crate) fn seek(&mut self, at: u64) -> Result<(), IndexError> {
-        self.bytes.clear();
-        self.base = at;
+        self.feed = Feed::Direct;
+        (self.buf, self.start, self.end, self.base) = (Vec::new(), 0, 0, at);
         self.refill(0)
     }
 
-    /// Drops the bytes before `keep`, then reads more, growing when a token fills the buffer.
+    /// Drops the bytes before `keep`, then appends the next chunk.
     pub(crate) fn refill(&mut self, keep: usize) -> Result<(), IndexError> {
-        self.bytes.drain(..keep.min(self.bytes.len()));
+        let keep = keep.min(self.end - self.start);
+        self.start += keep;
         self.base += keep as u64;
-        if self.bytes.len() >= self.size {
-            if self.size >= self.max {
-                return Err(ParseError {
-                    kind: ParseErrorKind::TooLarge,
-                    offset: self.base,
-                }
-                .into());
+        if self.end - self.start >= self.max {
+            return Err(ParseError {
+                kind: ParseErrorKind::TooLarge,
+                offset: self.base,
             }
-            self.size = self.size.saturating_mul(2).min(self.max);
+            .into());
         }
-        let from = self.base + self.bytes.len() as u64;
-        let chunk = self
-            .source
-            .read(from..from + (self.size - self.bytes.len()) as u64)?;
-        if let Some(utf8) = self.utf8.as_mut().filter(|_| self.utf8_error.is_none()) {
-            self.utf8_error = utf8.feed(&chunk, from).err();
+        match &self.feed {
+            Feed::Ahead(ahead) => {
+                let chunk = ahead.next().ok_or_else(|| eof(self.base))??;
+                let old = self.take(chunk);
+                if let Feed::Ahead(ahead) = &self.feed {
+                    ahead.recycle(old);
+                }
+                Ok(())
+            }
+            Feed::Direct => self.read_direct(),
         }
-        self.bytes.extend_from_slice(&chunk);
+    }
+
+    /// Puts the kept bytes in front of `chunk`'s data; returns the buffer no longer used.
+    fn take(&mut self, mut chunk: Chunk) -> Vec<u8> {
+        let kept = self.end - self.start;
+        debug_assert_eq!(chunk.at, self.base + kept as u64, "chunks arrive in order");
+        let data = chunk.head..chunk.head + chunk.len;
+        self.eof = chunk.eof;
+        self.utf8_error = self.utf8_error.or(chunk.utf8_error);
+        if kept <= chunk.head {
+            let at = chunk.head - kept;
+            chunk.buf[at..chunk.head].copy_from_slice(&self.buf[self.start..self.end]);
+            (self.start, self.end) = (at, data.end);
+            return std::mem::replace(&mut self.buf, chunk.buf);
+        }
+        // A token longer than the head room: join by copying.
+        self.buf.truncate(self.end);
+        self.buf.drain(..self.start);
+        self.buf.extend_from_slice(&chunk.buf[data]);
+        (self.start, self.end) = (0, self.buf.len());
+        chunk.buf
+    }
+
+    fn read_direct(&mut self) -> Result<(), IndexError> {
+        self.buf.truncate(self.end);
+        self.buf.drain(..self.start);
+        let from = self.base + self.buf.len() as u64;
+        let chunk = self.source.read(from..from + self.size as u64)?;
+        self.buf.extend_from_slice(&chunk);
+        (self.start, self.end) = (0, self.buf.len());
         self.eof = from + chunk.len() as u64 >= self.source.len();
-        if let Some(utf8) = self
-            .utf8
-            .as_ref()
-            .filter(|_| self.eof && self.utf8_error.is_none())
-        {
-            self.utf8_error = utf8.finish().err();
-        }
         Ok(())
     }
 

@@ -136,6 +136,13 @@ impl Source for FileSource {
         self.len
     }
 
+    /// Sequential reads go straight to the file, bypassing (and not evicting) the cache.
+    fn read_into(&self, at: u64, out: &mut [u8]) -> Result<usize, SourceError> {
+        let len = to_usize(self.len.saturating_sub(at)).min(out.len());
+        self.file.read_exact_at(&mut out[..len], at)?;
+        Ok(len)
+    }
+
     fn read(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, SourceError> {
         let (start, end) = (range.start.min(self.len), range.end.min(self.len));
         let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
