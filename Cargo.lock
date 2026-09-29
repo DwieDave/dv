@@ -611,6 +611,7 @@ dependencies = [
  "memchr",
  "proptest",
  "ratatui",
+ "regex",
  "saphyr",
  "saphyr-parser",
  "serde_json",

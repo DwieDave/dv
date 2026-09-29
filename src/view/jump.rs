@@ -72,7 +72,7 @@ pub fn jump(
     Ok(())
 }
 
-fn count(tree: &impl TreeIndex, node: NodeRef) -> Result<u64, JumpError> {
+pub(crate) fn count(tree: &impl TreeIndex, node: NodeRef) -> Result<u64, IndexError> {
     Ok(match tree.child_count(node)? {
         Count::Known(n) => n,
         Count::Pending => 0,
@@ -124,7 +124,7 @@ fn find_key(tree: &impl TreeIndex, node: NodeRef, n: u64, key: &str) -> Result<u
 }
 
 /// Row indices from a container's level down through its buckets to child `k`.
-fn bucket_rows(n: u64, k: u64) -> Vec<u64> {
+pub(crate) fn bucket_rows(n: u64, k: u64) -> Vec<u64> {
     let mut rows = Vec::new();
     let mut level = Level::of(0..n);
     while let Some((row, bucket)) = level.locate(k) {
