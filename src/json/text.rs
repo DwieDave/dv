@@ -16,6 +16,14 @@ pub fn unescape(raw: &[u8]) -> Cow<'_, str> {
     decode(inner(raw))
 }
 
+/// Bytes needed to show `max` chars of the scalar at `start..end`: a huge string is read
+/// only up to what can be displayed.
+#[must_use]
+pub fn scalar_window(start: u64, end: u64, max: usize) -> std::ops::Range<u64> {
+    let enough = (max as u64 + 1) * MAX_ESCAPE_LEN as u64 + 2;
+    start..end.min(start.saturating_add(enough))
+}
+
 /// Single-line display text for a raw scalar, at most `max_chars` chars.
 #[must_use]
 pub fn inline(raw: &[u8], max_chars: usize) -> String {

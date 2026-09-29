@@ -142,7 +142,7 @@ fn yaml_aliases_get_a_badge() {
 #[test]
 fn badges_mark_pending_and_truncated_counts() {
     use crate::tree::Count;
-    let texts = [Count::Known(3), Count::Pending(4), Count::Truncated(5)].map(super::count_text);
+    let texts = [Count::Known(3), Count::Pending(4), Count::Truncated(5)].map(|c| c.to_string());
     assert_eq!(texts, ["3", "4…", "5 ✗"]);
 }
 

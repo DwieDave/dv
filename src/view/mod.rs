@@ -8,3 +8,4 @@ pub mod preview;
 pub mod resolve;
 pub mod rows;
 pub mod state;
+pub mod table;

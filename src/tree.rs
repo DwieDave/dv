@@ -30,6 +30,17 @@ pub enum Count {
     Truncated(u64),
 }
 
+/// As a badge shows it: `n`, `n…` while indexing, `n ✗` when indexing failed.
+impl std::fmt::Display for Count {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(n) => write!(f, "{n}"),
+            Self::Pending(n) => write!(f, "{n}…"),
+            Self::Truncated(n) => write!(f, "{n} ✗"),
+        }
+    }
+}
+
 impl Count {
     /// Children that can be listed right now.
     #[must_use]
