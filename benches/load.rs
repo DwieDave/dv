@@ -7,8 +7,12 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use dv::index::spill::{SpillBuilder, SpillLimits, SpillStore};
 use dv::json::parse::parse;
+use dv::json::stream::{StreamLimits, parse_stream};
 use dv::load::{Request, load};
+use dv::source::file::FileSource;
+use std::ops::ControlFlow;
 use std::sync::atomic::AtomicBool;
 
 const FIXTURES: [&str; 8] = [
@@ -84,5 +88,35 @@ fn load_formats(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, read_baseline, parse_json, load_formats);
+/// Streams and spills one index of `path`; `None` on any failure.
+fn stream_once(path: &std::path::Path) -> Option<SpillStore> {
+    let source = FileSource::new(fs::File::open(path).ok()?, 64 << 20).ok()?;
+    let builder = SpillBuilder::new(SpillLimits::default()).ok()?;
+    let parsed = parse_stream(&source, builder, StreamLimits::default(), |_| {
+        ControlFlow::Continue(())
+    })
+    .ok()?;
+    parsed.builder.finish().ok()
+}
+
+fn stream_index(c: &mut Criterion) {
+    let Some(path) = fixture("api-100M.json") else {
+        return;
+    };
+    let len = fs::metadata(&path).map_or(0, |m| m.len());
+    let mut group = c.benchmark_group("stream");
+    group.sample_size(10).throughput(Throughput::Bytes(len));
+    group.bench_function("api-100M.json", |b| {
+        b.iter(|| stream_once(&path));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    read_baseline,
+    parse_json,
+    load_formats,
+    stream_index
+);
 criterion_main!(benches);

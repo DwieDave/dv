@@ -4,7 +4,6 @@ use std::ops::ControlFlow;
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::store::{Builder, VecStore, VecStoreBuilder};
-use crate::index::to_usize;
 use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
 
 /// A parsed document: the root value's offset and the container index.
@@ -51,6 +50,14 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, ParseError> {
     parse_with(bytes, |_| ControlFlow::Continue(()))
 }
 
+/// Where resumable parsing stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Start,
+    Body { root: u64 },
+    Trailing { root: u64 },
+}
+
 pub(crate) struct Parser<'a, H, B: Builder = VecStoreBuilder> {
     pub(crate) bytes: &'a [u8],
     hook: H,
@@ -60,7 +67,13 @@ pub(crate) struct Parser<'a, H, B: Builder = VecStoreBuilder> {
     pub(crate) builder: B,
     /// Open containers; per-container state lives in the builder.
     stack: Vec<B::Slot>,
+    /// Whether each open container is an object (1 byte per level).
+    objects: Vec<bool>,
     pub(crate) values: u64,
+    /// Absolute offset of `bytes[0]` (streaming windows).
+    base: u64,
+    /// `bytes` reaches the end of the document.
+    eof: bool,
 }
 
 impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
@@ -94,8 +107,55 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
             pos: 0,
             builder,
             stack: Vec::new(),
+            objects: Vec::new(),
             values: 0,
+            base: 0,
+            eof: true,
         }
+    }
+
+    /// Moves the parser state onto another buffer starting at absolute offset `base`.
+    pub(crate) fn rebind(self, bytes: &[u8], base: u64, eof: bool) -> Parser<'_, H, B> {
+        let Self {
+            hook,
+            next_report,
+            pos,
+            builder,
+            stack,
+            objects,
+            values,
+            ..
+        } = self;
+        Parser {
+            bytes,
+            hook,
+            next_report,
+            pos,
+            builder,
+            stack,
+            objects,
+            values,
+            base,
+            eof,
+        }
+    }
+
+    /// Absolute offset of buffer position `pos`.
+    fn abs(&self, pos: usize) -> u64 {
+        self.base + pos as u64
+    }
+
+    /// True once the stack is empty; otherwise performs one step inside the open container.
+    pub(crate) fn step(&mut self) -> Result<bool, ParseError> {
+        let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) else {
+            return Ok(true);
+        };
+        if self.abs(self.pos) == start + 1 {
+            self.first_child()?;
+        } else {
+            self.after_child()?;
+        }
+        Ok(false)
     }
 
     /// Parses a whole document; returns the root offset, the builder and the value count.
@@ -112,15 +172,45 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
         Ok((root, self.builder, self.values))
     }
 
+    /// Resumable document parsing: returns true when done; `UnexpectedEof` asks for more input.
+    pub(crate) fn advance(&mut self, phase: &mut Phase) -> Result<bool, ParseError> {
+        loop {
+            match *phase {
+                Phase::Start => {
+                    self.pos = skip_ws(self.bytes, self.pos);
+                    let root = self.abs(self.pos);
+                    self.start_value()?;
+                    *phase = Phase::Body { root };
+                }
+                Phase::Body { root } => {
+                    if self.step()? {
+                        *phase = Phase::Trailing { root };
+                    } else {
+                        self.maybe_report()?;
+                    }
+                }
+                Phase::Trailing { .. } => return self.trailing(),
+            }
+        }
+    }
+
+    /// Only whitespace may follow the root value.
+    fn trailing(&mut self) -> Result<bool, ParseError> {
+        self.pos = skip_ws(self.bytes, self.pos);
+        if self.pos < self.bytes.len() {
+            return Err(fail(ParseErrorKind::TrailingData, self.pos));
+        }
+        if !self.eof {
+            return Err(fail(ParseErrorKind::UnexpectedEof, self.pos));
+        }
+        self.final_report();
+        Ok(true)
+    }
+
     /// Parses one complete value starting at `pos`.
     pub(crate) fn value(&mut self) -> Result<(), ParseError> {
         self.start_value()?;
-        while let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) {
-            if self.pos == to_usize(start) + 1 {
-                self.first_child()?;
-            } else {
-                self.after_child()?;
-            }
+        while !self.step()? {
             self.maybe_report()?;
         }
         Ok(())
@@ -129,17 +219,19 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     /// Forgets the containers left open by a failed value.
     pub(crate) fn abandon(&mut self) {
         self.stack.clear();
+        self.objects.clear();
     }
 
     /// Reports the end position unless it was just reported.
     pub(crate) fn final_report(&mut self) {
-        if self.next_report - REPORT_EVERY < self.pos as u64 {
-            let _ = (self.hook)(self.pos as u64);
+        let at = self.abs(self.pos);
+        if self.next_report - REPORT_EVERY < at {
+            let _ = (self.hook)(at);
         }
     }
 
     pub(crate) fn maybe_report(&mut self) -> Result<(), ParseError> {
-        let at = self.pos as u64;
+        let at = self.abs(self.pos);
         if at < self.next_report {
             return Ok(());
         }
@@ -152,77 +244,97 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
 
     /// Consumes a scalar or opens a container at `pos`.
     fn start_value(&mut self) -> Result<(), ParseError> {
+        let scanned = self.scan_value(self.pos)?;
+        self.commit_value(scanned);
+        Ok(())
+    }
+
+    /// Kind and end of the value at `pos`, without side effects. A number reaching the end of
+    /// a buffer that is not the end of the document may be cut: that is `UnexpectedEof`.
+    fn scan_value(&self, pos: usize) -> Result<(Kind, usize), ParseError> {
+        let (kind, end) = scan_scalar(self.bytes, pos)?;
+        if kind == Kind::Number && end == self.bytes.len() && !self.eof {
+            return Err(fail(ParseErrorKind::UnexpectedEof, end));
+        }
+        Ok((kind, end))
+    }
+
+    fn commit_value(&mut self, (kind, end): (Kind, usize)) {
         self.values += 1;
-        match scan_scalar(self.bytes, self.pos)? {
-            (Kind::Object | Kind::Array, _) => {
-                self.stack.push(self.builder.open(self.pos as u64));
+        match kind {
+            Kind::Object | Kind::Array => {
+                self.stack.push(self.builder.open(self.abs(self.pos)));
+                self.objects.push(kind == Kind::Object);
                 self.pos += 1;
             }
-            (_, end) => self.pos = end,
+            _ => self.pos = end,
         }
-        Ok(())
     }
 
     /// The closing bracket expected by the innermost open container.
     fn close_byte(&self) -> u8 {
-        let start = self.stack.last().map_or(0, |slot| self.builder.start(slot));
-        match self.bytes.get(to_usize(start)) {
-            Some(b'{') => b'}',
-            _ => b']',
+        if self.objects.last() == Some(&true) {
+            b'}'
+        } else {
+            b']'
         }
     }
 
     /// Right after an opening bracket: the closing bracket or the first child.
     fn first_child(&mut self) -> Result<(), ParseError> {
-        self.pos = skip_ws(self.bytes, self.pos);
-        if self.bytes.get(self.pos) == Some(&self.close_byte()) {
+        let at = skip_ws(self.bytes, self.pos);
+        if self.bytes.get(at) == Some(&self.close_byte()) {
+            self.pos = at;
             self.close();
             return Ok(());
         }
-        self.start_child()
+        self.start_child(at)
     }
 
     /// After a child value: expect a comma or the closing bracket.
     fn after_child(&mut self) -> Result<(), ParseError> {
-        self.pos = skip_ws(self.bytes, self.pos);
-        match self.bytes.get(self.pos) {
-            Some(b',') => {
-                self.pos = skip_ws(self.bytes, self.pos + 1);
-                self.start_child()
-            }
+        let at = skip_ws(self.bytes, self.pos);
+        match self.bytes.get(at) {
+            Some(b',') => self.start_child(skip_ws(self.bytes, at + 1)),
             Some(&b) if b == self.close_byte() => {
+                self.pos = at;
                 self.close();
                 Ok(())
             }
-            Some(&b) => Err(fail(ParseErrorKind::UnexpectedByte(b), self.pos)),
-            None => Err(fail(ParseErrorKind::UnexpectedEof, self.pos)),
+            Some(&b) => Err(fail(ParseErrorKind::UnexpectedByte(b), at)),
+            None => Err(fail(ParseErrorKind::UnexpectedEof, at)),
         }
     }
 
-    fn start_child(&mut self) -> Result<(), ParseError> {
-        let is_object = self.close_byte() == b'}';
+    /// The child at `at`, lexed completely before anything is committed.
+    fn start_child(&mut self, at: usize) -> Result<(), ParseError> {
+        let value = if self.close_byte() == b'}' {
+            self.member_value(at)?
+        } else {
+            at
+        };
+        let scanned = self.scan_value(value)?;
         if let Some(slot) = self.stack.last() {
-            self.builder.add_child(slot, self.pos as u64);
+            self.builder.add_child(slot, self.base + at as u64);
         }
-        if is_object {
-            self.member_key()?;
-        }
-        self.start_value()
+        self.pos = value;
+        self.commit_value(scanned);
+        Ok(())
     }
 
-    /// `"key" :` with surrounding whitespace.
-    fn member_key(&mut self) -> Result<(), ParseError> {
-        expect(self.bytes, self.pos, b'"')?;
-        self.pos = skip_ws(self.bytes, scan_string(self.bytes, self.pos)?);
-        expect(self.bytes, self.pos, b':')?;
-        self.pos = skip_ws(self.bytes, self.pos + 1);
-        Ok(())
+    /// Where the value of the member whose key starts at `at` begins.
+    fn member_value(&self, at: usize) -> Result<usize, ParseError> {
+        expect(self.bytes, at, b'"')?;
+        let colon = skip_ws(self.bytes, scan_string(self.bytes, at)?);
+        expect(self.bytes, colon, b':')?;
+        Ok(skip_ws(self.bytes, colon + 1))
     }
 
     fn close(&mut self) {
         if let Some(slot) = self.stack.pop() {
+            self.objects.pop();
             self.pos += 1;
-            self.builder.close(slot, self.pos as u64);
+            self.builder.close(slot, self.abs(self.pos));
         }
     }
 }
