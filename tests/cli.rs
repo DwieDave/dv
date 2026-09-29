@@ -62,3 +62,13 @@ fn streaming_mode_is_reported_unsupported() {
         "{out:?}"
     );
 }
+
+#[test]
+fn index_only_handles_ndjson_with_bad_lines() {
+    let file = temp_file(b"{\"a\":1}\n{bad\n[2]\n").unwrap();
+    let path = file.path().with_extension("ndjson");
+    std::fs::copy(file.path(), &path).unwrap();
+    let out = dv(&["--index-only", path.to_str().unwrap()]).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(out.status.success(), "{out:?}");
+}

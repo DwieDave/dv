@@ -11,6 +11,8 @@ pub enum Kind {
     String,
     Object,
     Array,
+    /// An NDJSON record that failed to parse.
+    Invalid,
 }
 
 pub(crate) fn fail(kind: ParseErrorKind, pos: usize) -> ParseError {

@@ -50,20 +50,20 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, ParseError> {
     parse_with(bytes, |_| ControlFlow::Continue(()))
 }
 
-struct Parser<'a, H> {
-    bytes: &'a [u8],
+pub(crate) struct Parser<'a, H> {
+    pub(crate) bytes: &'a [u8],
     hook: H,
     /// Offset at which the hook is called next.
     next_report: u64,
-    pos: usize,
-    builder: VecStoreBuilder,
+    pub(crate) pos: usize,
+    pub(crate) builder: VecStoreBuilder,
     /// Open containers; per-container state lives in the builder's reserved span.
     stack: Vec<Slot>,
-    values: u64,
+    pub(crate) values: u64,
 }
 
 impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
-    fn new(bytes: &'a [u8], hook: H) -> Self {
+    pub(crate) fn new(bytes: &'a [u8], hook: H) -> Self {
         Self {
             bytes,
             hook,
@@ -78,6 +78,21 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
     fn run(mut self) -> Result<Parsed, ParseError> {
         self.pos = skip_ws(self.bytes, 0);
         let root = self.pos as u64;
+        self.value()?;
+        self.pos = skip_ws(self.bytes, self.pos);
+        if self.pos < self.bytes.len() {
+            return Err(fail(ParseErrorKind::TrailingData, self.pos));
+        }
+        self.final_report();
+        Ok(Parsed {
+            root,
+            store: self.builder.finish(),
+            values: self.values,
+        })
+    }
+
+    /// Parses one complete value starting at `pos`.
+    pub(crate) fn value(&mut self) -> Result<(), ParseError> {
         self.start_value()?;
         while let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) {
             if self.pos == start as usize + 1 {
@@ -87,21 +102,22 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
             }
             self.maybe_report()?;
         }
-        self.pos = skip_ws(self.bytes, self.pos);
-        if self.pos < self.bytes.len() {
-            return Err(fail(ParseErrorKind::TrailingData, self.pos));
-        }
+        Ok(())
+    }
+
+    /// Forgets the containers left open by a failed value.
+    pub(crate) fn abandon(&mut self) {
+        self.stack.clear();
+    }
+
+    /// Reports the end position unless it was just reported.
+    pub(crate) fn final_report(&mut self) {
         if self.next_report - REPORT_EVERY < self.pos as u64 {
             let _ = (self.hook)(self.pos as u64);
         }
-        Ok(Parsed {
-            root,
-            store: self.builder.finish(),
-            values: self.values,
-        })
     }
 
-    fn maybe_report(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn maybe_report(&mut self) -> Result<(), ParseError> {
         let at = self.pos as u64;
         if at < self.next_report {
             return Ok(());

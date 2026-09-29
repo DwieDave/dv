@@ -15,11 +15,8 @@ use crate::app::run::run as run_app;
 use crate::app::screen::{App, AppEvent};
 use crate::app::terminal::TerminalGuard;
 use crate::format::Format;
-use crate::json::parse::parse;
-use crate::load::load;
-use crate::position::Position;
-use crate::source::MemSource;
-use crate::tree::MemTree;
+use crate::load::{LoadEvent, Request, load};
+use crate::tree::{MemTree, TreeIndex};
 
 /// Input format override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -78,7 +75,6 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
     match (cli.mode, cli.format) {
         (Mode::Stream, _) => return Err(CliError::Unsupported("streaming mode")),
-        (_, Some(FormatArg::Ndjson)) => return Err(CliError::Unsupported("NDJSON")),
         (_, Some(FormatArg::Yaml)) => return Err(CliError::Unsupported("YAML")),
         _ => {}
     }
@@ -87,38 +83,60 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
         path: path.clone(),
         source,
     })?;
+    let request = Request {
+        path: Some(cli.path.clone()),
+        format: cli.format.map(Format::from),
+        size_hint: file.metadata().ok().map(|m| m.len()),
+        max_len: MAX_IN_MEMORY,
+    };
     if cli.index_only {
-        return index_only(file, &path).map(Some);
+        return index_only(file, &request, &path).map(Some);
     }
-    tui(file).map(|()| None)
+    tui(file, request).map(|()| None)
+}
+
+impl From<FormatArg> for Format {
+    fn from(arg: FormatArg) -> Self {
+        match arg {
+            FormatArg::Json => Self::Json,
+            FormatArg::Ndjson => Self::Ndjson,
+            FormatArg::Yaml => Self::Yaml,
+        }
+    }
 }
 
 /// Loads and indexes without starting the UI (benchmarks, NFR-1).
-fn index_only(file: File, path: &str) -> Result<String, CliError> {
-    let hint = file.metadata().ok().map(|m| m.len());
-    let source = MemSource::load(file, MAX_IN_MEMORY, hint)
-        .map_err(|e| CliError::Parse(format!("{path}: {e}")))?;
-    let bytes = source.as_bytes();
-    parse(bytes).map_err(|e| {
-        let at = Position::locate(bytes, e.offset);
-        CliError::Parse(format!("{path}:{}:{}: {}", at.line, at.column, e.kind))
-    })?;
-    Ok(format!("indexed {} bytes", bytes.len()))
+fn index_only(file: File, request: &Request, path: &str) -> Result<String, CliError> {
+    let mut outcome = None;
+    load(
+        file,
+        request,
+        &mut |event| {
+            if let LoadEvent::Loaded(result) = event {
+                outcome = Some(result);
+            }
+        },
+        &AtomicBool::new(false),
+    );
+    match outcome {
+        Some(Ok(tree)) => Ok(format!("indexed {} bytes", tree.stats().bytes)),
+        Some(Err(failure)) => Err(CliError::Parse(format!("{path}: {}", failure.message))),
+        None => Err(CliError::Parse(format!("{path}: loading stopped"))),
+    }
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(file: File) -> Result<(), CliError> {
-    let hint = file.metadata().ok().map(|m| m.len());
+fn tui(file: File, request: Request) -> Result<(), CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
     thread::spawn(move || {
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
-        load(file, hint, MAX_IN_MEMORY, &mut sink, &loader_cancel);
+        load(file, &request, &mut sink, &loader_cancel);
     });
     thread::spawn(move || forward_input(&tx));
     let mut guard = TerminalGuard::enter()?;
-    let mut app = App::new(Format::Json, cancel);
+    let mut app = App::new(cancel);
     Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
 }
 

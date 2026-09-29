@@ -111,6 +111,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
     fn scalar(&self, node: NodeRef, end: u64, max: usize) -> Result<Span<'static>, IndexError> {
         let raw = self.tree.bytes(scalar_window(node.offset, end, max))?;
         let (text, style) = match node.kind {
+            Kind::Invalid => (self.invalid_text(node, &raw, max), self.theme.error),
             Kind::String => (
                 format!("\"{}\"", inline(&raw, max.saturating_sub(2))),
                 self.theme.string,
@@ -118,6 +119,18 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
             kind => (inline(&raw, max), self.scalar_style(kind)),
         };
         Ok(Span::styled(text, style))
+    }
+
+    /// `✗ <reason>: <first line of the record>` for a record that failed to parse.
+    fn invalid_text(&self, node: NodeRef, raw: &[u8], max: usize) -> String {
+        let reason = self
+            .tree
+            .problem(node)
+            .map_or_else(|| "invalid".to_owned(), |kind| kind.to_string());
+        let line = raw.split(|&b| b == b'\n').next().unwrap_or_default();
+        let head = format!("✗ {reason}: ");
+        let room = max.saturating_sub(head.chars().count());
+        format!("{head}{}", inline(line.trim_ascii_end(), room))
     }
 
     fn scalar_style(&self, kind: Kind) -> Style {

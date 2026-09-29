@@ -62,6 +62,15 @@ struct FanoutRow {
 #[derive(Debug)]
 pub struct Slot(u32);
 
+/// Builder lengths captured by [`VecStoreBuilder::mark`].
+#[derive(Debug, Clone, Copy)]
+pub struct Mark {
+    spans: usize,
+    rows: usize,
+    checkpoints: usize,
+    open_cps: usize,
+}
+
 /// Builds the store while parsing. An open container's span keeps its child
 /// count in `len` (unknown until close anyway), so a parse frame is one `Slot`.
 #[derive(Debug, Default)]
@@ -115,6 +124,25 @@ impl VecStoreBuilder {
         let first = offset32(self.checkpoints.len());
         self.rows.push(FanoutRow { node, count, first });
         self.checkpoints.extend_from_slice(&self.open_cps[run..]);
+    }
+
+    /// Remembers the current state so a failed value can be undone.
+    #[must_use]
+    pub fn mark(&self) -> Mark {
+        Mark {
+            spans: self.spans.len(),
+            rows: self.rows.len(),
+            checkpoints: self.checkpoints.len(),
+            open_cps: self.open_cps.len(),
+        }
+    }
+
+    /// Drops everything recorded since `mark`.
+    pub fn rollback(&mut self, mark: Mark) {
+        self.spans.truncate(mark.spans);
+        self.rows.truncate(mark.rows);
+        self.checkpoints.truncate(mark.checkpoints);
+        self.open_cps.truncate(mark.open_cps);
     }
 
     #[must_use]

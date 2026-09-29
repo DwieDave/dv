@@ -7,7 +7,7 @@ use crate::source::MemSource;
 use crate::tree::MemTree;
 
 fn app() -> App<MemTree> {
-    App::new(Format::Json, Arc::new(AtomicBool::new(false)))
+    App::new(Arc::new(AtomicBool::new(false)))
 }
 
 fn key(c: char) -> AppEvent<MemTree> {

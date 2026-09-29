@@ -83,3 +83,18 @@ fn highlights_the_cursor_row_and_scrolls() {
     assert!(buf[(4, 1)].modifier.contains(Modifier::REVERSED));
     assert!(!buf[(4, 0)].modifier.contains(Modifier::REVERSED));
 }
+
+#[test]
+fn invalid_records_render_as_errors() {
+    let tree = MemTree::parse_lines(MemSource::new(b"1\n{bad\n".to_vec())).unwrap();
+    let state = TreeState::new(&tree).unwrap();
+    let lines = text_lines(&draw(&tree, &state, 40, 3));
+    assert_eq!(
+        lines,
+        [
+            "▼ [2]",
+            "    [0]: 1",
+            "    [1]: ✗ unexpected byte 0x62: {bad"
+        ]
+    );
+}

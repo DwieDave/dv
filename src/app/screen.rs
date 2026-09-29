@@ -9,7 +9,6 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Gauge, Paragraph};
 
 use crate::app::{Model, Msg, input_msg, update, view};
-use crate::format::Format;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
@@ -34,7 +33,6 @@ pub enum AppEvent<T> {
 #[derive(Debug)]
 pub struct App<T> {
     pub screen: Screen<T>,
-    pub format: Format,
     /// Shared with the loader thread; set to abandon loading.
     pub cancel: Arc<AtomicBool>,
     /// Terminal rows, passed to the model once it exists.
@@ -44,7 +42,7 @@ pub struct App<T> {
 
 impl<T: TreeIndex> App<T> {
     #[must_use]
-    pub fn new(format: Format, cancel: Arc<AtomicBool>) -> Self {
+    pub fn new(cancel: Arc<AtomicBool>) -> Self {
         let progress = Progress {
             phase: Phase::Reading,
             done: 0,
@@ -52,7 +50,6 @@ impl<T: TreeIndex> App<T> {
         };
         Self {
             screen: Screen::Loading(progress),
-            format,
             cancel,
             rows: 1,
             quit: false,
@@ -70,18 +67,13 @@ pub fn update_app<T: TreeIndex>(app: &mut App<T>, event: AppEvent<T>) {
             }
         }
         AppEvent::Load(LoadEvent::Loaded(result)) => {
-            app.screen = ready_or_failed(result, app.format, app.rows);
+            app.screen = ready_or_failed(result, app.rows);
         }
     }
 }
 
-fn ready_or_failed<T: TreeIndex>(
-    result: Result<T, LoadFailure>,
-    format: Format,
-    rows: u16,
-) -> Screen<T> {
-    let model =
-        result.and_then(|tree| Model::new(tree, format).map_err(|err| LoadFailure::plain(&err)));
+fn ready_or_failed<T: TreeIndex>(result: Result<T, LoadFailure>, rows: u16) -> Screen<T> {
+    let model = result.and_then(|tree| Model::new(tree).map_err(|err| LoadFailure::plain(&err)));
     match model {
         Ok(mut model) => {
             update(&mut model, Msg::Resize(rows));

@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::index::to_usize;
-use crate::test_support::{Container, json_value, layout};
+use crate::test_support::{Container, json_value, layout, to_value};
 
 fn tree_of(text: &str) -> MemTree {
     MemTree::parse(MemSource::new(text.as_bytes().to_vec())).unwrap()
@@ -89,33 +89,6 @@ fn scalars_have_no_children() {
     assert_eq!(tree.child_count(root).unwrap(), Count::Known(0));
     assert!(tree.children(root, 0..10).unwrap().is_empty());
     assert_eq!(&*tree.bytes(2..4).unwrap(), b"42");
-}
-
-fn to_value(tree: &MemTree, node: NodeRef) -> Value {
-    let Count::Known(n) = tree.child_count(node).unwrap() else {
-        unreachable!()
-    };
-    let kids = tree.children(node, 0..n).unwrap();
-    match node.kind {
-        Kind::Array => kids.iter().map(|c| to_value(tree, c.node())).collect(),
-        Kind::Object => kids
-            .iter()
-            .map(|c| {
-                let key = crate::json::text::unescape(&tree.bytes(c.key.clone().unwrap()).unwrap())
-                    .into_owned();
-                (key, to_value(tree, c.node()))
-            })
-            .collect(),
-        _ => {
-            let raw = tree.bytes(node.offset..scalar_end(tree, node)).unwrap();
-            serde_json::from_slice(&raw).unwrap()
-        }
-    }
-}
-
-fn scalar_end(tree: &MemTree, node: NodeRef) -> u64 {
-    let rest = tree.bytes(node.offset..u64::MAX).unwrap();
-    crate::json::lex::scan_scalar(&rest, 0).unwrap().1 as u64 + node.offset
 }
 
 fn serde_verdict(bytes: &[u8]) -> Option<bool> {

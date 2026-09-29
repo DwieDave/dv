@@ -2,10 +2,13 @@
 
 use std::io::Read;
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{ParseError, ParseErrorKind};
+use crate::format::{Format, detect};
 use crate::index::to_usize;
+use crate::json::ndjson::{ParsedLines, parse_lines};
 use crate::json::parse::parse_with;
 use crate::position::Position;
 use crate::snippet::{Snippet, snippet};
@@ -60,16 +63,29 @@ pub enum LoadEvent<T> {
     Loaded(Result<T, LoadFailure>),
 }
 
+/// What to load and how.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Request {
+    /// Used for extension-based format detection.
+    pub path: Option<PathBuf>,
+    /// Skips detection when set.
+    pub format: Option<Format>,
+    pub size_hint: Option<u64>,
+    pub max_len: u64,
+}
+
 /// Reads and indexes `reader`, reporting to `sink`. A set `cancel` stops it silently.
 pub fn load(
     reader: impl Read,
-    size_hint: Option<u64>,
-    max_len: u64,
+    request: &Request,
     sink: &mut impl FnMut(LoadEvent<MemTree>),
     cancel: &AtomicBool,
 ) {
-    let outcome = match read_all(reader, size_hint, max_len, sink, cancel) {
-        Ok(Some(bytes)) => index(MemSource::new(bytes), sink, cancel),
+    let outcome = match read_all(reader, request.size_hint, request.max_len, sink, cancel) {
+        Ok(Some(bytes)) => {
+            let format = detect(request.path.as_deref(), &bytes, request.format);
+            index(MemSource::new(bytes), format, sink, cancel)
+        }
         Ok(None) => None,
         Err(failure) => Some(Err(failure)),
     };
@@ -110,13 +126,21 @@ fn read_all(
 }
 
 /// Parses `source`; `None` when cancelled.
+/// A document parsed as one of the supported syntaxes.
+enum Parsed {
+    Json(crate::json::parse::Parsed),
+    Lines(ParsedLines),
+}
+
+/// Parses `source` as `format`; `None` when cancelled.
 fn index(
     source: MemSource,
+    format: Format,
     sink: &mut impl FnMut(LoadEvent<MemTree>),
     cancel: &AtomicBool,
 ) -> Option<Result<MemTree, LoadFailure>> {
     let total = source.len();
-    let parsed = parse_with(source.as_bytes(), |done| {
+    let mut hook = |done| {
         if cancel.load(Ordering::Relaxed) {
             return ControlFlow::Break(());
         }
@@ -126,9 +150,15 @@ fn index(
             total,
         }));
         ControlFlow::Continue(())
-    });
+    };
+    let parsed = match format {
+        Format::Json => parse_with(source.as_bytes(), &mut hook).map(Parsed::Json),
+        Format::Ndjson => parse_lines(source.as_bytes(), &mut hook).map(Parsed::Lines),
+        Format::Yaml => return Some(Err(LoadFailure::plain(&"YAML is not supported yet"))),
+    };
     match parsed {
-        Ok(parsed) => Some(Ok(MemTree::from_parts(source, parsed))),
+        Ok(Parsed::Json(parsed)) => Some(Ok(MemTree::from_parts(source, parsed))),
+        Ok(Parsed::Lines(parsed)) => Some(Ok(MemTree::from_lines(source, parsed))),
         Err(err) if err.kind == ParseErrorKind::Cancelled => None,
         Err(err) => Some(Err(parse_failure(source.as_bytes(), err))),
     }
@@ -151,13 +181,12 @@ mod tests {
     fn events(bytes: &[u8], cancel: bool) -> Vec<LoadEvent<MemTree>> {
         let mut seen = Vec::new();
         let flag = AtomicBool::new(cancel);
-        load(
-            bytes,
-            Some(bytes.len() as u64),
-            u64::MAX,
-            &mut |e| seen.push(e),
-            &flag,
-        );
+        let request = Request {
+            size_hint: Some(bytes.len() as u64),
+            max_len: u64::MAX,
+            ..Request::default()
+        };
+        load(bytes, &request, &mut |e| seen.push(e), &flag);
         seen
     }
 
@@ -204,13 +233,45 @@ mod tests {
         assert!(!seen.iter().any(|e| matches!(e, LoadEvent::Loaded(_))));
     }
 
+    fn loaded_format(bytes: &[u8], path: Option<&str>) -> Format {
+        let mut seen = Vec::new();
+        let request = Request {
+            path: path.map(PathBuf::from),
+            max_len: u64::MAX,
+            ..Request::default()
+        };
+        load(
+            bytes,
+            &request,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+        );
+        let Some(LoadEvent::Loaded(Ok(tree))) = seen.pop() else {
+            panic!("not loaded")
+        };
+        tree.format()
+    }
+
+    #[test]
+    fn ndjson_is_loaded_by_extension_or_content() {
+        assert_eq!(loaded_format(b"1\n2\n", Some("data.jsonl")), Format::Ndjson);
+        assert_eq!(
+            loaded_format(b"{\"a\":1}\n{\"a\":2}\n", None),
+            Format::Ndjson
+        );
+        assert_eq!(loaded_format(b"{\"a\":1}", None), Format::Json);
+    }
+
     #[test]
     fn oversized_input_fails() {
         let mut seen = Vec::new();
+        let request = Request {
+            max_len: 4,
+            ..Request::default()
+        };
         load(
             &b"[1, 2, 3]"[..],
-            None,
-            4,
+            &request,
             &mut |e| seen.push(e),
             &AtomicBool::new(false),
         );

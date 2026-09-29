@@ -3,6 +3,9 @@
 use proptest::prelude::*;
 use serde_json::{Map, Value};
 
+use crate::json::lex::Kind;
+use crate::tree::{Count, NodeRef, TreeIndex};
+
 /// A child as laid out: `start` is the key (objects) or the value (arrays).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaidChild {
@@ -113,4 +116,31 @@ fn text(max: usize) -> impl Strategy<Value = String> {
         proptest::string::string_regex(&format!("\\PC{{0,{max}}}")).unwrap(),
         proptest::string::string_regex(&format!("[\\x00-\\x1f\"\\\\a-z]{{0,{max}}}")).unwrap(),
     ]
+}
+
+/// Rebuilds the value at `node` through the public `TreeIndex` API only.
+pub fn to_value(tree: &impl TreeIndex, node: NodeRef) -> Value {
+    let Count::Known(n) = tree.child_count(node).unwrap() else {
+        panic!("pending count")
+    };
+    let kids = tree.children(node, 0..n).unwrap();
+    match node.kind {
+        Kind::Array => kids.iter().map(|c| to_value(tree, c.node())).collect(),
+        Kind::Object => kids
+            .iter()
+            .map(|c| {
+                let raw = tree.bytes(c.key.clone().unwrap()).unwrap();
+                (
+                    crate::json::text::unescape(&raw).into_owned(),
+                    to_value(tree, c.node()),
+                )
+            })
+            .collect(),
+        _ => serde_json::from_slice(
+            &tree
+                .bytes(node.offset..tree.value_end(node).unwrap())
+                .unwrap(),
+        )
+        .unwrap(),
+    }
 }

@@ -1,13 +1,15 @@
 //! Mode-independent tree access used by the UI (D-14).
 
 use std::borrow::Cow;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
-use crate::error::ParseError;
-use crate::index::children::{Child, children, seek, skip_value};
-use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
+use crate::error::{ParseError, ParseErrorKind};
+use crate::format::Format;
+use crate::index::children::{Child, Children, seek, skip_value};
+use crate::index::store::{CHECKPOINT_EVERY, NodeStore, VecStore};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, scan_scalar};
+use crate::json::ndjson::{LineIndex, ParsedLines, Records, parse_lines, records};
 use crate::json::parse::Parsed;
 use crate::source::{MemSource, Source};
 
@@ -82,13 +84,27 @@ pub trait TreeIndex {
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError>;
 
     fn stats(&self) -> Stats;
+
+    fn format(&self) -> Format;
+
+    /// Why `node` failed to parse, for `Kind::Invalid` records.
+    fn problem(&self, _node: NodeRef) -> Option<ParseErrorKind> {
+        None
+    }
 }
 
-/// An in-memory document.
+/// Offset of the NDJSON root, which has no bytes of its own.
+pub const LINES_ROOT: u64 = u64::MAX;
+
+/// An in-memory document (JSON, or NDJSON with a virtual root array of records).
 #[derive(Debug)]
 pub struct MemTree {
     source: MemSource,
-    parsed: Parsed,
+    store: VecStore,
+    root: u64,
+    values: u64,
+    lines: Option<LineIndex>,
+    format: Format,
 }
 
 impl MemTree {
@@ -96,13 +112,75 @@ impl MemTree {
     /// The first parse error in `source`.
     pub fn parse(source: MemSource) -> Result<Self, ParseError> {
         let parsed = crate::json::parse::parse(source.as_bytes())?;
-        Ok(Self { source, parsed })
+        Ok(Self::from_parts(source, parsed))
     }
 
-    /// Pairs a source with the index parsed from it.
+    /// Parses `source` as NDJSON: one record per non-empty line.
+    ///
+    /// # Errors
+    /// Size limits only; malformed records become `Kind::Invalid` children.
+    pub fn parse_lines(source: MemSource) -> Result<Self, ParseError> {
+        let parsed = parse_lines(source.as_bytes(), |_| ControlFlow::Continue(()))?;
+        Ok(Self::from_lines(source, parsed))
+    }
+
+    /// Pairs a source with the JSON index parsed from it.
     #[must_use]
     pub fn from_parts(source: MemSource, parsed: Parsed) -> Self {
-        Self { source, parsed }
+        let Parsed {
+            root,
+            store,
+            values,
+        } = parsed;
+        Self {
+            source,
+            store,
+            root,
+            values,
+            lines: None,
+            format: Format::Json,
+        }
+    }
+
+    /// Pairs a source with the NDJSON index parsed from it.
+    #[must_use]
+    pub fn from_lines(source: MemSource, parsed: ParsedLines) -> Self {
+        let ParsedLines {
+            store,
+            values,
+            lines,
+        } = parsed;
+        Self {
+            source,
+            store,
+            root: LINES_ROOT,
+            values,
+            lines: Some(lines),
+            format: Format::Ndjson,
+        }
+    }
+
+    /// Relabels the source format (e.g. YAML transcoded to JSON).
+    #[must_use]
+    pub fn with_format(self, format: Format) -> Self {
+        Self { format, ..self }
+    }
+}
+
+/// Children of a bracketed container or of the NDJSON root.
+enum Kids<'a> {
+    Container(Children<'a, VecStore>),
+    Records(Records<'a, VecStore>),
+}
+
+impl Iterator for Kids<'_> {
+    type Item = Result<Child, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Container(it) => it.next(),
+            Self::Records(it) => it.next(),
+        }
     }
 }
 
@@ -111,41 +189,80 @@ impl MemTree {
         matches!(node.kind, Kind::Object | Kind::Array)
     }
 
+    /// The line index, when `node` is the NDJSON root.
+    fn lines_of(&self, node: NodeRef) -> Option<&LineIndex> {
+        self.lines.as_ref().filter(|_| node.offset == LINES_ROOT)
+    }
+
+    /// Children of `node`, positioned at child `k`.
+    fn kids(&self, node: NodeRef, k: u64) -> Result<Kids<'_>, IndexError> {
+        let bytes = self.source.as_bytes();
+        Ok(match self.lines_of(node) {
+            Some(lines) => Kids::Records(records(bytes, &self.store, lines, k)?),
+            None => Kids::Container(seek(bytes, &self.store, node.offset, k)?),
+        })
+    }
+
     /// Child index of the last checkpoint at or before `offset` (0 without checkpoints).
     fn checkpoint_index(&self, node: NodeRef, offset: u64) -> Result<u64, IndexError> {
-        let store = &self.parsed.store;
-        let Some(fanout) = store.node_at(node.offset)?.and_then(|n| n.fanout) else {
+        if let Some(lines) = self.lines_of(node) {
+            return last_at_or_before(lines.checkpoints(), |k| Ok(lines.checkpoint(k)), offset);
+        }
+        let Some(fanout) = self.store.node_at(node.offset)?.and_then(|n| n.fanout) else {
             return Ok(0);
         };
-        let (mut lo, mut hi) = (0, fanout.checkpoints());
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            if store.checkpoint(&fanout, mid)?.is_some_and(|c| c <= offset) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        Ok(lo * CHECKPOINT_EVERY)
+        last_at_or_before(
+            fanout.checkpoints(),
+            |k| Ok(self.store.checkpoint(&fanout, k)?),
+            offset,
+        )
     }
+}
+
+/// Binary search over `n` checkpoints for the last one at or before `offset`, as a child index.
+fn last_at_or_before(
+    n: u64,
+    at: impl Fn(u64) -> Result<Option<u64>, IndexError>,
+    offset: u64,
+) -> Result<u64, IndexError> {
+    let (mut lo, mut hi) = (0, n.max(1));
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if at(mid)?.is_some_and(|c| c <= offset) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo * CHECKPOINT_EVERY)
 }
 
 impl TreeIndex for MemTree {
     fn root(&self) -> Result<NodeRef, IndexError> {
-        let offset = self.parsed.root;
-        let (kind, _) = scan_scalar(self.source.as_bytes(), to_usize(offset))?;
-        Ok(NodeRef { offset, kind })
+        if self.lines.is_some() {
+            return Ok(NodeRef {
+                offset: LINES_ROOT,
+                kind: Kind::Array,
+            });
+        }
+        let (kind, _) = scan_scalar(self.source.as_bytes(), to_usize(self.root))?;
+        Ok(NodeRef {
+            offset: self.root,
+            kind,
+        })
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
         if !Self::is_container(node) {
             return Ok(Count::Known(0));
         }
-        let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
-        if let Some(fanout) = store.node_at(node.offset)?.and_then(|n| n.fanout) {
+        if let Some(lines) = self.lines_of(node) {
+            return Ok(Count::Known(lines.count()));
+        }
+        if let Some(fanout) = self.store.node_at(node.offset)?.and_then(|n| n.fanout) {
             return Ok(Count::Known(fanout.count));
         }
-        let count = children(bytes, store, node.offset).try_fold(0, |n, c| c.map(|_| n + 1))?;
+        let count = self.kids(node, 0)?.try_fold(0, |n, c| c.map(|_| n + 1))?;
         Ok(Count::Known(count))
     }
 
@@ -153,20 +270,16 @@ impl TreeIndex for MemTree {
         if !Self::is_container(node) || range.is_empty() {
             return Ok(Vec::new());
         }
-        let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
         let window = to_usize(range.end - range.start);
-        seek(bytes, store, node.offset, range.start)?
-            .take(window)
-            .collect()
+        self.kids(node, range.start)?.take(window).collect()
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
         if !Self::is_container(node) {
             return Ok(None);
         }
-        let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
         let first = self.checkpoint_index(node, offset)?;
-        for child in seek(bytes, store, node.offset, first)? {
+        for child in self.kids(node, first)? {
             let child = child?;
             if child.start() > offset {
                 return Ok(None);
@@ -183,17 +296,33 @@ impl TreeIndex for MemTree {
     }
 
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
-        let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
-        Ok(skip_value(bytes, store, to_usize(node.offset))?.1)
+        if self.lines_of(node).is_some() {
+            return Ok(self.source.len());
+        }
+        if let Some(bad) = self.lines.as_ref().and_then(|l| l.bad_at(node.offset)) {
+            return Ok(u64::from(bad.resume));
+        }
+        Ok(skip_value(self.source.as_bytes(), &self.store, to_usize(node.offset))?.1)
+    }
+
+    fn format(&self) -> Format {
+        self.format
     }
 
     fn stats(&self) -> Stats {
         Stats {
             bytes: self.source.len(),
-            values: Some(self.parsed.values),
+            values: Some(self.values),
         }
+    }
+
+    fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {
+        let bad = self.lines.as_ref()?.bad_at(node.offset)?;
+        (node.kind == Kind::Invalid).then_some(bad.kind)
     }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_ndjson;

@@ -44,7 +44,6 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::format::Format;
     use crate::load::LoadEvent;
     use crate::source::MemSource;
     use crate::tree::MemTree;
@@ -54,7 +53,7 @@ mod tests {
     }
 
     fn app() -> App<MemTree> {
-        App::new(Format::Json, Arc::new(AtomicBool::new(false)))
+        App::new(Arc::new(AtomicBool::new(false)))
     }
 
     #[test]

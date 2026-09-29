@@ -11,7 +11,6 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Line;
 
 use crate::app::keymap::Keymap;
-use crate::format::Format;
 use crate::index::IndexError;
 use crate::json::lex::Kind;
 use crate::path::render;
@@ -30,7 +29,6 @@ const STATUS_ROWS: u16 = 1;
 #[derive(Debug)]
 pub struct Model<T> {
     pub tree: T,
-    pub format: Format,
     pub state: TreeState,
     pub keymap: Keymap,
     pub theme: Theme,
@@ -44,12 +42,11 @@ pub struct Model<T> {
 impl<T: TreeIndex> Model<T> {
     /// # Errors
     /// Storage or lexing failures while reading the root.
-    pub fn new(tree: T, format: Format) -> Result<Self, IndexError> {
+    pub fn new(tree: T) -> Result<Self, IndexError> {
         let state = TreeState::new(&tree)?;
         let (keymap, theme) = (Keymap::default(), Theme::default());
         Ok(Self {
             tree,
-            format,
             state,
             keymap,
             theme,
@@ -134,7 +131,7 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
     let status = Status {
         path: &path,
         kind: &kind,
-        format: model.format,
+        format: model.tree.format(),
         stats: model.tree.stats(),
         error: model.status.as_deref(),
     };
@@ -160,6 +157,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::String => "string",
         Kind::Object => "object",
         Kind::Array => "array",
+        Kind::Invalid => "invalid",
     }
 }
 
@@ -173,7 +171,7 @@ mod tests {
 
     fn model() -> Model<MemTree> {
         let tree = MemTree::parse(MemSource::new(br#"{"a": [1, 2]}"#.to_vec())).unwrap();
-        Model::new(tree, Format::Json).unwrap()
+        Model::new(tree).unwrap()
     }
 
     #[test]

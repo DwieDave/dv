@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicBool;
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use dv::app::screen::{App, AppEvent, update_app, view_app};
-use dv::format::Format;
 use dv::load::{LoadEvent, LoadFailure, Phase, Progress};
 use dv::snippet::snippet;
 use dv::source::MemSource;
@@ -14,7 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 fn app() -> App<MemTree> {
-    App::new(Format::Json, Arc::new(AtomicBool::new(false)))
+    App::new(Arc::new(AtomicBool::new(false)))
 }
 
 fn render(app: &App<MemTree>, width: u16, height: u16) -> String {
