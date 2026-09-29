@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dv::json::parse::parse;
+use dv::load::{Request, load};
+use std::sync::atomic::AtomicBool;
 
 const FIXTURES: [&str; 8] = [
     "api-15M.json",
@@ -58,5 +60,29 @@ fn parse_json(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, read_baseline, parse_json);
+fn load_formats(c: &mut Criterion) {
+    let mut group = c.benchmark_group("load");
+    group.sample_size(10);
+    for (name, bytes) in loaded(&FIXTURES[6..]) {
+        let request = Request {
+            path: fixture(name),
+            max_len: u64::MAX,
+            ..Request::default()
+        };
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                load(
+                    black_box(bytes.as_slice()),
+                    &request,
+                    &mut drop,
+                    &AtomicBool::new(false),
+                );
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, read_baseline, parse_json, load_formats);
 criterion_main!(benches);

@@ -95,3 +95,43 @@ fn peak_heap_is_bounded_for_every_shape() {
     println!("{report}");
     assert!(failures.is_empty(), "{failures:?}\n{report}");
 }
+
+fn api_yaml(i: usize) -> String {
+    format!(
+        "- id: {i}\n  name: user_{i}\n  active: true\n  score: 12.5\n  tags:\n    - a\n    - b\n  address:\n    city: c{i}\n    zip: \"01234\"\n  note: null\n"
+    )
+}
+
+fn loaded_peak(text: &str, path: &str) -> usize {
+    use dv::load::{LoadEvent, Request, load};
+    use std::sync::atomic::AtomicBool;
+    let request = Request {
+        path: Some(path.into()),
+        size_hint: Some(text.len() as u64),
+        max_len: u64::MAX,
+        ..Request::default()
+    };
+    let (loaded, peak) = peak_heap(|| {
+        let mut ok = false;
+        load(
+            text.as_bytes(),
+            &request,
+            &mut |e| ok |= matches!(e, LoadEvent::Loaded(Ok(_))),
+            &AtomicBool::new(false),
+        );
+        ok
+    });
+    assert!(loaded, "{path} did not load");
+    peak
+}
+
+#[test]
+fn ndjson_and_yaml_loads_are_bounded() {
+    let ndjson = repeat_until("", api, "\n", "\n");
+    let yaml = repeat_until("", api_yaml, "", "");
+    for (name, text) in [("x.ndjson", ndjson), ("x.yaml", yaml)] {
+        let r = ratio(loaded_peak(&text, name), text.len());
+        println!("{name}: {r:.2}x");
+        assert!(r <= 3.0, "{name}: {r:.2}x");
+    }
+}
