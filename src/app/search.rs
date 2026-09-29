@@ -7,11 +7,11 @@ use std::thread;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::picker::Entries;
+use crate::app::picker::Catalog;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::{LastFind, Model, picker};
 use crate::index::children::Child;
-use crate::schema::{Seg, collect, render};
+use crate::schema::{Collected, collect, render};
 use crate::search::{
     Direction, Hit, Matcher, Pulse, Query, Scanned, Scope, SearchError, count, find,
 };
@@ -45,7 +45,7 @@ pub enum JobResult {
     /// `None` when cancelled.
     Counted(Option<u64>),
     /// `None` when cancelled.
-    Schema(Option<Entries>),
+    Schema(Option<Catalog>),
     Failed(String),
     /// Progress of a long scan; the final result follows.
     Scanning(Scanned),
@@ -75,7 +75,7 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
         }
         (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
         (Work::Schema, _) => collect(tree, &job.root, &|| pulse.cancelled())
-            .map(|paths| JobResult::Schema(paths.map(entries)))
+            .map(|collected| JobResult::Schema(collected.map(catalog)))
             .map_err(SearchError::from),
         (Work::Find(_) | Work::Count, None) => {
             Ok(JobResult::Failed("no search pattern".to_owned()))
@@ -89,13 +89,15 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
 }
 
 /// Schema paths paired with their rendering, for the picker.
-fn entries(paths: Vec<Vec<Seg>>) -> Entries {
-    Arc::new(
-        paths
-            .into_iter()
-            .map(|segs| (render(&segs), segs))
-            .collect(),
-    )
+fn catalog(collected: Collected) -> Catalog {
+    let entries = collected
+        .paths
+        .into_iter()
+        .map(|segs| (render(&segs), segs));
+    Catalog {
+        entries: Arc::new(entries.collect()),
+        truncated: collected.truncated,
+    }
 }
 
 /// The worker's pulse: a newer generation cancels, and progress goes out as interim outcomes.

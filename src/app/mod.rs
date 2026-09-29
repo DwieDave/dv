@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::keymap::Keymap;
-use crate::app::picker::{Entries, Picker};
+use crate::app::picker::{Catalog, Picker};
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::search::{Job, Outcome, SearchState};
 use crate::index::IndexError;
@@ -63,7 +63,7 @@ pub struct Model<T> {
     /// The fuzzy schema-path picker, when open.
     pub picker: Option<Picker>,
     /// Schema paths, collected the first time the picker opens.
-    pub schema: Option<Entries>,
+    pub schema: Option<Catalog>,
     /// What `n`/`N` repeat.
     pub last_find: LastFind,
     /// Transient information for the status bar; the next key clears it.
@@ -456,9 +456,14 @@ fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) 
             }
         })),
     }
+    let title = if picker.truncated {
+        " keys · partial list (collection capped) "
+    } else {
+        " keys "
+    };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" keys ")),
+        Paragraph::new(lines).block(Block::bordered().title(title)),
         popup,
     );
 }

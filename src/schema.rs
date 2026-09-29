@@ -17,6 +17,31 @@ use crate::view::resolve::RootItem;
 pub const MAX_ENTRIES: usize = 100_000;
 /// Deepest schema path collected.
 pub const MAX_DEPTH: usize = 256;
+/// Most values visited while collecting, which bounds the time a huge document takes.
+pub const MAX_VISITS: u64 = 2_000_000;
+
+/// Collected schema paths; `truncated` when a cap stopped the walk early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collected {
+    pub paths: Vec<Vec<Seg>>,
+    pub truncated: bool,
+}
+
+/// Limits of one collection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Caps {
+    pub(crate) visits: u64,
+    pub(crate) entries: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            visits: MAX_VISITS,
+            entries: MAX_ENTRIES,
+        }
+    }
+}
 
 /// One schema step: a named member, or any array element.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,8 +61,18 @@ pub fn collect(
     tree: &impl TreeIndex,
     root: &RootItem,
     cancelled: &dyn Fn() -> bool,
-) -> Result<Option<Vec<Vec<Seg>>>, IndexError> {
-    let mut seen = Trie::default();
+) -> Result<Option<Collected>, IndexError> {
+    collect_within(tree, root, cancelled, Caps::default())
+}
+
+/// [`collect`] with explicit caps.
+pub(crate) fn collect_within(
+    tree: &impl TreeIndex,
+    root: &RootItem,
+    cancelled: &dyn Fn() -> bool,
+    caps: Caps,
+) -> Result<Option<Collected>, IndexError> {
+    let (mut seen, mut visits) = (Trie::default(), 0);
     let mut stack = vec![Frame::new(tree, root.node, 0)?];
     while let Some(frame) = stack.last_mut() {
         if cancelled() {
@@ -47,15 +82,16 @@ pub fn collect(
             stack.pop();
             continue;
         };
-        let id = seen.insert(frame.id, seg_of(tree, &child)?);
-        if seen.full() {
-            break;
+        if visits >= caps.visits || seen.len() >= caps.entries {
+            return Ok(Some(seen.collected(true)));
         }
+        visits += 1;
+        let id = seen.insert(frame.id, seg_of(tree, &child)?);
         if is_container(child.node()) && stack.len() < MAX_DEPTH {
             stack.push(Frame::new(tree, child.node(), id)?);
         }
     }
-    Ok(Some(seen.paths()))
+    Ok(Some(seen.collected(false)))
 }
 
 /// A container being walked: its children are fetched window by window.
@@ -111,14 +147,15 @@ impl Trie {
         })
     }
 
-    fn full(&self) -> bool {
-        self.nodes.len() >= MAX_ENTRIES
+    fn len(&self) -> usize {
+        self.nodes.len()
     }
 
-    fn paths(&self) -> Vec<Vec<Seg>> {
-        (1..=self.nodes.len())
+    fn collected(&self, truncated: bool) -> Collected {
+        let paths = (1..=self.nodes.len())
             .map(|id| self.path(offset32(id)))
-            .collect()
+            .collect();
+        Collected { paths, truncated }
     }
 
     fn path(&self, mut id: u32) -> Vec<Seg> {

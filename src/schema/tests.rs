@@ -37,7 +37,8 @@ proptest! {
         let (tree, root) = doc(&value);
         let mut expected = Vec::new();
         naive(&value, &mut Vec::new(), &mut expected);
-        prop_assert_eq!(collect(&tree, &root, &|| false).unwrap(), Some(expected));
+        let collected = Collected { paths: expected, truncated: false };
+        prop_assert_eq!(collect(&tree, &root, &|| false).unwrap(), Some(collected));
     }
 }
 
@@ -49,6 +50,32 @@ fn renders_schema_paths() {
     assert_eq!(
         render(&[key("users"), Seg::Items, key("first name")]),
         r#".users[]."first name""#
+    );
+}
+
+#[test]
+fn collection_stops_at_the_caps_and_says_so() {
+    let (tree, root) = doc(&json!({"a": 1, "b": 2, "c": 3, "d": 4}));
+    let key = |k: &str| vec![Seg::Key(k.to_owned())];
+    let within = |visits, entries| {
+        collect_within(&tree, &root, &|| false, Caps { visits, entries })
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        within(2, 100),
+        Collected {
+            paths: vec![key("a"), key("b")],
+            truncated: true
+        }
+    );
+    assert!(within(100, 3).truncated);
+    assert_eq!(
+        within(4, 100),
+        Collected {
+            paths: ["a", "b", "c", "d"].map(key).to_vec(),
+            truncated: false
+        }
     );
 }
 
@@ -66,7 +93,7 @@ fn deep_documents_stop_at_the_depth_cap() {
     }
     let (tree, root) = doc(&value);
     let entries = collect(&tree, &root, &|| false).unwrap().unwrap();
-    assert_eq!(entries.len(), MAX_DEPTH);
+    assert_eq!(entries.paths.len(), MAX_DEPTH);
 }
 
 fn found_path(tree: &MemTree, root: &RootItem, rows: &[u64]) -> String {

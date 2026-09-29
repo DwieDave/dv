@@ -15,6 +15,13 @@ use crate::view::jump::reveal;
 /// Rendered schema paths with their segments, shared with the model.
 pub type Entries = Arc<Vec<(String, Vec<Seg>)>>;
 
+/// Schema paths for the picker, and whether collection stopped at a cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Catalog {
+    pub entries: Entries,
+    pub truncated: bool,
+}
+
 /// Most matches kept and shown.
 pub const MAX_MATCHES: usize = 200;
 
@@ -32,6 +39,8 @@ pub struct Picker {
     pub query: String,
     /// `None` until the schema has been collected.
     pub entries: Option<Entries>,
+    /// The entries are a partial list (a collection cap was hit).
+    pub truncated: bool,
     /// Indices into `entries`, best match first.
     pub matches: Vec<usize>,
     pub selected: usize,
@@ -41,6 +50,11 @@ impl Picker {
     pub fn set_entries(&mut self, entries: Entries) {
         self.entries = Some(entries);
         self.rematch();
+    }
+
+    pub fn set_catalog(&mut self, catalog: &Catalog) {
+        self.truncated = catalog.truncated;
+        self.set_entries(Arc::clone(&catalog.entries));
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Option<PickerAction> {
@@ -102,8 +116,8 @@ impl Picker {
 pub fn open<T: TreeIndex>(model: &mut Model<T>) {
     let mut picker = Picker::default();
     let cached = model.schema.clone();
-    if let Some(entries) = cached.clone() {
-        picker.set_entries(entries);
+    if let Some(catalog) = &cached {
+        picker.set_catalog(catalog);
     }
     model.picker = Some(picker);
     if cached.is_none() {
@@ -112,11 +126,11 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
 }
 
 /// Stores collected schema paths and shows them if the picker is open.
-pub fn receive<T>(model: &mut Model<T>, entries: Entries) {
+pub fn receive<T>(model: &mut Model<T>, catalog: Catalog) {
     if let Some(picker) = model.picker.as_mut() {
-        picker.set_entries(Arc::clone(&entries));
+        picker.set_catalog(&catalog);
     }
-    model.schema = Some(entries);
+    model.schema = Some(catalog);
 }
 
 /// Keys while the picker is open.
@@ -283,22 +297,44 @@ mod flow_tests {
         assert_eq!(cursor(&model), ".users[2].name");
     }
 
-    #[test]
-    fn esc_closes_and_the_popup_lists_matches() {
-        let mut model = model();
-        open(&mut model);
-        keys(&mut model, "un");
+    fn screen(model: &Model<MemTree>) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
-        terminal.draw(|frame| view(&model, frame)).unwrap();
-        let screen: String = (0..12)
+        terminal.draw(|frame| view(model, frame)).unwrap();
+        (0..12)
             .map(|y| {
                 (0..40)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    #[test]
+    fn truncated_catalogs_say_so() {
+        let mut model = model();
+        open(&mut model);
+        assert!(!screen(&model).contains("partial"));
+        let entries = std::sync::Arc::new(vec![(".a".to_owned(), Vec::new())]);
+        let truncated = super::Catalog {
+            entries,
+            truncated: true,
+        };
+        super::receive(&mut model, truncated);
+        assert!(
+            screen(&model).contains("keys · partial"),
+            "{}",
+            screen(&model)
+        );
+    }
+
+    #[test]
+    fn esc_closes_and_the_popup_lists_matches() {
+        let mut model = model();
+        open(&mut model);
+        keys(&mut model, "un");
+        let screen = screen(&model);
         assert!(
             screen.contains("> un") && screen.contains(".users[].name"),
             "{screen}"
