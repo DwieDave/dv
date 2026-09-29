@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::picker::Catalog;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
-use crate::app::{LastFind, Model, picker};
+use crate::app::{LastFind, Model, jumped, picker};
 use crate::index::children::Child;
 use crate::pulse::Pulse;
 use crate::schema::{Collected, collect, render};
@@ -253,6 +253,9 @@ fn cancel<T: TreeIndex>(model: &mut Model<T>) {
 
 fn accept<T: TreeIndex>(model: &mut Model<T>) {
     model.prompt = None;
+    if let Some(origin) = model.search.as_ref().map(|s| s.origin.clone()) {
+        jumped(model, origin);
+    }
     if model
         .search
         .as_ref()
@@ -333,7 +336,11 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
     }
     match outcome.result {
         JobResult::Found(Some(hit)) => {
+            let before = model.state.cursor.clone();
             restore(model, hit.rows.clone());
+            if model.prompt.is_none() {
+                jumped(model, before);
+            }
             if let Some(search) = model.search.as_mut() {
                 (search.last, search.note) = (Some(hit), None);
             }

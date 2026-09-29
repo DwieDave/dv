@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::prompt::PromptKind;
-use crate::app::{CopyWhat, Msg, PreviewCmd};
+use crate::app::{CopyWhat, Msg, PreviewCmd, Step};
 use crate::search::Direction;
 use crate::view::nav::Nav;
 
@@ -59,6 +59,8 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
         (KeyCode::Char('d'), true) => Nav::HalfDown,
         (KeyCode::Char('u'), true) => Nav::HalfUp,
         (KeyCode::Char('p'), true) => return Some(Msg::OpenPicker),
+        (KeyCode::Char('o'), true) => return Some(Msg::History(Step::Back)),
+        (KeyCode::Tab, false) => return Some(Msg::History(Step::Forward)),
         (KeyCode::Char('j') | KeyCode::Down, false) => Nav::Down,
         (KeyCode::Char('k') | KeyCode::Up, false) => Nav::Up,
         (KeyCode::Char('h') | KeyCode::Left, false) => Nav::Collapse,

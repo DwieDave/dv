@@ -228,8 +228,10 @@ pub fn step<T: TreeIndex>(
     match schema::find(tree, &scope.root, &target.segs, from, direction) {
         Ok(Some(rows)) => {
             let rows = [scope.rows.clone(), rows].concat();
+            let before = model.state.cursor.clone();
             let result = reveal(tree, &mut model.state, rows, model.height);
             model.status = result.err().map(|err| err.to_string());
+            crate::app::jumped(model, before);
         }
         Ok(None) => model.note = Some("no occurrence".to_owned()),
         Err(err) => model.status = Some(err.to_string()),

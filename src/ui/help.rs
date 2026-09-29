@@ -43,6 +43,7 @@ const FINDING: &[Row] = &[
     row("n N", "next / previous match", &["n", "N"]),
     row(":", "jump to a path, e.g. .items[-1].id", &[":"]),
     row("^p", "fuzzy picker over key paths", &["C-p"]),
+    row("^o  tab", "back / forward through jumps", &["C-o", "Tab"]),
 ];
 
 const PREVIEW: &[Row] = &[

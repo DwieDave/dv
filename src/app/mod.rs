@@ -35,7 +35,8 @@ use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::ui::wrap::wrap;
-use crate::view::jump::jump;
+use crate::view::history::JumpList;
+use crate::view::jump::{jump, reveal};
 use crate::view::nav::{self, Nav};
 use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines, value_text};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
@@ -76,6 +77,8 @@ pub struct Model<T> {
     pub footer: bool,
     /// The help overlay's scroll offset, while it is open.
     pub help: Option<u16>,
+    /// Where jumps came from, for `Ctrl-o` / `Tab` (HI-1).
+    pub jumps: JumpList,
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -110,6 +113,7 @@ impl<T: TreeIndex> Model<T> {
             banner: None,
             footer: true,
             help: None,
+            jumps: JumpList::default(),
             effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
@@ -214,8 +218,37 @@ pub enum Msg {
     OpenPicker,
     /// The `?` overlay listing every key.
     OpenHelp,
+    /// Back or forward through the jump list.
+    History(Step),
     /// Child counts may have grown (streaming progress).
     Refresh,
+}
+
+/// A direction in the jump list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Back,
+    Forward,
+}
+
+/// Records `before` in the jump list when a jump moved the cursor away from it.
+pub(crate) fn jumped<T>(model: &mut Model<T>, before: Vec<u64>) {
+    if model.state.cursor != before {
+        model.jumps.record(before);
+    }
+}
+
+/// `Ctrl-o` / `Tab`: returns to a place in the jump list, expanding its ancestors.
+fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
+    let current = model.state.cursor.clone();
+    let target = match step {
+        Step::Back => model.jumps.back(current),
+        Step::Forward => model.jumps.forward(current),
+    };
+    if let Some(rows) = target {
+        let result = reveal(&*model.tree, &mut model.state, rows, model.height);
+        model.status = result.err().map(|err| err.to_string());
+    }
 }
 
 /// The most recent kind of find, repeated by `n`/`N`.
@@ -326,9 +359,14 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             model.height = u64::from(height.saturating_sub(chrome_rows(model))).max(1);
         }
         Msg::Nav(action) => {
+            let before = model.state.cursor.clone();
             let result = nav::apply(&*model.tree, &mut model.state, action, model.height);
             model.status = result.err().map(|err| err.to_string());
+            if matches!(action, Nav::Top | Nav::Bottom) {
+                jumped(model, before);
+            }
         }
+        Msg::History(step) => history(model, step),
         Msg::Mouse(mouse) => on_mouse(model, mouse),
         Msg::OpenPrompt(PromptKind::Search) => search::open(model),
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
@@ -357,6 +395,7 @@ fn prompt_key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
 
 /// Runs the prompt's command; failures stay in the prompt for correction.
 fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
+    let before = model.state.cursor.clone();
     let result = parse(text)
         .map_err(|err| err.to_string())
         .and_then(|steps| {
@@ -364,7 +403,10 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
                 .map_err(|err| err.to_string())
         });
     match result {
-        Ok(()) => model.prompt = None,
+        Ok(()) => {
+            model.prompt = None;
+            jumped(model, before);
+        }
         Err(error) => {
             if let Some(prompt) = model.prompt.as_mut() {
                 prompt.error = Some(error);
@@ -834,6 +876,36 @@ mod tests {
         key(&mut model, 'w');
         assert!(!model.preview.wrap);
         assert_eq!(model.preview.row, 0);
+    }
+
+    #[test]
+    fn ctrl_o_and_tab_walk_the_jump_history() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(40, 12));
+        typed(&mut model, ":.a[1]");
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert_eq!(model.state.cursor, vec![0, 1]);
+        typed(&mut model, "gg");
+        assert_eq!(model.state.cursor, Vec::<u64>::new());
+        let ctrl_o = Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        update(&mut model, ctrl_o.clone());
+        assert_eq!(model.state.cursor, vec![0, 1], "back before gg");
+        update(&mut model, ctrl_o.clone());
+        assert_eq!(
+            model.state.cursor,
+            Vec::<u64>::new(),
+            "back before the path jump"
+        );
+        update(&mut model, ctrl_o);
+        assert_eq!(
+            model.state.cursor,
+            Vec::<u64>::new(),
+            "nothing further back"
+        );
+        update(&mut model, Msg::Key(KeyCode::Tab.into()));
+        assert_eq!(model.state.cursor, vec![0, 1]);
+        update(&mut model, Msg::Key(KeyCode::Tab.into()));
+        assert_eq!(model.state.cursor, Vec::<u64>::new());
     }
 
     #[test]
