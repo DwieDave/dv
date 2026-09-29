@@ -152,3 +152,20 @@ proptest! {
         }
     }
 }
+
+fn value_count(value: &Value) -> u64 {
+    1 + match value {
+        Value::Array(items) => items.iter().map(value_count).sum(),
+        Value::Object(map) => map.values().map(value_count).sum(),
+        _ => 0,
+    }
+}
+
+proptest! {
+    #[test]
+    fn stats_count_bytes_and_values(value in json_value()) {
+        let (text, _) = layout(&value, " ");
+        let stats = tree_of(&text).stats();
+        prop_assert_eq!(stats, Stats { bytes: text.len() as u64, values: Some(value_count(&value)) });
+    }
+}

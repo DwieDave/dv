@@ -41,6 +41,14 @@ impl Child {
     }
 }
 
+/// Document size figures for the status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub bytes: u64,
+    /// Total values; `None` while still indexing.
+    pub values: Option<u64>,
+}
+
 /// Read access to a parsed document, independent of how it is stored.
 pub trait TreeIndex {
     /// # Errors
@@ -72,6 +80,8 @@ pub trait TreeIndex {
     /// # Errors
     /// Storage or lexing failures.
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError>;
+
+    fn stats(&self) -> Stats;
 }
 
 /// An in-memory document.
@@ -169,6 +179,13 @@ impl TreeIndex for MemTree {
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
         let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
         Ok(skip_value(bytes, store, to_usize(node.offset))?.1)
+    }
+
+    fn stats(&self) -> Stats {
+        Stats {
+            bytes: self.source.len(),
+            values: Some(self.parsed.values),
+        }
     }
 }
 

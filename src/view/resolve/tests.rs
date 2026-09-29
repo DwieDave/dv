@@ -59,3 +59,13 @@ fn levels_follow_counts_and_ranges() {
     let scalar = resolve(&tree, &root, &[0]).unwrap().unwrap();
     assert!(level_of(&tree, &scalar).unwrap().is_empty());
 }
+
+#[test]
+fn segments_skip_bucket_levels() {
+    let tree = doc();
+    let root = TreeState::new(&tree).unwrap().root;
+    let items = chain(&tree, &root, &[1, 1, 5]).unwrap();
+    assert_eq!(items.len(), 4);
+    let path = crate::path::render(&segments(&tree, &items).unwrap());
+    assert_eq!(path, ".big[1029]");
+}

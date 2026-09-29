@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod error;
+pub mod format;
 pub mod index;
 pub mod json;
 pub mod path;

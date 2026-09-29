@@ -55,7 +55,11 @@ mod tests {
     use crate::tree::MemTree;
 
     fn model() -> Model<MemTree> {
-        Model::new(MemTree::parse(MemSource::new(b"[1]".to_vec())).unwrap()).unwrap()
+        Model::new(
+            MemTree::parse(MemSource::new(b"[1]".to_vec())).unwrap(),
+            crate::format::Format::Json,
+        )
+        .unwrap()
     }
 
     fn scripted(events: Vec<Event>) -> impl FnMut() -> io::Result<Event> {

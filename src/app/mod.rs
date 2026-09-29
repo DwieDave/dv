@@ -6,19 +6,30 @@ pub mod terminal;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::text::Line;
 
 use crate::app::keymap::Keymap;
+use crate::format::Format;
 use crate::index::IndexError;
+use crate::json::lex::Kind;
+use crate::path::render;
 use crate::tree::TreeIndex;
+use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::view::nav::{self, Nav};
+use crate::view::resolve::{RowKind, chain, segments};
 use crate::view::state::TreeState;
+
+/// Rows reserved for the status bar.
+const STATUS_ROWS: u16 = 1;
 
 /// Everything the UI shows.
 #[derive(Debug)]
 pub struct Model<T> {
     pub tree: T,
+    pub format: Format,
     pub state: TreeState,
     pub keymap: Keymap,
     pub theme: Theme,
@@ -32,11 +43,12 @@ pub struct Model<T> {
 impl<T: TreeIndex> Model<T> {
     /// # Errors
     /// Storage or lexing failures while reading the root.
-    pub fn new(tree: T) -> Result<Self, IndexError> {
+    pub fn new(tree: T, format: Format) -> Result<Self, IndexError> {
         let state = TreeState::new(&tree)?;
         let (keymap, theme) = (Keymap::default(), Theme::default());
         Ok(Self {
             tree,
+            format,
             state,
             keymap,
             theme,
@@ -68,7 +80,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
                 update(model, next);
             }
         }
-        Msg::Resize(height) => model.height = u64::from(height).max(1),
+        Msg::Resize(height) => model.height = u64::from(height.saturating_sub(STATUS_ROWS)).max(1),
         Msg::Nav(action) => {
             let result = nav::apply(&model.tree, &mut model.state, action, model.height);
             model.status = result.err().map(|err| err.to_string());
@@ -90,14 +102,52 @@ fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
     }
 }
 
-/// Renders `model` into `frame`.
+/// Renders `model` into `frame`: the tree above, the status bar in the last row.
 pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
+    let [tree_area, status_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(STATUS_ROWS)])
+            .areas(frame.area());
     let widget = TreeWidget {
         tree: &model.tree,
         state: &model.state,
         theme: &model.theme,
     };
-    frame.render_widget(widget, frame.area());
+    frame.render_widget(widget, tree_area);
+    frame.render_widget(status(model, status_area.width.into()), status_area);
+}
+
+fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
+    let (path, kind) = cursor_facts(model).unwrap_or_else(|err| (String::new(), err.to_string()));
+    let status = Status {
+        path: &path,
+        kind: &kind,
+        format: model.format,
+        stats: model.tree.stats(),
+        error: model.status.as_deref(),
+    };
+    status_line(&status, width, &model.theme)
+}
+
+/// The jq path and type name of the cursor row.
+fn cursor_facts<T: TreeIndex>(model: &Model<T>) -> Result<(String, String), IndexError> {
+    let items = chain(&model.tree, &model.state.root, &model.state.cursor)?;
+    let path = render(&segments(&model.tree, &items)?);
+    let kind = match items.last().map(|item| &item.kind) {
+        Some(RowKind::Value { node, .. }) => kind_name(node.kind),
+        Some(RowKind::Bucket { .. }) | None => "bucket",
+    };
+    Ok((path, kind.to_owned()))
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Null => "null",
+        Kind::Bool => "bool",
+        Kind::Number => "number",
+        Kind::String => "string",
+        Kind::Object => "object",
+        Kind::Array => "array",
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +160,7 @@ mod tests {
 
     fn model() -> Model<MemTree> {
         let tree = MemTree::parse(MemSource::new(br#"{"a": [1, 2]}"#.to_vec())).unwrap();
-        Model::new(tree).unwrap()
+        Model::new(tree, Format::Json).unwrap()
     }
 
     #[test]
@@ -132,7 +182,7 @@ mod tests {
     #[test]
     fn mouse_clicks_and_wheel_drive_the_tree() {
         let mut model = model();
-        update(&mut model, Msg::Resize(10));
+        update(&mut model, Msg::Resize(11));
         let mouse = |kind, column, row| {
             Msg::Mouse(MouseEvent {
                 kind,
@@ -149,5 +199,20 @@ mod tests {
         assert!(model.state.is_expanded(&[0]));
         update(&mut model, mouse(MouseEventKind::ScrollDown, 0, 0));
         assert_eq!(model.state.top, 3);
+    }
+
+    #[test]
+    fn view_puts_the_status_bar_in_the_last_row() {
+        let mut model = model();
+        update(&mut model, Msg::Key(KeyCode::Char('j').into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
+        terminal.draw(|frame| view(&model, frame)).unwrap();
+        let row = |y| {
+            (0..40)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert_eq!(row(2), ".a  array           JSON  13 B  4 values");
     }
 }

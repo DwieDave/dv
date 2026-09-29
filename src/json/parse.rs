@@ -9,6 +9,8 @@ use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
 pub struct Parsed {
     pub root: u64,
     pub store: VecStore,
+    /// Number of values in the document (containers and scalars).
+    pub values: u64,
 }
 
 /// Rejects inputs whose offsets do not fit the in-memory u32 index (NFR-8).
@@ -38,6 +40,7 @@ struct Parser<'a> {
     builder: VecStoreBuilder,
     /// Open containers; per-container state lives in the builder's reserved span.
     stack: Vec<Slot>,
+    values: u64,
 }
 
 impl<'a> Parser<'a> {
@@ -47,6 +50,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             builder: VecStoreBuilder::default(),
             stack: Vec::new(),
+            values: 0,
         }
     }
 
@@ -68,11 +72,13 @@ impl<'a> Parser<'a> {
         Ok(Parsed {
             root,
             store: self.builder.finish(),
+            values: self.values,
         })
     }
 
     /// Consumes a scalar or opens a container at `pos`.
     fn start_value(&mut self) -> Result<(), ParseError> {
+        self.values += 1;
         match scan_scalar(self.bytes, self.pos)? {
             (Kind::Object | Kind::Array, _) => {
                 self.stack.push(self.builder.open(offset32(self.pos)));
