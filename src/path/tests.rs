@@ -63,3 +63,64 @@ fn segment_of_decodes_keys_and_uses_indices() {
     let item = tree.children(member.node(), 0..1).unwrap().remove(0);
     assert_eq!(Segment::of(&item, &tree).unwrap(), Segment::Index(0));
 }
+
+fn as_step(segment: &Segment) -> Step {
+    match segment {
+        Segment::Key(k) => Step::Key(k.clone()),
+        Segment::Index(i) => Step::Index(i64::try_from(*i).unwrap()),
+    }
+}
+
+proptest! {
+    #[test]
+    fn parsing_inverts_rendering(segments in proptest::collection::vec(segment(), 0..6)) {
+        let segments: Vec<Segment> = segments.into_iter().map(|s| match s {
+            Segment::Index(i) => Segment::Index(i % (1 << 40)),
+            Segment::Key(k) => Segment::Key(k),
+        }).collect();
+        let steps: Vec<Step> = segments.iter().map(as_step).collect();
+        prop_assert_eq!(parse(&render(&segments)), Ok(steps));
+    }
+}
+
+#[test]
+fn parses_every_form() {
+    let key = |k: &str| Step::Key(k.to_owned());
+    let table: Vec<(&str, Vec<Step>)> = vec![
+        (".", vec![]),
+        ("  .a.b  ", vec![key("a"), key("b")]),
+        (".a[3]", vec![key("a"), Step::Index(3)]),
+        (".[-1]", vec![Step::Index(-1)]),
+        (".a[10:20]", vec![key("a"), Step::Slice(Some(10), Some(20))]),
+        (".a[:5]", vec![key("a"), Step::Slice(None, Some(5))]),
+        (".a[-3:]", vec![key("a"), Step::Slice(Some(-3), None)]),
+        (".a[:]", vec![key("a"), Step::Slice(None, None)]),
+        (r#".a."k y""#, vec![key("a"), key("k y")]),
+        (r#".["k\"q"]"#, vec![key("k\"q")]),
+        (
+            r#".a[ "b" ][ 2 ]"#,
+            vec![key("a"), key("b"), Step::Index(2)],
+        ),
+        ("._x1.Y_", vec![key("_x1"), key("Y_")]),
+    ];
+    for (input, expected) in table {
+        assert_eq!(parse(input), Ok(expected), "{input}");
+    }
+}
+
+#[test]
+fn reports_errors_with_positions() {
+    let table = [
+        (".a.", 3),
+        (".a[1", 4),
+        (".a[x]", 3),
+        ("a.b", 0),
+        (".a b", 3),
+        ("", 0),
+        (r#".a["x]"#, 3),
+    ];
+    for (input, at) in table {
+        let err = parse(input).unwrap_err();
+        assert_eq!(err.at, at, "{input}: {err}");
+    }
+}
