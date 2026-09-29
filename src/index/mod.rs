@@ -1,9 +1,11 @@
 //! The semi-index: sparse container spans plus child checkpoints (D-3).
 
 pub mod children;
+pub mod lines;
 pub mod live;
 pub mod spill;
 pub mod store;
+pub mod u64file;
 pub mod window;
 
 use thiserror::Error;

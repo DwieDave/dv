@@ -3,7 +3,6 @@
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io;
-use std::ops::Range;
 use std::os::unix::fs::FileExt;
 
 use std::sync::{Arc, RwLock};
@@ -14,6 +13,7 @@ use crate::index::live::{LiveStore, LiveView, OpenNode, Shared};
 
 use crate::index::store::{BigNode, Builder, CHECKPOINT_EVERY, Fanout, MIN_NODE_LEN, NodeStore};
 use crate::index::to_usize;
+use crate::index::u64file::U64File;
 use crate::source::file::FileSource;
 use crate::source::{Source, SourceError};
 
@@ -287,75 +287,6 @@ impl Records {
         self.file.write_all_at(&bytes, self.low * RECORD)?;
         self.low += self.window.len() as u64;
         self.window.clear();
-        Ok(())
-    }
-}
-
-/// An append/truncate list of u64 whose older part lives in a file.
-#[derive(Debug)]
-struct U64File {
-    file: File,
-    flushed: u64,
-    tail: Vec<u64>,
-    limit: usize,
-    /// Hold every write until `flush` (live mode).
-    defer: bool,
-}
-
-impl U64File {
-    fn new(file: File, limit: usize) -> Self {
-        Self {
-            file,
-            flushed: 0,
-            tail: Vec::new(),
-            limit: limit.max(1),
-            defer: false,
-        }
-    }
-
-    fn len(&self) -> u64 {
-        self.flushed + self.tail.len() as u64
-    }
-
-    fn push(&mut self, value: u64) -> io::Result<()> {
-        self.tail.push(value);
-        if self.tail.len() >= self.limit && !self.defer {
-            self.flush()
-        } else {
-            Ok(())
-        }
-    }
-
-    fn truncate(&mut self, len: u64) {
-        if len >= self.flushed {
-            self.tail.truncate(to_usize(len - self.flushed));
-        } else {
-            self.flushed = len;
-            self.tail.clear();
-        }
-    }
-
-    fn read(&self, range: Range<u64>) -> io::Result<Vec<u64>> {
-        let from_file = range.start.min(self.flushed)..range.end.min(self.flushed);
-        let mut bytes = vec![0; to_usize(from_file.end - from_file.start) * 8];
-        self.file.read_exact_at(&mut bytes, from_file.start * 8)?;
-        let mut values: Vec<u64> = bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| u64::from_le_bytes(*c))
-            .collect();
-        let tail = to_usize(range.start.max(self.flushed) - self.flushed)
-            ..to_usize(range.end.max(self.flushed) - self.flushed);
-        values.extend_from_slice(&self.tail[tail]);
-        Ok(values)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let bytes: Vec<u8> = self.tail.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.file.write_all_at(&bytes, self.flushed * 8)?;
-        self.flushed += self.tail.len() as u64;
-        self.tail.clear();
         Ok(())
     }
 }

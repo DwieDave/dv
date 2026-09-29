@@ -141,7 +141,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     }
 
     /// Absolute offset of buffer position `pos`.
-    fn abs(&self, pos: usize) -> u64 {
+    pub(crate) fn abs(&self, pos: usize) -> u64 {
         self.base + pos as u64
     }
 
@@ -243,7 +243,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     }
 
     /// Consumes a scalar or opens a container at `pos`.
-    fn start_value(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn start_value(&mut self) -> Result<(), ParseError> {
         let scanned = self.scan_value(self.pos)?;
         self.commit_value(scanned);
         Ok(())

@@ -87,18 +87,19 @@ fn eof(offset: u64) -> ParseError {
 }
 
 /// The sliding buffer: `bytes` starts at absolute offset `base`.
-struct Window<'s, R> {
+pub(crate) struct Window<'s, R> {
     source: &'s R,
-    bytes: Vec<u8>,
-    base: u64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) base: u64,
     size: usize,
     max: usize,
-    eof: bool,
-    utf8: Utf8,
+    pub(crate) eof: bool,
+    /// Whole-document UTF-8 validation; `None` when the caller validates.
+    utf8: Option<Utf8>,
 }
 
 impl<'s, R: Source> Window<'s, R> {
-    fn new(source: &'s R, limits: StreamLimits) -> Self {
+    pub(crate) fn new(source: &'s R, limits: StreamLimits) -> Self {
         let size = limits.initial.max(1);
         Self {
             source,
@@ -107,12 +108,27 @@ impl<'s, R: Source> Window<'s, R> {
             size,
             max: limits.max.max(size),
             eof: false,
-            utf8: Utf8::default(),
+            utf8: Some(Utf8::default()),
         }
     }
 
+    /// A window that leaves UTF-8 validation to the caller.
+    pub(crate) fn unchecked(source: &'s R, limits: StreamLimits) -> Self {
+        Self {
+            utf8: None,
+            ..Self::new(source, limits)
+        }
+    }
+
+    /// Restarts the buffer at absolute offset `at`.
+    pub(crate) fn seek(&mut self, at: u64) -> Result<(), IndexError> {
+        self.bytes.clear();
+        self.base = at;
+        self.refill(0)
+    }
+
     /// Drops the bytes before `keep`, then reads more, growing when a token fills the buffer.
-    fn refill(&mut self, keep: usize) -> Result<(), IndexError> {
+    pub(crate) fn refill(&mut self, keep: usize) -> Result<(), IndexError> {
         self.bytes.drain(..keep.min(self.bytes.len()));
         self.base += keep as u64;
         if self.bytes.len() >= self.size {
@@ -129,11 +145,13 @@ impl<'s, R: Source> Window<'s, R> {
         let chunk = self
             .source
             .read(from..from + (self.size - self.bytes.len()) as u64)?;
-        self.utf8.feed(&chunk, from)?;
+        if let Some(utf8) = &mut self.utf8 {
+            utf8.feed(&chunk, from)?;
+        }
         self.bytes.extend_from_slice(&chunk);
         self.eof = from + chunk.len() as u64 >= self.source.len();
-        if self.eof {
-            self.utf8.finish()?;
+        if let Some(utf8) = self.utf8.as_ref().filter(|_| self.eof) {
+            utf8.finish()?;
         }
         Ok(())
     }
@@ -141,13 +159,13 @@ impl<'s, R: Source> Window<'s, R> {
 
 /// Incremental UTF-8 validation; an incomplete sequence at a chunk's end carries over.
 #[derive(Debug, Default)]
-struct Utf8 {
+pub(crate) struct Utf8 {
     carry: Vec<u8>,
     carry_at: u64,
 }
 
 impl Utf8 {
-    fn feed(&mut self, chunk: &[u8], at: u64) -> Result<(), ParseError> {
+    pub(crate) fn feed(&mut self, chunk: &[u8], at: u64) -> Result<(), ParseError> {
         let start = self.complete_carry(chunk)?;
         match std::str::from_utf8(&chunk[start..]) {
             Ok(_) => Ok(()),
@@ -178,7 +196,7 @@ impl Utf8 {
         Ok(want)
     }
 
-    fn finish(&self) -> Result<(), ParseError> {
+    pub(crate) fn finish(&self) -> Result<(), ParseError> {
         if self.carry.is_empty() {
             Ok(())
         } else {
