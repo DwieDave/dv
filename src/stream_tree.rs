@@ -5,10 +5,10 @@ use std::ops::{ControlFlow, Range};
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::Format;
-use crate::index::children::{Child, skip_value};
+use crate::index::children::Child;
 use crate::index::spill::{SpillBuilder, SpillLimits, SpillStore};
 use crate::index::store::{Fanout, NodeStore};
-use crate::index::window::{OffsetStore, StreamChildren, stream_seek};
+use crate::index::window::{StreamChildren, stream_seek, value_end};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, kind_of};
 use crate::json::stream::{StreamLimits, parse_stream};
@@ -62,9 +62,6 @@ impl<R: Source> StreamTree<R, SpillStore> {
     }
 }
 
-/// Largest window used to lex a single value.
-const MAX_WINDOW: usize = 256 << 20;
-
 impl<R: Source, S: NodeStore> StreamTree<R, S> {
     fn kids(&self, node: NodeRef, k: u64) -> Result<StreamChildren<'_, S, R>, IndexError> {
         stream_seek(&self.source, &self.store, node, k, self.window)
@@ -78,34 +75,6 @@ impl<R: Source, S: NodeStore> StreamTree<R, S> {
 
     fn fanout(&self, node: NodeRef) -> Result<Option<Fanout>, IndexError> {
         Ok(self.store.node_at(node.offset)?.and_then(|n| n.fanout))
-    }
-
-    /// End of the value at `offset`, lexed from a window that grows until the value fits.
-    fn lexed_end(&self, offset: u64) -> Result<u64, IndexError> {
-        let mut size = self.window.max(1);
-        loop {
-            let bytes = self.source.read(offset..offset + size as u64)?;
-            let eof = offset + bytes.len() as u64 >= self.source.len();
-            let store = OffsetStore {
-                inner: &self.store,
-                base: offset,
-            };
-            match skip_value(&bytes, &store, 0) {
-                Ok((_, end)) if end < bytes.len() as u64 || eof => return Ok(offset + end),
-                Err(IndexError::Parse(err)) if err.kind != ParseErrorKind::UnexpectedEof => {
-                    return Err(err.into());
-                }
-                Err(IndexError::Source(err)) => return Err(err.into()),
-                _ if size >= MAX_WINDOW => {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::TooLarge,
-                        offset,
-                    }
-                    .into());
-                }
-                _ => size = size.saturating_mul(2),
-            }
-        }
     }
 }
 
@@ -173,7 +142,15 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
         match self.store.node_at(node.offset)? {
             Some(big) => Ok(big.end),
-            None => self.lexed_end(node.offset),
+            None => {
+                value_end(&self.source, &self.store, node.offset, self.window)?.ok_or_else(|| {
+                    ParseError {
+                        kind: ParseErrorKind::UnexpectedEof,
+                        offset: node.offset,
+                    }
+                    .into()
+                })
+            }
         }
     }
 

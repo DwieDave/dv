@@ -8,6 +8,7 @@ pub mod error;
 pub mod format;
 pub mod index;
 pub mod json;
+pub mod live_tree;
 pub mod load;
 pub mod mode;
 pub mod path;

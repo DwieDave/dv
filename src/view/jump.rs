@@ -6,7 +6,7 @@ use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::json::text::unescape;
 use crate::path::Step;
-use crate::tree::{Count, NodeRef, TreeIndex};
+use crate::tree::{NodeRef, TreeIndex};
 use crate::view::bucket::Level;
 use crate::view::nav::{expand, scroll_into_view};
 use crate::view::resolve::RootItem;
@@ -86,10 +86,7 @@ pub fn reveal(
 }
 
 pub(crate) fn count(tree: &impl TreeIndex, node: NodeRef) -> Result<u64, IndexError> {
-    Ok(match tree.child_count(node)? {
-        Count::Known(n) => n,
-        Count::Pending => 0,
-    })
+    Ok(tree.child_count(node)?.available())
 }
 
 /// The child index `step` selects among the `n` children of `node`.

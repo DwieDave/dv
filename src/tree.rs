@@ -24,7 +24,18 @@ pub struct NodeRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Count {
     Known(u64),
-    Pending,
+    /// Still being indexed; this many children are known so far.
+    Pending(u64),
+}
+
+impl Count {
+    /// Children that can be listed right now.
+    #[must_use]
+    pub fn available(self) -> u64 {
+        match self {
+            Self::Known(n) | Self::Pending(n) => n,
+        }
+    }
 }
 
 impl Child {

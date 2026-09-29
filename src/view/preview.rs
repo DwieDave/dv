@@ -41,7 +41,7 @@ pub fn preview_lines(
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => {
             let records = match tree.child_count(*node)? {
                 Count::Known(n) => grouped(n),
-                Count::Pending => "…".to_owned(),
+                Count::Pending(n) => format!("{}…", grouped(n)),
             };
             Ok(window.of(vec![format!("{records} records")]))
         }

@@ -101,7 +101,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
     fn badge(&self, node: NodeRef) -> Result<Span<'static>, IndexError> {
         let count = match self.tree.child_count(node)? {
             Count::Known(n) => n.to_string(),
-            Count::Pending => "…".to_owned(),
+            Count::Pending(n) => format!("{n}…"),
         };
         let text = if node.kind == Kind::Object {
             format!("{{{count}}}")

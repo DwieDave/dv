@@ -1,6 +1,7 @@
 //! Child enumeration over byte windows of a large source (streaming mode, D-15).
 
-use crate::index::children::{Child, Lexed, after_value, checkpoint_before, lex_child};
+use crate::error::{ParseError, ParseErrorKind};
+use crate::index::children::{Child, Lexed, after_value, checkpoint_before, lex_child, skip_value};
 use crate::index::store::{BigNode, Fanout, NodeStore};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
@@ -45,6 +46,8 @@ pub struct StreamChildren<'a, S, R> {
     done: bool,
     /// A child was returned whose separator (`,`) has not been consumed yet.
     separator: bool,
+    /// The closing bracket was reached (not just the end of the source).
+    complete: bool,
     base: u64,
     window: Vec<u8>,
     size: usize,
@@ -67,6 +70,12 @@ impl<S: NodeStore, R: Source> Iterator for StreamChildren<'_, S, R> {
 }
 
 impl<S: NodeStore, R: Source> StreamChildren<'_, S, R> {
+    /// Whether iteration ended at the container's closing bracket.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+
     /// The next child, re-reading and growing the window until the result is trustworthy.
     fn step(&mut self) -> Result<Option<Child>, IndexError> {
         loop {
@@ -81,7 +90,10 @@ impl<S: NodeStore, R: Source> StreamChildren<'_, S, R> {
                 base: self.base,
             };
             match lex_child(&self.window, &store, rel, self.close, self.index)? {
-                Lexed::End => return Ok(None),
+                Lexed::End => {
+                    self.complete = true;
+                    return Ok(None);
+                }
                 Lexed::NeedMore if self.at_eof() => return Ok(None),
                 Lexed::Child(child) if self.trusted(&child)? => {
                     return Ok(Some(self.accept(child)));
@@ -146,7 +158,10 @@ impl<S: NodeStore, R: Source> StreamChildren<'_, S, R> {
 
     fn load(&mut self, pos: u64) -> Result<(), IndexError> {
         self.base = pos;
-        self.window = self.source.read(pos..pos + self.size as u64)?.into_owned();
+        self.window = self
+            .source
+            .read(pos..pos.saturating_add(self.size as u64))?
+            .into_owned();
         Ok(())
     }
 }
@@ -178,6 +193,7 @@ pub fn stream_seek<'a, S: NodeStore, R: Source>(
         index,
         done: false,
         separator,
+        complete: false,
         base,
         window,
         size,
@@ -190,6 +206,49 @@ pub fn stream_seek<'a, S: NodeStore, R: Source>(
         }
     }
     Ok(it)
+}
+
+/// Largest window used to lex a single value.
+pub const MAX_WINDOW: usize = 256 << 20;
+
+/// End of the value at `offset`, lexed from a window that grows until the value fits;
+/// `None` when the value runs past the end of `source`.
+///
+/// # Errors
+/// Lexing or read failures, or a value longer than [`MAX_WINDOW`].
+pub fn value_end<R: Source, S: NodeStore>(
+    source: &R,
+    store: &S,
+    offset: u64,
+    window: usize,
+) -> Result<Option<u64>, IndexError> {
+    let mut size = window.max(1);
+    loop {
+        let bytes = source.read(offset..offset + size as u64)?;
+        let eof = offset + bytes.len() as u64 >= source.len();
+        let local = OffsetStore {
+            inner: store,
+            base: offset,
+        };
+        match skip_value(&bytes, &local, 0) {
+            Ok((_, end)) if end < bytes.len() as u64 || eof => return Ok(Some(offset + end)),
+            Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::UnexpectedEof && eof => {
+                return Ok(None);
+            }
+            Err(IndexError::Parse(err)) if err.kind != ParseErrorKind::UnexpectedEof => {
+                return Err(err.into());
+            }
+            Err(IndexError::Source(err)) => return Err(err.into()),
+            _ if size >= MAX_WINDOW => {
+                return Err(ParseError {
+                    kind: ParseErrorKind::TooLarge,
+                    offset,
+                }
+                .into());
+            }
+            _ => size = size.saturating_mul(2),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use std::ops::Range;
 use crate::index::IndexError;
 use crate::json::text::unescape;
 use crate::path::Segment;
-use crate::tree::{Count, NodeRef, TreeIndex};
+use crate::tree::{NodeRef, TreeIndex};
 use crate::view::bucket::{Level, Row};
 
 /// How a value row is labelled within its parent.
@@ -158,10 +158,7 @@ pub fn segments(tree: &impl TreeIndex, chain: &[RowItem]) -> Result<Vec<Segment>
 pub fn level_of(tree: &impl TreeIndex, item: &RowItem) -> Result<Level, IndexError> {
     Ok(match &item.kind {
         RowKind::Bucket { range, .. } => Level::of(range.clone()),
-        RowKind::Value { node, .. } => match tree.child_count(*node)? {
-            Count::Known(n) => Level::of(0..n),
-            Count::Pending => Level::of(0..0),
-        },
+        RowKind::Value { node, .. } => Level::of(0..tree.child_count(*node)?.available()),
     })
 }
 
