@@ -34,3 +34,31 @@ fn index_only_reports_parse_errors_with_position() {
         "{out:?}"
     );
 }
+
+#[test]
+fn help_and_version_succeed() {
+    assert!(dv(&["--help"]).unwrap().status.success());
+    let out = dv(&["--version"]).unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("dv "));
+}
+
+#[test]
+fn missing_files_fail_naming_the_path() {
+    let out = dv(&["--index-only", "/no/such/file.json"]).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("dv: /no/such/file.json:"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn streaming_mode_is_reported_unsupported() {
+    let file = temp_file(b"[]").unwrap();
+    let out = dv(&["--mode", "stream", file.path().to_str().unwrap()]).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("streaming mode is not supported yet"),
+        "{out:?}"
+    );
+}

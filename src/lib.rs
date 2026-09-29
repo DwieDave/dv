@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod cli;
 pub mod error;
 pub mod format;
 pub mod index;
