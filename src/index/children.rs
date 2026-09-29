@@ -34,15 +34,21 @@ impl<S: NodeStore> Iterator for Children<'_, S> {
         if self.done {
             return None;
         }
-        self.pos = skip_ws(self.bytes, self.pos);
-        if self.bytes.get(self.pos).is_none_or(|&b| b == self.close) {
-            self.done = true;
-            return None;
+        match lex_child(self.bytes, self.store, self.pos, self.close, self.index) {
+            Ok(Lexed::Child(child)) => {
+                self.pos = after_value(self.bytes, to_usize(child.end)).unwrap_or(self.bytes.len());
+                self.index += 1;
+                Some(Ok(child))
+            }
+            Ok(Lexed::End | Lexed::NeedMore) => {
+                self.done = true;
+                None
+            }
+            Err(err) => {
+                self.done = true;
+                Some(Err(err))
+            }
         }
-        let child = self.lex_child();
-        self.done = child.is_err();
-        self.index += 1;
-        Some(child)
     }
 }
 
@@ -63,35 +69,73 @@ impl<'a, S: NodeStore> Children<'a, S> {
             done,
         }
     }
+}
 
-    fn lex_child(&mut self) -> Result<Child, IndexError> {
-        let key = if self.close == b'}' {
-            Some(self.lex_key()?)
-        } else {
-            None
-        };
-        let value = self.pos;
-        let (kind, end) = skip_value(self.bytes, self.store, value)?;
-        self.pos = skip_ws(self.bytes, to_usize(end));
-        self.pos += usize::from(self.bytes.get(self.pos) == Some(&b','));
-        let (index, value) = (self.index, value as u64);
-        Ok(Child {
-            index,
-            key,
-            value,
-            kind,
-            end,
-        })
+/// One lexing step over a byte window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Lexed {
+    Child(Child),
+    /// The container's closing bracket.
+    End,
+    /// The window ended before the step could complete.
+    NeedMore,
+}
+
+/// Lexes the child at (or after whitespace from) `pos`; offsets are relative to `bytes`.
+pub(crate) fn lex_child(
+    bytes: &[u8],
+    store: &impl NodeStore,
+    pos: usize,
+    close: u8,
+    index: u64,
+) -> Result<Lexed, IndexError> {
+    let pos = skip_ws(bytes, pos);
+    match bytes.get(pos) {
+        None => return Ok(Lexed::NeedMore),
+        Some(&b) if b == close => return Ok(Lexed::End),
+        Some(_) => {}
     }
+    let lexed = lex_member(bytes, store, pos, close == b'}', index).map(Lexed::Child);
+    match lexed {
+        Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::UnexpectedEof => {
+            Ok(Lexed::NeedMore)
+        }
+        other => other,
+    }
+}
 
-    /// `"key" :` with surrounding whitespace; returns the quoted key's span.
-    fn lex_key(&mut self) -> Result<Range<u64>, IndexError> {
-        let start = self.pos;
-        let end = scan_string(self.bytes, start)?;
-        self.pos = skip_ws(self.bytes, end);
-        expect(self.bytes, self.pos, b':')?;
-        self.pos = skip_ws(self.bytes, self.pos + 1);
-        Ok(start as u64..end as u64)
+/// The child `["key" :] value` at `pos`.
+fn lex_member(
+    bytes: &[u8],
+    store: &impl NodeStore,
+    pos: usize,
+    keyed: bool,
+    index: u64,
+) -> Result<Child, IndexError> {
+    let (key, value) = if keyed {
+        let end = scan_string(bytes, pos)?;
+        let colon = skip_ws(bytes, end);
+        expect(bytes, colon, b':')?;
+        (Some(pos as u64..end as u64), skip_ws(bytes, colon + 1))
+    } else {
+        (None, pos)
+    };
+    let (kind, end) = skip_value(bytes, store, value)?;
+    Ok(Child {
+        index,
+        key,
+        value: value as u64,
+        kind,
+        end,
+    })
+}
+
+/// The position after a child's value: whitespace and an optional comma; `None` past the window.
+pub(crate) fn after_value(bytes: &[u8], end: usize) -> Option<usize> {
+    let pos = skip_ws(bytes, end);
+    match bytes.get(pos)? {
+        b',' => Some(pos + 1),
+        _ => Some(pos),
     }
 }
 
@@ -163,7 +207,7 @@ pub fn seek<'a, S: NodeStore>(
 }
 
 /// The nearest checkpoint at or before child `k`, as `(child index, offset)`.
-fn checkpoint_before(
+pub(crate) fn checkpoint_before(
     store: &impl NodeStore,
     start: u64,
     k: u64,

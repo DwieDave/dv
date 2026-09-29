@@ -2,6 +2,7 @@
 
 pub mod children;
 pub mod store;
+pub mod window;
 
 use thiserror::Error;
 

@@ -83,3 +83,30 @@ fn unterminated_string_reports_eof() {
     let err = scan_string(b"\"abc", 0).unwrap_err();
     assert_eq!(err.kind, ParseErrorKind::UnexpectedEof);
 }
+
+#[test]
+fn truncated_unicode_escapes_need_more_input() {
+    for cut in [
+        format!("\"{BS}u00"),
+        format!("\"{BS}ud83d"),
+        format!("\"{BS}ud83d{BS}ude"),
+    ] {
+        let err = scan_string(cut.as_bytes(), 0).unwrap_err();
+        assert_eq!(err.kind, ParseErrorKind::UnexpectedEof, "{cut}");
+    }
+}
+
+#[test]
+fn truncated_numbers_need_more_input() {
+    for cut in ["-", "1.", "1e", "1e+", "-0."] {
+        assert_eq!(
+            scan_number(cut.as_bytes(), 0).unwrap_err().kind,
+            ParseErrorKind::UnexpectedEof,
+            "{cut}"
+        );
+    }
+    assert_eq!(
+        scan_number(b"-x", 0).unwrap_err().kind,
+        ParseErrorKind::InvalidNumber
+    );
+}

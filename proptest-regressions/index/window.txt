@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 74827a264a217babfdb66c6ff8142fe043b9075658112e7165d3a96310988867 # shrinks to value = Array [Null, Null, Null, Null, Null, Null, Null, Number(1394), String("\"m\0j\u{b}on\nc\""), Bool(false), Number(4786462147935442185), Object {"": Bool(true), "da": String("೧Ѩ΄*₠\u{10a0d}"), "q\t\u{3}\\\\\u{1f}": Number(-765499192.2173654), "u": Null, "vc\\\\": Bool(true)}, Bool(true)], window = 24, k = 12, take = 21
+cc d296c6949114112da02a36d88741be623d1463f3455ed223b66b342d3ebcd33b # shrinks to value = Object {"\\a 𝑖 ": Number(-1)}, window = 1, k = 0, take = 1
+cc 417e86ad95d7fea5f7c98090745657525e7057e8ecec1c903de4666bc08128a1 # shrinks to value = Array [Object {"": Number(0.0)}], window = 1, k = 0, take = 1

@@ -67,7 +67,13 @@ fn scan_escape(bytes: &[u8], i: usize) -> Result<usize, ParseError> {
 /// A unicode escape (backslash, `u`, four hex digits); surrogates must pair high then low.
 fn scan_unicode_escape(bytes: &[u8], i: usize) -> Result<usize, ParseError> {
     let invalid = fail(ParseErrorKind::InvalidEscape, i);
+    if truncated(&bytes[i + 2..], 4) {
+        return Err(fail(ParseErrorKind::UnexpectedEof, bytes.len()));
+    }
     match hex4(bytes, i + 2).ok_or(invalid)? {
+        0xD800..=0xDBFF if truncated_low_surrogate(&bytes[i + 6..]) => {
+            Err(fail(ParseErrorKind::UnexpectedEof, bytes.len()))
+        }
         0xD800..=0xDBFF => {
             let low = (bytes.get(i + 6..i + 8) == Some(b"\\u")).then(|| hex4(bytes, i + 8));
             match low.flatten() {
@@ -78,6 +84,18 @@ fn scan_unicode_escape(bytes: &[u8], i: usize) -> Result<usize, ParseError> {
         0xDC00..=0xDFFF => Err(invalid),
         _ => Ok(i + 6),
     }
+}
+
+/// Fewer than `n` hex digits remain and all present ones are hex: the input ended mid-escape.
+fn truncated(rest: &[u8], n: usize) -> bool {
+    rest.len() < n && rest.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// The input ends inside what could still become a `\\uXXXX` low surrogate.
+fn truncated_low_surrogate(rest: &[u8]) -> bool {
+    rest.len() < 6
+        && rest.iter().zip(b"\\u").all(|(a, b)| a == b)
+        && truncated(rest.get(2..).unwrap_or_default(), 4)
 }
 
 pub(crate) fn hex4(bytes: &[u8], at: usize) -> Option<u16> {
@@ -95,7 +113,7 @@ pub fn scan_number(bytes: &[u8], pos: usize) -> Result<usize, ParseError> {
     i = match bytes.get(i) {
         Some(b'0') => i + 1,
         Some(b'1'..=b'9') => digits(bytes, i),
-        _ => return Err(fail(ParseErrorKind::InvalidNumber, i)),
+        _ => return Err(number_error(bytes, i)),
     };
     if bytes.get(i) == Some(&b'.') {
         i = digits1(bytes, i + 1)?;
@@ -115,8 +133,18 @@ fn digits(bytes: &[u8], i: usize) -> usize {
 fn digits1(bytes: &[u8], i: usize) -> Result<usize, ParseError> {
     match digits(bytes, i.min(bytes.len())) {
         end if end > i => Ok(end),
-        _ => Err(fail(ParseErrorKind::InvalidNumber, i)),
+        _ => Err(number_error(bytes, i)),
     }
+}
+
+/// A digit was required at `i`: end of input (maybe truncated) or a bad byte.
+fn number_error(bytes: &[u8], i: usize) -> ParseError {
+    let kind = if i >= bytes.len() {
+        ParseErrorKind::UnexpectedEof
+    } else {
+        ParseErrorKind::InvalidNumber
+    };
+    fail(kind, i)
 }
 
 /// # Errors
