@@ -2,7 +2,8 @@
 //!
 //! No hit list is kept (NFR-4): `n`/`N` search from the cursor and `count` only counts.
 
-use std::ops::ControlFlow;
+use std::borrow::Cow;
+use std::ops::{ControlFlow, Range};
 
 use regex::bytes::{Regex, RegexBuilder};
 use thiserror::Error;
@@ -104,7 +105,7 @@ impl Matcher {
 /// (or from the end), wrapping around once.
 ///
 /// # Errors
-/// Storage failures while resolving the match.
+/// Storage failures while reading or resolving the match.
 pub fn find(
     tree: &impl TreeIndex,
     root: &RootItem,
@@ -113,24 +114,20 @@ pub fn find(
     direction: Direction,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<Hit>, SearchError> {
-    let bytes = tree.bytes(0..u64::MAX)?;
     let search = Search {
         tree,
         root,
         matcher,
-        bytes: &bytes,
         cancelled,
     };
     match direction {
         Direction::Forward => {
-            let start = from.map_or(0, |f| to_usize(f) + 1);
-            Ok(search
-                .first(start, bytes.len())?
-                .or(search.first(0, start)?))
+            let start = from.map_or(0, |f| f + 1);
+            Ok(search.first(start, u64::MAX)?.or(search.first(0, start)?))
         }
         Direction::Backward => {
-            let end = from.map_or(bytes.len(), to_usize);
-            Ok(search.last(0, end)?.or(search.last(end, bytes.len())?))
+            let end = from.unwrap_or(u64::MAX);
+            Ok(search.last(0, end)?.or(search.last(end, u64::MAX)?))
         }
     }
 }
@@ -138,48 +135,26 @@ pub fn find(
 /// Non-overlapping matches that pass the scope; `None` when cancelled.
 ///
 /// # Errors
-/// Storage failures while resolving matches.
+/// Storage failures while reading or resolving matches.
 pub fn count(
     tree: &impl TreeIndex,
     root: &RootItem,
     matcher: &Matcher,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<u64>, SearchError> {
-    let bytes = tree.bytes(0..u64::MAX)?;
     let search = Search {
         tree,
         root,
         matcher,
-        bytes: &bytes,
         cancelled,
     };
-    let (mut total, mut failure) = (0u64, None);
-    let finished = scan(
-        &bytes,
-        &matcher.re,
-        0,
-        Windows::default(),
-        cancelled,
-        &mut |start, end| {
-            if matcher.scope == Scope::Both {
-                total += 1;
-                return ControlFlow::Continue(());
-            }
-            match search.accepted(start, end) {
-                Ok(Some(_)) => total += 1,
-                Ok(None) => {}
-                Err(err) => {
-                    failure = Some(err);
-                    return ControlFlow::Break(());
-                }
-            }
-            ControlFlow::Continue(())
-        },
-    );
-    match failure {
-        Some(err) => Err(err),
-        None => Ok(finished.then_some(total)),
-    }
+    let mut total = 0u64;
+    let finished = search.visit(0, Windows::default(), &mut |start, end| {
+        let counted = matcher.scope == Scope::Both || search.accepted(start, end)?.is_some();
+        total += u64::from(counted);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(finished.then_some(total))
 }
 
 /// The row path and kind of the node holding `offset`.
@@ -214,83 +189,73 @@ struct Search<'a, T> {
     tree: &'a T,
     root: &'a RootItem,
     matcher: &'a Matcher,
-    bytes: &'a [u8],
     cancelled: &'a dyn Fn() -> bool,
 }
 
+/// Called per match with its span; may stop the scan or fail.
+type Visit<'v> = dyn FnMut(u64, u64) -> Result<ControlFlow<()>, SearchError> + 'v;
+
 impl<T: TreeIndex> Search<'_, T> {
     /// The match at `start..end` as a hit, if its kind passes the scope.
-    fn accepted(&self, start: usize, end: usize) -> Result<Option<Hit>, SearchError> {
-        let (rows, kind) = locate(self.tree, self.root, start as u64)?;
+    fn accepted(&self, start: u64, end: u64) -> Result<Option<Hit>, SearchError> {
+        let (rows, kind) = locate(self.tree, self.root, start)?;
         Ok(self.matcher.accepts(kind).then_some(Hit {
-            offset: start as u64,
-            end: end as u64,
+            offset: start,
+            end,
             rows,
             kind,
         }))
     }
 
-    /// The first accepted match starting in `from..until`.
-    fn first(&self, from: usize, until: usize) -> Result<Option<Hit>, SearchError> {
-        self.pick(from, until, Windows::default())
-    }
-
-    /// The last accepted match starting in `from..until` (overlapping matches included).
-    fn last(&self, from: usize, until: usize) -> Result<Option<Hit>, SearchError> {
-        let (mut last, mut failure) = (None, None);
-        scan(
-            self.bytes,
-            &self.matcher.re,
-            from,
-            Windows {
-                overlapping: true,
-                ..Windows::default()
-            },
-            self.cancelled,
-            &mut |start, end| {
-                if start >= until {
-                    return ControlFlow::Break(());
-                }
-                match self.accepted(start, end) {
-                    Ok(Some(hit)) => last = Some(hit),
-                    Ok(None) => {}
-                    Err(err) => {
-                        failure = Some(err);
-                        return ControlFlow::Break(());
-                    }
-                }
-                ControlFlow::Continue(())
-            },
-        );
-        failure.map_or(Ok(last), Err)
-    }
-
-    fn pick(
+    /// Scans the tree's bytes from `from`; `false` when cancelled.
+    fn visit(
         &self,
-        from: usize,
-        until: usize,
+        from: u64,
         windows: Windows,
-    ) -> Result<Option<Hit>, SearchError> {
-        let mut found = Ok(None);
+        visit: &mut Visit<'_>,
+    ) -> Result<bool, SearchError> {
+        let read = |range| self.tree.bytes(range);
         scan(
-            self.bytes,
+            &read,
             &self.matcher.re,
             from,
             windows,
             self.cancelled,
-            &mut |start, end| {
-                if start >= until {
-                    return ControlFlow::Break(());
-                }
-                found = self.accepted(start, end);
-                if matches!(found, Ok(None)) {
-                    ControlFlow::Continue(())
-                } else {
-                    ControlFlow::Break(())
-                }
-            },
-        );
-        found
+            visit,
+        )
+    }
+
+    /// The first accepted match starting in `from..until`.
+    fn first(&self, from: u64, until: u64) -> Result<Option<Hit>, SearchError> {
+        let mut found = None;
+        self.visit(from, Windows::default(), &mut |start, end| {
+            if start >= until {
+                return Ok(ControlFlow::Break(()));
+            }
+            found = self.accepted(start, end)?;
+            Ok(match found {
+                Some(_) => ControlFlow::Break(()),
+                None => ControlFlow::Continue(()),
+            })
+        })?;
+        Ok(found)
+    }
+
+    /// The last accepted match starting in `from..until` (overlapping matches included).
+    fn last(&self, from: u64, until: u64) -> Result<Option<Hit>, SearchError> {
+        let mut last = None;
+        let windows = Windows {
+            overlapping: true,
+            ..Windows::default()
+        };
+        self.visit(from, windows, &mut |start, end| {
+            if start >= until {
+                return Ok(ControlFlow::Break(()));
+            }
+            last = self.accepted(start, end)?.or(last.take());
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(last)
     }
 }
 
@@ -313,56 +278,84 @@ impl Default for Windows {
     }
 }
 
-/// Visits matches starting at or after `from`, window by window; `false` when cancelled.
+/// Bytes read before a window so `\b` and `^` see the preceding character.
+const CONTEXT: u64 = 4;
+
+/// Reads document bytes; a read shorter than asked for ends at the document's end.
+type Read<'r> = dyn Fn(Range<u64>) -> Result<Cow<'r, [u8]>, IndexError> + 'r;
+
+/// Visits matches starting at or after `from`, reading window by window; `false` when cancelled.
 fn scan(
-    bytes: &[u8],
+    read: &Read<'_>,
     re: &Regex,
-    from: usize,
+    from: u64,
     windows: Windows,
     cancelled: &dyn Fn() -> bool,
-    visit: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
-) -> bool {
-    let mut start = from;
-    while start < bytes.len() {
+    visit: &mut Visit<'_>,
+) -> Result<bool, SearchError> {
+    let (mut start, span) = (from, (windows.size + windows.overlap) as u64);
+    loop {
         if cancelled() {
-            return false;
+            return Ok(false);
         }
-        let end = (start + windows.size + windows.overlap).min(bytes.len());
-        let limit = if end == bytes.len() {
-            end
+        let base = start.saturating_sub(CONTEXT);
+        let hay = read(base..start.saturating_add(span))?;
+        let last = base + (hay.len() as u64) < start.saturating_add(span);
+        let limit = if last {
+            u64::MAX
         } else {
-            start + windows.size
+            start + windows.size as u64
         };
-        match scan_window(&bytes[..end], re, start, limit, windows.overlapping, visit) {
-            ControlFlow::Break(()) => return true,
+        let window = Window {
+            hay: &hay,
+            base,
+            start,
+            limit,
+        };
+        match window.matches(re, windows.overlapping, visit)? {
+            ControlFlow::Break(()) => return Ok(true),
+            ControlFlow::Continue(_) if last => return Ok(true),
             ControlFlow::Continue(resume) => start = resume.max(limit),
         }
     }
-    true
 }
 
-/// Matches starting in `start..limit` of `hay`; continues with the position to resume from.
-fn scan_window(
-    hay: &[u8],
-    re: &Regex,
-    start: usize,
-    limit: usize,
-    overlapping: bool,
-    visit: &mut dyn FnMut(usize, usize) -> ControlFlow<()>,
-) -> ControlFlow<(), usize> {
-    let mut pos = start;
-    while let Some(m) = re.find_at(hay, pos).filter(|m| m.start() < limit) {
-        visit(m.start(), m.end())?;
-        pos = if overlapping || m.is_empty() {
-            m.start() + 1
-        } else {
-            m.end()
-        };
-        if pos > hay.len() {
-            break;
+/// Bytes `hay` at absolute offset `base`; matches must start in `start..limit`.
+struct Window<'h> {
+    hay: &'h [u8],
+    base: u64,
+    start: u64,
+    limit: u64,
+}
+
+impl Window<'_> {
+    /// Visits the matches; continues with the absolute position to resume from.
+    fn matches(
+        &self,
+        re: &Regex,
+        overlapping: bool,
+        visit: &mut Visit<'_>,
+    ) -> Result<ControlFlow<(), u64>, SearchError> {
+        let mut pos = to_usize(self.start.saturating_sub(self.base)).min(self.hay.len());
+        while let Some(m) = re.find_at(self.hay, pos) {
+            let (start, end) = (self.base + m.start() as u64, self.base + m.end() as u64);
+            if start >= self.limit {
+                break;
+            }
+            if visit(start, end)?.is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+            pos = if overlapping || m.is_empty() {
+                m.start() + 1
+            } else {
+                m.end()
+            };
+            if pos > self.hay.len() {
+                break;
+            }
         }
+        Ok(ControlFlow::Continue(self.base + pos as u64))
     }
-    ControlFlow::Continue(pos)
 }
 
 /// All non-overlapping match starts, scanning in windows (test hook for the scanner).
@@ -374,10 +367,16 @@ fn scan_offsets(bytes: &[u8], re: &Regex, size: usize, overlap: usize) -> Vec<u6
         overlap,
         overlapping: false,
     };
-    scan(bytes, re, 0, windows, &|| false, &mut |start, _| {
-        offsets.push(start as u64);
-        ControlFlow::Continue(())
-    });
+    let read = |r: Range<u64>| {
+        let clamp = |x: u64| to_usize(x).min(bytes.len());
+        Ok(Cow::Borrowed(&bytes[clamp(r.start)..clamp(r.end)]))
+    };
+    let visit = &mut |start, _| {
+        offsets.push(start);
+        Ok(ControlFlow::Continue(()))
+    };
+    let finished = scan(&read, re, 0, windows, &|| false, visit);
+    assert!(matches!(finished, Ok(true)));
     offsets
 }
 

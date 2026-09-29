@@ -220,3 +220,116 @@ fn matches_across_window_boundaries_are_found() {
     let offsets = scan_offsets(text.as_bytes(), &Regex::new("needle").unwrap(), 16, 8);
     assert_eq!(offsets, vec![42]);
 }
+
+/// Delegates to a tree and records the widest byte read.
+struct Spy<'a> {
+    inner: &'a MemTree,
+    widest: std::cell::Cell<usize>,
+}
+
+impl TreeIndex for Spy<'_> {
+    fn root(&self) -> Result<crate::tree::NodeRef, IndexError> {
+        self.inner.root()
+    }
+
+    fn child_count(&self, node: crate::tree::NodeRef) -> Result<crate::tree::Count, IndexError> {
+        self.inner.child_count(node)
+    }
+
+    fn children(
+        &self,
+        node: crate::tree::NodeRef,
+        range: Range<u64>,
+    ) -> Result<Vec<crate::index::children::Child>, IndexError> {
+        self.inner.children(node, range)
+    }
+
+    fn child_containing(
+        &self,
+        node: crate::tree::NodeRef,
+        offset: u64,
+    ) -> Result<Option<crate::index::children::Child>, IndexError> {
+        self.inner.child_containing(node, offset)
+    }
+
+    fn bytes(&self, range: Range<u64>) -> Result<std::borrow::Cow<'_, [u8]>, IndexError> {
+        let bytes = self.inner.bytes(range)?;
+        self.widest.set(self.widest.get().max(bytes.len()));
+        Ok(bytes)
+    }
+
+    fn value_end(&self, node: crate::tree::NodeRef) -> Result<u64, IndexError> {
+        self.inner.value_end(node)
+    }
+
+    fn stats(&self) -> crate::tree::Stats {
+        self.inner.stats()
+    }
+
+    fn format(&self) -> crate::format::Format {
+        self.inner.format()
+    }
+}
+
+#[test]
+fn searches_read_the_document_in_bounded_windows() {
+    let filler: Vec<String> = (0..600_000).map(|i| format!("\"item {i:07}\"")).collect();
+    let text = format!("[{}, \"needle\"]", filler.join(","));
+    let tree = MemTree::parse(MemSource::new(text.clone().into_bytes())).unwrap();
+    let spy = Spy {
+        inner: &tree,
+        widest: std::cell::Cell::new(0),
+    };
+    let root = TreeState::new(&spy).unwrap().root;
+    let m = literal("needle", Scope::Both);
+    let hit = find(&spy, &root, &m, None, Direction::Forward, &never).unwrap();
+    assert_eq!(
+        hit.as_ref().map(|h| h.offset),
+        text.find("needle").map(|i| i as u64)
+    );
+    let back = find(&spy, &root, &m, None, Direction::Backward, &never).unwrap();
+    assert_eq!(back, hit);
+    assert_eq!(count(&spy, &root, &m, &never).unwrap(), Some(1));
+    assert!(text.len() > 2 * WINDOW);
+    let bound = WINDOW + OVERLAP + crate::index::to_usize(CONTEXT);
+    assert!(
+        spy.widest.get() <= bound,
+        "read {} bytes at once",
+        spy.widest.get()
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+    #[test]
+    fn streaming_search_equals_memory_search(value in json_value(), pick in any::<prop::sample::Index>(), len in 1usize..3) {
+        use crate::index::spill::SpillLimits;
+        use crate::json::stream::StreamLimits;
+        use crate::stream_tree::StreamTree;
+        let d = doc(&value);
+        let Some(pattern) = pattern_in(&d.text, pick, len) else { return Ok(()) };
+        let limits = StreamLimits { initial: 16, max: 1 << 20 };
+        let spill = SpillLimits { window: 4, stack: 4, cache: 4096 };
+        let source = MemSource::new(d.text.clone().into_bytes());
+        let stream = StreamTree::index(source, limits, spill, |_| std::ops::ControlFlow::Continue(())).unwrap();
+        let m = literal(&pattern, Scope::Both);
+        for from in [None, Some(0), Some(d.text.len() as u64 / 2)] {
+            for direction in [Direction::Forward, Direction::Backward] {
+                prop_assert_eq!(
+                    find(&stream, &d.root, &m, from, direction, &never).unwrap(),
+                    find(&d.tree, &d.root, &m, from, direction, &never).unwrap()
+                );
+            }
+        }
+        prop_assert_eq!(count(&stream, &d.root, &m, &never).unwrap(), count(&d.tree, &d.root, &m, &never).unwrap());
+    }
+}
+
+proptest! {
+    #[test]
+    fn windowed_scans_equal_whole_text_scans(text in "[ab ]{0,80}", pattern in prop::sample::select(vec!["a", "ab", "ba b", r"\bab", r"b\b", "^a"]), size in 1usize..16) {
+        let re = Regex::new(pattern).unwrap();
+        let whole: Vec<u64> = re.find_iter(text.as_bytes()).map(|m| m.start() as u64).collect();
+        prop_assert_eq!(scan_offsets(text.as_bytes(), &re, size, 4), whole);
+    }
+}
