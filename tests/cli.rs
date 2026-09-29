@@ -53,13 +53,19 @@ fn missing_files_fail_naming_the_path() {
 }
 
 #[test]
-fn streaming_mode_is_reported_unsupported() {
-    let file = temp_file(b"[]").unwrap();
-    let out = dv(&["--mode", "stream", file.path().to_str().unwrap()]).unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("streaming mode is not supported yet"),
-        "{out:?}"
+fn streaming_mode_indexes_files() {
+    let file = temp_file(br#"{"a": [1, 2, 3], "b": {"c": null}}"#).unwrap();
+    let out = dv(&[
+        "--index-only",
+        "--mode",
+        "stream",
+        file.path().to_str().unwrap(),
+    ])
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "indexed 34 bytes"
     );
 }
 

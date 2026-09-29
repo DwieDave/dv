@@ -77,23 +77,45 @@ impl<T: TreeIndex> App<T> {
 pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: AppEvent<T>) {
     match event {
         AppEvent::Input(input) => on_input(app, &input),
-        AppEvent::Load(LoadEvent::Progress(progress)) => {
-            if let Screen::Loading(current) = &mut app.screen {
-                *current = progress;
-            }
-        }
-        AppEvent::Load(LoadEvent::Loaded(result)) => {
-            app.screen = ready_or_failed(result, app.size);
-            if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
-                attach_worker(model, events);
-            }
-        }
+        AppEvent::Load(LoadEvent::Progress(progress)) => match &mut app.screen {
+            Screen::Loading(current) => *current = progress,
+            Screen::Ready(model) => update(model, Msg::Refresh),
+            Screen::Failed(_) => {}
+        },
+        AppEvent::Load(LoadEvent::Live(doc)) => open(app, Ok(doc)),
+        AppEvent::Load(LoadEvent::Loaded(result)) => match (&mut app.screen, result) {
+            (Screen::Ready(model), Ok(doc)) => swap(model, doc, app.events.as_ref()),
+            (Screen::Ready(model), Err(failure)) => model.status = Some(failure.message),
+            (_, result) => open(app, result),
+        },
         AppEvent::Search(outcome) => {
             if let Screen::Ready(model) = &mut app.screen {
                 update(model, Msg::SearchOutcome(outcome));
             }
         }
     }
+}
+
+/// Shows the loaded document (or the failure).
+fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T, LoadFailure>) {
+    app.screen = ready_or_failed(result, app.size);
+    if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
+        attach_worker(model, events);
+    }
+}
+
+/// Replaces a live document with the finished one, keeping the view.
+fn swap<T: TreeIndex + Send + Sync + 'static>(
+    model: &mut Model<T>,
+    doc: T,
+    events: Option<&Sender<AppEvent<T>>>,
+) {
+    model.tree = Arc::new(doc);
+    model.schema = None;
+    if let Some(events) = events {
+        attach_worker(model, events);
+    }
+    update(model, Msg::Refresh);
 }
 
 /// Runs the model's queued side effects and notes their results.

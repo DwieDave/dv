@@ -112,3 +112,45 @@ fn searches_run_on_the_worker_and_come_back_as_events() {
     };
     assert_eq!(model.state.cursor, vec![1]);
 }
+
+#[test]
+fn a_live_document_is_browsable_and_swapped_when_finished() {
+    use std::io::Write;
+
+    use crate::document::Document;
+    use crate::load::{StreamBudget, load_stream};
+
+    let items: Vec<String> = (0..20_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(format!("[{}]", items.join(",")).as_bytes())
+        .unwrap();
+    let mut events = Vec::new();
+    load_stream(
+        &file,
+        &mut |e| events.push(e),
+        &AtomicBool::new(false),
+        StreamBudget::testing(),
+    );
+    let mut app: App<Document> = App::new(Arc::new(AtomicBool::new(false)));
+    let mut events = events.into_iter();
+    update_app(&mut app, AppEvent::Load(events.next().unwrap()));
+    let key = |c| AppEvent::Input(Event::Key(KeyEvent::from(KeyCode::Char(c))));
+    update_app(&mut app, key('j'));
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready after Live")
+    };
+    assert!(matches!(*model.tree, Document::Live(_)));
+    assert_eq!(model.state.cursor, vec![0]);
+    for event in events {
+        update_app(&mut app, AppEvent::Load(event));
+    }
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready at the end")
+    };
+    assert!(matches!(*model.tree, Document::Stream(_)));
+    assert_eq!(model.state.cursor, vec![0], "the view survives the swap");
+    assert_eq!(
+        model.tree.child_count(model.state.root.node).unwrap(),
+        crate::tree::Count::Known(20_000)
+    );
+}

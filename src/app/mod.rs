@@ -123,6 +123,8 @@ pub enum Msg {
     Preview(PreviewCmd),
     Copy(CopyWhat),
     OpenPicker,
+    /// Child counts may have grown (streaming progress).
+    Refresh,
 }
 
 /// The most recent kind of find, repeated by `n`/`N`.
@@ -234,6 +236,11 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
         Msg::Copy(what) => copy(model, what),
         Msg::OpenPicker => picker::open(model),
+        Msg::Refresh => {
+            if let Err(err) = model.state.refresh(&*model.tree) {
+                model.status = Some(err.to_string());
+            }
+        }
     }
 }
 

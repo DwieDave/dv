@@ -1,18 +1,27 @@
 //! Loading and indexing on a worker thread, reporting progress (FR-8, D-12).
 
+use std::fs::File;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::document::Document;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::{Format, detect};
+use crate::index::IndexError;
+use crate::index::spill::SpillBuilder;
+use crate::index::spill::SpillLimits;
 use crate::index::to_usize;
 use crate::json::ndjson::{ParsedLines, parse_lines};
 use crate::json::parse::parse_with;
+use crate::json::stream::{StreamLimits, parse_stream};
+use crate::live_tree::LiveTree;
 use crate::position::Position;
 use crate::snippet::{Snippet, snippet};
+use crate::source::file::FileSource;
 use crate::source::{MemSource, Source, SourceError};
+use crate::stream_tree::StreamTree;
 use crate::tree::MemTree;
 use crate::yaml::{TranscodeError, budget, transcode};
 
@@ -61,6 +70,8 @@ impl LoadFailure {
 #[derive(Debug)]
 pub enum LoadEvent<T> {
     Progress(Progress),
+    /// A document that can be browsed while indexing continues (streaming).
+    Live(T),
     Loaded(Result<T, LoadFailure>),
 }
 
@@ -79,7 +90,7 @@ pub struct Request {
 pub fn load(
     reader: impl Read,
     request: &Request,
-    sink: &mut impl FnMut(LoadEvent<MemTree>),
+    sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
 ) {
     let outcome = match read_all(reader, request.size_hint, request.max_len, sink, cancel) {
@@ -91,7 +102,148 @@ pub fn load(
         Err(failure) => Some(Err(failure)),
     };
     if let Some(result) = outcome {
-        sink(LoadEvent::Loaded(result));
+        sink(LoadEvent::Loaded(result.map(Document::Mem)));
+    }
+}
+
+/// Memory and pacing for a streaming load (FR-25).
+#[derive(Debug, Clone, Copy)]
+pub struct StreamBudget {
+    /// Chunk cache of the parser's reads.
+    pub parse_cache: u64,
+    /// Chunk cache of each browsing view (live, then final).
+    pub view_cache: u64,
+    pub spill: SpillLimits,
+    pub stream: StreamLimits,
+    /// Input bytes between two publishes of the live index.
+    pub publish_every: u64,
+}
+
+impl Default for StreamBudget {
+    /// About 512 MB in total (NFR-11).
+    fn default() -> Self {
+        Self {
+            parse_cache: 32 << 20,
+            view_cache: 128 << 20,
+            spill: SpillLimits {
+                cache: 64 << 20,
+                ..SpillLimits::default()
+            },
+            stream: StreamLimits {
+                initial: 4 << 20,
+                max: 128 << 20,
+            },
+            publish_every: 16 << 20,
+        }
+    }
+}
+
+impl StreamBudget {
+    /// Small buffers and frequent publishes, for tests.
+    #[must_use]
+    pub fn testing() -> Self {
+        Self {
+            parse_cache: 1 << 20,
+            view_cache: 1 << 20,
+            spill: SpillLimits {
+                window: 64,
+                stack: 64,
+                cache: 1 << 20,
+            },
+            stream: StreamLimits {
+                initial: 4096,
+                max: 1 << 20,
+            },
+            publish_every: 16 << 10,
+        }
+    }
+}
+
+/// Streams `file` into a spilled index: browsable at once, finished when indexing completes.
+pub fn load_stream(
+    file: &File,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) {
+    match stream(file, sink, cancel, budget) {
+        Ok(Some(doc)) => sink(LoadEvent::Loaded(Ok(doc))),
+        Ok(None) => {}
+        Err(failure) => sink(LoadEvent::Loaded(Err(failure))),
+    }
+}
+
+fn stream(
+    file: &File,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) -> Result<Option<Document>, LoadFailure> {
+    let plain = |err: &dyn std::fmt::Display| LoadFailure::plain(&err.to_string());
+    let open = |cache| {
+        FileSource::new(file.try_clone().map_err(|e| plain(&e))?, cache).map_err(|e| plain(&e))
+    };
+    let (parse_source, live_source, final_source) = (
+        open(budget.parse_cache)?,
+        open(budget.view_cache)?,
+        open(budget.view_cache)?,
+    );
+    let total = parse_source.len();
+    let root = first_value(&parse_source).map_err(|e| plain(&e))?;
+    let (builder, store) = SpillBuilder::live(budget.spill).map_err(|e| plain(&e))?;
+    sink(LoadEvent::Live(Document::Live(LiveTree::new(
+        live_source,
+        store,
+        root,
+    ))));
+    let mut last = 0;
+    let publish = |b: &mut SpillBuilder, frontier: u64| {
+        if frontier - last >= budget.publish_every {
+            b.publish(frontier, false);
+            sink(LoadEvent::Progress(Progress {
+                phase: Phase::Indexing,
+                done: frontier,
+                total,
+            }));
+            last = frontier;
+        }
+    };
+    let stop = |_| {
+        if cancel.load(Ordering::Relaxed) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let parsed = match parse_stream(&parse_source, builder, budget.stream, stop, publish) {
+        Ok(parsed) => parsed,
+        Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::Cancelled => return Ok(None),
+        Err(err) => return Err(plain(&err)),
+    };
+    let mut builder = parsed.builder;
+    builder.publish(total, true);
+    let store = builder.finish().map_err(|e| plain(&e))?;
+    Ok(Some(Document::Stream(StreamTree::new(
+        final_source,
+        store,
+        parsed.root,
+        parsed.values,
+        64 << 10,
+    ))))
+}
+
+/// Offset of the first non-whitespace byte (the root value).
+fn first_value(source: &impl Source) -> Result<u64, SourceError> {
+    let mut at = 0;
+    loop {
+        let chunk = source.read(at..at + CHUNK)?;
+        if let Some(i) = chunk.iter().position(|b| !b.is_ascii_whitespace()) {
+            return Ok(at + i as u64);
+        }
+        if chunk.is_empty() {
+            return Ok(at);
+        }
+        at += chunk.len() as u64;
     }
 }
 
@@ -100,7 +252,7 @@ fn read_all(
     mut reader: impl Read,
     size_hint: Option<u64>,
     max_len: u64,
-    sink: &mut impl FnMut(LoadEvent<MemTree>),
+    sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
 ) -> Result<Option<Vec<u8>>, LoadFailure> {
     let expected = size_hint.unwrap_or(0).min(max_len);
@@ -137,7 +289,7 @@ enum Parsed {
 fn index(
     source: MemSource,
     format: Format,
-    sink: &mut impl FnMut(LoadEvent<MemTree>),
+    sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
 ) -> Option<Result<MemTree, LoadFailure>> {
     let total = source.len();
@@ -242,7 +394,7 @@ mod tests {
     use super::*;
     use crate::tree::TreeIndex;
 
-    fn events(bytes: &[u8], cancel: bool) -> Vec<LoadEvent<MemTree>> {
+    fn events(bytes: &[u8], cancel: bool) -> Vec<LoadEvent<Document>> {
         let mut seen = Vec::new();
         let flag = AtomicBool::new(cancel);
         let request = Request {
@@ -267,7 +419,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 LoadEvent::Progress(p) => Some(p.phase),
-                LoadEvent::Loaded(_) => None,
+                LoadEvent::Live(_) | LoadEvent::Loaded(_) => None,
             })
             .collect();
         assert!(phases.contains(&Phase::Reading) && phases.contains(&Phase::Indexing));
@@ -371,6 +523,37 @@ mod tests {
             panic!("expected failure")
         };
         assert!(failure.snippet.is_some(), "{failure:?}");
+    }
+
+    #[test]
+    fn streaming_loads_go_live_then_finish() {
+        use std::io::Write;
+        let items: Vec<String> = (0..40_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
+        let text = format!("[{}]", items.join(","));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        let mut seen = Vec::new();
+        load_stream(
+            &file,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        assert!(
+            matches!(seen.first(), Some(LoadEvent::Live(Document::Live(_)))),
+            "{:?}",
+            seen.first().map(|_| ())
+        );
+        assert!(seen.iter().any(|e| matches!(e, LoadEvent::Progress(_))));
+        let Some(LoadEvent::Loaded(Ok(doc @ Document::Stream(_)))) = seen.last() else {
+            panic!("no final stream tree")
+        };
+        let mem = MemTree::parse(MemSource::new(text.into_bytes())).unwrap();
+        let expected = crate::test_support::to_value(&mem, mem.root().unwrap());
+        assert_eq!(
+            crate::test_support::to_value(doc, doc.root().unwrap()),
+            expected
+        );
     }
 
     #[test]

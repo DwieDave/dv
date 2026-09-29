@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
+use std::ops::ControlFlow;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,10 +16,13 @@ use thiserror::Error;
 use crate::app::run::run as run_app;
 use crate::app::screen::{App, AppEvent};
 use crate::app::terminal::TerminalGuard;
+use crate::document::Document;
 use crate::format::{Format, SNIFF_LEN, detect};
-use crate::load::{LoadEvent, Request, load};
+use crate::load::{LoadEvent, Request, StreamBudget, load, load_stream};
 use crate::mode::{ModeError, Storage, choose, system_ram};
-use crate::tree::{MemTree, TreeIndex};
+use crate::source::file::FileSource;
+use crate::stream_tree::StreamTree;
+use crate::tree::TreeIndex;
 
 /// Input format override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -72,7 +76,16 @@ pub enum CliError {
 }
 
 /// A readable input and the facts used to load it.
-type Input = (Box<dyn Read + Send>, Request, String);
+enum Input {
+    /// Read fully into memory.
+    Memory {
+        reader: Box<dyn Read + Send>,
+        request: Request,
+        label: String,
+    },
+    /// Indexed from disk (FR-22).
+    Stream { file: File, label: String },
+}
 
 /// In-memory mode never holds more than the u32 index can address (NFR-8).
 const MAX_IN_MEMORY: u64 = u32::MAX as u64;
@@ -82,11 +95,27 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 /// # Errors
 /// Unsupported options, unreadable input, parse errors (`--index-only`) or terminal failures.
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
-    let (reader, request, label) = open_input(cli)?;
-    if cli.index_only {
-        return index_only(reader, &request, &label).map(Some);
+    match (open_input(cli)?, cli.index_only) {
+        (
+            Input::Memory {
+                reader,
+                request,
+                label,
+            },
+            true,
+        ) => index_only(reader, &request, &label).map(Some),
+        (
+            Input::Memory {
+                reader, request, ..
+            },
+            false,
+        ) => tui(move |mut sink, cancel| load(reader, &request, &mut sink, cancel)).map(|()| None),
+        (Input::Stream { file, label }, true) => index_only_stream(file, &label).map(Some),
+        (Input::Stream { file, .. }, false) => tui(move |mut sink, cancel| {
+            load_stream(&file, &mut sink, cancel, StreamBudget::default());
+        })
+        .map(|()| None),
     }
-    tui(reader, request).map(|()| None)
 }
 
 /// The file named on the command line, or stdin when omitted or `-` (FR-1, FR-2).
@@ -107,18 +136,26 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
             let size_hint = file.metadata().ok().map(|m| m.len());
             let detected = detect(Some(path), &head(&file), format);
             if choose(cli.mode, size_hint, system_ram(), detected)? == Storage::Stream {
-                return Err(CliError::Unsupported("streaming mode"));
+                return Ok(Input::Stream { file, label });
             }
             let request = Request {
                 path: Some(path.to_path_buf()),
                 size_hint,
                 ..base
             };
-            Ok((Box::new(file), request, label))
+            Ok(Input::Memory {
+                reader: Box::new(file),
+                request,
+                label,
+            })
         }
         None if io::stdin().is_terminal() => Err(CliError::NoInput),
         None if cli.mode == Mode::Stream => Err(CliError::Unsupported("streaming stdin")),
-        None => Ok((Box::new(io::stdin()), base, "<stdin>".to_owned())),
+        None => Ok(Input::Memory {
+            reader: Box::new(io::stdin()),
+            request: base,
+            label: "<stdin>".to_owned(),
+        }),
     }
 }
 
@@ -161,13 +198,15 @@ fn index_only(file: impl Read, request: &Request, path: &str) -> Result<String, 
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(file: impl Read + Send + 'static, request: Request) -> Result<(), CliError> {
+fn tui(
+    loader: impl FnOnce(&mut dyn FnMut(LoadEvent<Document>), &AtomicBool) + Send + 'static,
+) -> Result<(), CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
     thread::spawn(move || {
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
-        load(file, &request, &mut sink, &loader_cancel);
+        loader(&mut sink, &loader_cancel);
     });
     let mut app = App::new(cancel).with_events(tx.clone());
     thread::spawn(move || forward_input(&tx));
@@ -175,8 +214,20 @@ fn tui(file: impl Read + Send + 'static, request: Request) -> Result<(), CliErro
     Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
 }
 
+/// Streams and indexes a file without starting the UI (benchmarks, NFR-12).
+fn index_only_stream(file: File, path: &str) -> Result<String, CliError> {
+    let budget = StreamBudget::default();
+    let fail = |err: &dyn std::fmt::Display| CliError::Parse(format!("{path}: {err}"));
+    let source = FileSource::new(file, budget.parse_cache).map_err(|e| fail(&e))?;
+    let tree = StreamTree::index(source, budget.stream, budget.spill, |_| {
+        ControlFlow::Continue(())
+    })
+    .map_err(|e| fail(&e))?;
+    Ok(format!("indexed {} bytes", tree.stats().bytes))
+}
+
 /// Blocks on terminal input and forwards it until the UI stops listening.
-fn forward_input(tx: &Sender<AppEvent<MemTree>>) {
+fn forward_input(tx: &Sender<AppEvent<Document>>) {
     while let Ok(event) = crossterm::event::read() {
         if tx.send(AppEvent::Input(event)).is_err() {
             break;
