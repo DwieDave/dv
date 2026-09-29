@@ -1,7 +1,7 @@
 //! Single-pass validating JSON parser that builds the semi-index (D-2, D-3).
 
 use crate::error::{ParseError, ParseErrorKind};
-use crate::index::store::{CHECKPOINT_EVERY, Slot, VecStore, VecStoreBuilder};
+use crate::index::store::{Slot, VecStore, VecStoreBuilder};
 use crate::json::lex::{Kind, expect, fail, scan_scalar, scan_string, skip_ws};
 
 /// A parsed document: the root value's offset and the container index.
@@ -32,22 +32,12 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, ParseError> {
     Parser::new(bytes).run()
 }
 
-/// An open container on the parse stack.
-struct Frame {
-    slot: Slot,
-    close: u8,
-    count: u32,
-    cp_base: usize,
-    fresh: bool,
-}
-
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
     builder: VecStoreBuilder,
-    stack: Vec<Frame>,
-    /// Checkpoints of all open frames, each frame's run contiguous from its `cp_base`.
-    cps: Vec<u32>,
+    /// Open containers; per-container state lives in the builder's reserved span.
+    stack: Vec<Slot>,
 }
 
 impl<'a> Parser<'a> {
@@ -57,7 +47,6 @@ impl<'a> Parser<'a> {
             pos: 0,
             builder: VecStoreBuilder::default(),
             stack: Vec::new(),
-            cps: Vec::new(),
         }
     }
 
@@ -65,8 +54,8 @@ impl<'a> Parser<'a> {
         self.pos = skip_ws(self.bytes, 0);
         let root = self.pos as u64;
         self.start_value()?;
-        while let Some(top) = self.stack.last_mut() {
-            if std::mem::take(&mut top.fresh) {
+        while let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) {
+            if self.pos == start as usize + 1 {
                 self.first_child()?;
             } else {
                 self.after_child()?;
@@ -85,33 +74,28 @@ impl<'a> Parser<'a> {
     /// Consumes a scalar or opens a container at `pos`.
     fn start_value(&mut self) -> Result<(), ParseError> {
         match scan_scalar(self.bytes, self.pos)? {
-            (Kind::Object, _) => self.open(b'}'),
-            (Kind::Array, _) => self.open(b']'),
+            (Kind::Object | Kind::Array, _) => {
+                self.stack.push(self.builder.open(offset32(self.pos)));
+                self.pos += 1;
+            }
             (_, end) => self.pos = end,
         }
         Ok(())
     }
 
-    /// Pushes a frame; the main loop starts its first child, so nesting never recurses.
-    fn open(&mut self, close: u8) {
-        let slot = self.builder.open(offset32(self.pos));
-        let cp_base = self.cps.len();
-        let fresh = true;
-        self.stack.push(Frame {
-            slot,
-            close,
-            count: 0,
-            cp_base,
-            fresh,
-        });
-        self.pos += 1;
+    /// The closing bracket expected by the innermost open container.
+    fn close_byte(&self) -> u8 {
+        let start = self.stack.last().map_or(0, |slot| self.builder.start(slot));
+        match self.bytes.get(start as usize) {
+            Some(b'{') => b'}',
+            _ => b']',
+        }
     }
 
     /// Right after an opening bracket: the closing bracket or the first child.
     fn first_child(&mut self) -> Result<(), ParseError> {
         self.pos = skip_ws(self.bytes, self.pos);
-        let close = self.stack.last().map_or(0, |f| f.close);
-        if self.bytes.get(self.pos) == Some(&close) {
+        if self.bytes.get(self.pos) == Some(&self.close_byte()) {
             self.close();
             return Ok(());
         }
@@ -121,13 +105,12 @@ impl<'a> Parser<'a> {
     /// After a child value: expect a comma or the closing bracket.
     fn after_child(&mut self) -> Result<(), ParseError> {
         self.pos = skip_ws(self.bytes, self.pos);
-        let close = self.stack.last().map_or(0, |f| f.close);
         match self.bytes.get(self.pos) {
             Some(b',') => {
                 self.pos = skip_ws(self.bytes, self.pos + 1);
                 self.start_child()
             }
-            Some(&b) if b == close => {
+            Some(&b) if b == self.close_byte() => {
                 self.close();
                 Ok(())
             }
@@ -137,14 +120,11 @@ impl<'a> Parser<'a> {
     }
 
     fn start_child(&mut self) -> Result<(), ParseError> {
-        let Some(top) = self.stack.last_mut() else {
-            return Ok(());
-        };
-        if u64::from(top.count) % CHECKPOINT_EVERY == 0 {
-            self.cps.push(offset32(self.pos));
+        let is_object = self.close_byte() == b'}';
+        if let Some(slot) = self.stack.last() {
+            self.builder.add_child(slot, offset32(self.pos));
         }
-        top.count += 1;
-        if top.close == b'}' {
+        if is_object {
             self.member_key()?;
         }
         self.start_value()
@@ -160,14 +140,10 @@ impl<'a> Parser<'a> {
     }
 
     fn close(&mut self) {
-        let Some(frame) = self.stack.pop() else {
-            return;
-        };
-        self.pos += 1;
-        let cps = &self.cps[frame.cp_base..];
-        self.builder
-            .close(frame.slot, offset32(self.pos), frame.count, cps);
-        self.cps.truncate(frame.cp_base);
+        if let Some(slot) = self.stack.pop() {
+            self.pos += 1;
+            self.builder.close(slot, offset32(self.pos));
+        }
     }
 }
 

@@ -35,3 +35,8 @@ bench:
 # Print the peak RSS of a command in MB.
 rss +cmd:
     @/usr/bin/time -l {{cmd}} 2>&1 >/dev/null | awk '/maximum resident set size/ {printf "peak RSS: %.1f MB\n", $1 / 1000000}'
+
+# End-to-end load time of `dv --index-only` over the JSON fixtures (NFR-1).
+bench-load:
+    cargo build --release
+    hyperfine --warmup 2 -N -L file api-15M.json,dense-15M.json,small-objects-15M.json,wide-15M.json,escapes-15M.json,deep-100k.json,api-100M.json 'target/release/dv --index-only {{data_dir}}/{file}'

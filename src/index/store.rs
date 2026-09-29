@@ -1,5 +1,6 @@
 //! Storage for big-container spans and their child checkpoints.
 
+use crate::index::to_usize;
 use crate::source::SourceError;
 
 /// Containers shorter than this are re-lexed instead of indexed.
@@ -59,54 +60,79 @@ struct FanoutRow {
 
 /// A reserved span; closing it decides whether it stays.
 #[derive(Debug)]
-pub struct Slot(usize);
+pub struct Slot(u32);
 
+/// Builds the store while parsing. An open container's span keeps its child
+/// count in `len` (unknown until close anyway), so a parse frame is one `Slot`.
 #[derive(Debug, Default)]
 pub struct VecStoreBuilder {
     spans: Vec<Span32>,
     rows: Vec<FanoutRow>,
     checkpoints: Vec<u32>,
+    /// Checkpoints of all open containers; each one's run is contiguous at the end.
+    open_cps: Vec<u32>,
 }
 
 impl VecStoreBuilder {
     /// Reserves a span for the container opening at `start`.
     pub fn open(&mut self, start: u32) -> Slot {
         self.spans.push(Span32 { start, len: 0 });
-        Slot(self.spans.len() - 1)
+        Slot(offset32(self.spans.len() - 1))
+    }
+
+    /// Offset of the opening bracket of `slot`.
+    #[must_use]
+    pub fn start(&self, slot: &Slot) -> u32 {
+        self.spans[slot.0 as usize].start
+    }
+
+    /// Records a child of `slot` beginning at `offset`.
+    pub fn add_child(&mut self, slot: &Slot, offset: u32) {
+        let span = &mut self.spans[slot.0 as usize];
+        if u64::from(span.len) % CHECKPOINT_EVERY == 0 {
+            self.open_cps.push(offset);
+        }
+        span.len += 1;
     }
 
     /// Completes `slot`. A small container is always the last span (its
     /// descendants are smaller and already gone), so dropping it is a pop.
-    pub fn close(&mut self, Slot(idx): Slot, end: u32, count: u32, checkpoints: &[u32]) {
-        let start = self.spans[idx].start;
+    pub fn close(&mut self, Slot(idx): Slot, end: u32) {
+        let Span32 { start, len: count } = self.spans[idx as usize];
+        let run = self.open_cps.len() - to_usize(u64::from(count).div_ceil(CHECKPOINT_EVERY));
         if u64::from(end - start) < MIN_NODE_LEN {
-            if idx + 1 == self.spans.len() {
-                self.spans.pop();
+            self.spans.truncate(idx as usize);
+        } else {
+            self.spans[idx as usize].len = end - start;
+            if u64::from(count) > CHECKPOINT_EVERY {
+                self.record_fanout(idx, count, run);
             }
-            return;
         }
-        self.spans[idx].len = end - start;
-        if u64::from(count) > CHECKPOINT_EVERY {
-            self.record_fanout(idx, count, checkpoints);
-        }
+        self.open_cps.truncate(run);
     }
 
-    fn record_fanout(&mut self, node: usize, count: u32, checkpoints: &[u32]) {
-        #[allow(clippy::cast_possible_truncation)] // bounded by the u32 input size (NFR-8)
-        let (node, first) = (node as u32, self.checkpoints.len() as u32);
+    fn record_fanout(&mut self, node: u32, count: u32, run: usize) {
+        let first = offset32(self.checkpoints.len());
         self.rows.push(FanoutRow { node, count, first });
-        self.checkpoints.extend_from_slice(checkpoints);
+        self.checkpoints.extend_from_slice(&self.open_cps[run..]);
     }
 
     #[must_use]
     pub fn finish(mut self) -> VecStore {
         self.rows.sort_unstable_by_key(|row| row.node);
+        self.spans.shrink_to_fit();
         VecStore {
             spans: self.spans,
             rows: self.rows,
             checkpoints: self.checkpoints,
         }
     }
+}
+
+/// Store indices and offsets fit in u32 because inputs do (NFR-8).
+#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
+fn offset32(n: usize) -> u32 {
+    n as u32
 }
 
 /// In-memory node store with u32 offsets.

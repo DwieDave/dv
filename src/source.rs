@@ -40,11 +40,17 @@ impl MemSource {
     }
 
     /// Reads all of `reader`, failing once it exceeds `max_len` bytes.
+    /// `size_hint` (e.g. a file's length) sizes the buffer once instead of doubling.
     ///
     /// # Errors
     /// `TooLarge` past `max_len`, `Io` when reading fails.
-    pub fn load(reader: impl Read, max_len: u64) -> Result<Self, SourceError> {
-        let mut bytes = Vec::new();
+    pub fn load(
+        reader: impl Read,
+        max_len: u64,
+        size_hint: Option<u64>,
+    ) -> Result<Self, SourceError> {
+        let capacity = size_hint.map_or(0, |hint| hint.min(max_len));
+        let mut bytes = Vec::with_capacity(usize::try_from(capacity).unwrap_or(0));
         reader
             .take(max_len.saturating_add(1))
             .read_to_end(&mut bytes)?;
@@ -96,7 +102,7 @@ mod tests {
 
         #[test]
         fn load_enforces_max_len(bytes in proptest::collection::vec(any::<u8>(), 0..256), max_len in 0u64..256) {
-            match MemSource::load(bytes.as_slice(), max_len) {
+            match MemSource::load(bytes.as_slice(), max_len, None) {
                 Ok(source) => prop_assert!(bytes.len() as u64 <= max_len && source.as_bytes() == bytes),
                 Err(SourceError::TooLarge { .. }) => prop_assert!(bytes.len() as u64 > max_len),
                 Err(other) => prop_assert!(false, "unexpected {other}"),

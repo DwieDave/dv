@@ -35,11 +35,11 @@ fn feed(tree: &Tree, pos: u32, b: &mut VecStoreBuilder, laid: &mut HashMap<u32, 
     for (i, kid) in kids.iter().enumerate() {
         p += u32::from(i > 0);
         children.push(p);
+        b.add_child(&slot, p);
         p = feed(kid, p, b, laid);
     }
     let end = p + 1;
-    let cps: Vec<u32> = children.iter().step_by(16).copied().collect();
-    b.close(slot, end, u32::try_from(children.len()).unwrap(), &cps);
+    b.close(slot, end);
     laid.insert(pos, Laid { end, children });
     end
 }

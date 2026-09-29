@@ -267,6 +267,7 @@ dependencies = [
  "proptest",
  "saphyr",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
