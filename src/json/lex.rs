@@ -78,7 +78,7 @@ fn scan_unicode_escape(bytes: &[u8], i: usize) -> Result<usize, ParseError> {
     }
 }
 
-fn hex4(bytes: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn hex4(bytes: &[u8], at: usize) -> Option<u16> {
     let digits = std::str::from_utf8(bytes.get(at..at + 4)?).ok()?;
     let valid = digits.bytes().all(|b| b.is_ascii_hexdigit());
     valid

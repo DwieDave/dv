@@ -1,4 +1,6 @@
 //! JSON lexing and semi-index construction.
 
+pub mod format;
 pub mod lex;
 pub mod parse;
+pub mod text;
