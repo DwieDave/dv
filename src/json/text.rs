@@ -21,7 +21,9 @@ pub fn unescape(raw: &[u8]) -> Cow<'_, str> {
 pub fn inline(raw: &[u8], max_chars: usize) -> String {
     let text = if raw.first() == Some(&b'"') {
         let inner = inner(raw);
-        decode(&inner[..inner.len().min((max_chars + 1) * MAX_ESCAPE_LEN)])
+        // Enough bytes for `max_chars + 1` characters; an escape cut at the end is never shown.
+        let room = max_chars.saturating_add(1).saturating_mul(MAX_ESCAPE_LEN);
+        decode(&inner[..inner.len().min(room)])
     } else {
         String::from_utf8_lossy(raw)
     };
@@ -74,7 +76,8 @@ fn decode(inner: &[u8]) -> Cow<'_, str> {
     }
     let mut out = Vec::with_capacity(inner.len());
     let mut i = 0;
-    while let Some(off) = memchr::memchr(b'\\', &inner[i..]) {
+    // An escape cut off by the caller's slice can end past `inner`: stop there.
+    while let Some(off) = inner.get(i..).and_then(|rest| memchr::memchr(b'\\', rest)) {
         out.extend_from_slice(&inner[i..i + off]);
         i = push_escape(inner, i + off, &mut out);
     }

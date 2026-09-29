@@ -46,3 +46,26 @@ fn inline_decodes_strings_and_keeps_numbers_raw() {
 fn unescape_borrows_without_escapes() {
     assert!(matches!(unescape(b"\"plain\""), Cow::Borrowed("plain")));
 }
+
+proptest! {
+    #[test]
+    fn inline_equals_decoding_everything_then_truncating(s in "(\\PC|[\u{0}-\u{1f}\"\\\\é🙂])*", ascii in any::<bool>(), max in 0usize..40) {
+        // serde_json writes control characters as \u escapes; escaping all non-ASCII too
+        // gives surrogate pairs, the longest escapes.
+        let raw = if ascii {
+            s.chars().map(|c| if c.is_ascii() { serde_json::to_string(&c.to_string()).unwrap().trim_matches('"').to_owned() } else {
+                c.encode_utf16(&mut [0; 2]).iter().map(|u| format!("{BS}u{u:04x}")).collect::<Vec<_>>().concat()
+            }).collect::<String>()
+        } else {
+            serde_json::to_string(&s).unwrap().trim_matches('"').to_owned()
+        };
+        let raw = format!("\"{raw}\"");
+        let whole = inline(raw.as_bytes(), raw.len() + 1);
+        let expected: String = if whole.chars().count() > max && max > 0 {
+            whole.chars().take(max - 1).chain(std::iter::once('…')).collect()
+        } else {
+            whole.chars().take(max).collect()
+        };
+        prop_assert_eq!(inline(raw.as_bytes(), max), expected);
+    }
+}

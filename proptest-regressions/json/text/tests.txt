@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 11bc8e728b67c196c5fc4e6909017454e10e82bfca6934e10af924778cfd694f # shrinks to s = "a𐣻\u{7fd}", max = 1
 cc efeee809700ddfcc8671d7dde56de694d07da49ba13a7f02593287163ea83025 # shrinks to body = ""
+cc 21168637f2eeb8ee8d5e0d4097bdd4fc1f690145156ea0647016ae4e47cfe0f2 # shrinks to s = "®  🌀\u{1ab0} \u{8}\u{8} A𬺰 ® \0 \u{e}0\u{1cd0}", ascii = true, max = 0
