@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::error::ParseError;
-use crate::index::children::{Child, children, seek};
+use crate::index::children::{Child, children, seek, skip_value};
 use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, scan_scalar};
@@ -66,6 +66,12 @@ pub trait TreeIndex {
     /// # Errors
     /// Storage failures.
     fn bytes(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, IndexError>;
+
+    /// One past the last byte of `node`'s value.
+    ///
+    /// # Errors
+    /// Storage or lexing failures.
+    fn value_end(&self, node: NodeRef) -> Result<u64, IndexError>;
 }
 
 /// An in-memory document.
@@ -158,6 +164,11 @@ impl TreeIndex for MemTree {
 
     fn bytes(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, IndexError> {
         Ok(self.source.read(range)?)
+    }
+
+    fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
+        let (bytes, store) = (self.source.as_bytes(), &self.parsed.store);
+        Ok(skip_value(bytes, store, to_usize(node.offset))?.1)
     }
 }
 

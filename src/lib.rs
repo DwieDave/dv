@@ -9,6 +9,7 @@ pub mod path;
 pub mod position;
 pub mod source;
 pub mod tree;
+pub mod ui;
 pub mod view;
 
 #[cfg(test)]

@@ -96,7 +96,14 @@ impl<'a, S: NodeStore> Children<'a, S> {
 }
 
 /// Kind and end offset of the value at `at`.
-fn skip_value(bytes: &[u8], store: &impl NodeStore, at: usize) -> Result<(Kind, u64), IndexError> {
+///
+/// # Errors
+/// Store read failures or lexing errors.
+pub fn skip_value(
+    bytes: &[u8],
+    store: &impl NodeStore,
+    at: usize,
+) -> Result<(Kind, u64), IndexError> {
     match scan_scalar(bytes, at)? {
         (kind @ (Kind::Object | Kind::Array), _) => Ok((kind, container_end(bytes, store, at)?)),
         (kind, end) => Ok((kind, end as u64)),
