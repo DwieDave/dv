@@ -3,8 +3,15 @@
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
+/// `dv` with no user config: the config directory does not exist.
+fn dv_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dv"));
+    command.env("XDG_CONFIG_HOME", "/nonexistent/dv-tests");
+    command
+}
+
 fn dv(args: &[&str]) -> io::Result<Output> {
-    Command::new(env!("CARGO_BIN_EXE_dv")).args(args).output()
+    dv_command().args(args).output()
 }
 
 fn temp_file(contents: &[u8]) -> io::Result<tempfile::NamedTempFile> {
@@ -94,7 +101,7 @@ fn index_only_handles_ndjson_with_bad_lines() {
 }
 
 fn dv_stdin(args: &[&str], input: &[u8]) -> io::Result<Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dv"))
+    let mut child = dv_command()
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -136,7 +143,7 @@ fn piped_input_can_be_streamed() {
 fn streaming_never_leaves_names_in_the_temp_dir() {
     let dir = tempfile::tempdir().unwrap();
     let file = temp_file(br#"{"a": [1, 2, 3], "b": {"c": null}}"#).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dv"))
+    let mut child = dv_command()
         .args(["--index-only", "--mode", "stream"])
         .env("TMPDIR", dir.path())
         .stdin(Stdio::piped())
@@ -150,7 +157,7 @@ fn streaming_never_leaves_names_in_the_temp_dir() {
     drop(stdin);
     child.kill().unwrap();
     child.wait().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_dv"))
+    let out = dv_command()
         .args([
             "--index-only",
             "--mode",
@@ -169,6 +176,34 @@ fn streaming_never_leaves_names_in_the_temp_dir() {
 fn piped_ndjson_is_detected_from_content() {
     let out = dv_stdin(&["--index-only"], b"{\"a\":1}\n{bad\n{\"a\":2}\n").unwrap();
     assert!(out.status.success(), "{out:?}");
+}
+
+#[test]
+fn the_config_threshold_decides_the_mode_and_bad_configs_only_warn() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let yaml = dir.path().join("doc.yaml");
+    std::fs::write(&yaml, "a: 1\nb: [1, 2, 3]\n").unwrap();
+    std::fs::write(&config, "[mode]\nthreshold = \"10B\"\n").unwrap();
+    let args = |config: &std::path::Path| {
+        let (c, y) = (
+            config.to_str().unwrap().to_owned(),
+            yaml.to_str().unwrap().to_owned(),
+        );
+        vec!["--index-only".to_owned(), "--config".to_owned(), c, y]
+    };
+    let small = dv(&args(&config).iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+    assert!(
+        String::from_utf8_lossy(&small.stderr).contains("cannot be streamed"),
+        "{small:?}"
+    );
+    std::fs::write(&config, "theme = \"missing\"\n").unwrap();
+    let bad = dv(&args(&config).iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+    assert!(bad.status.success(), "{bad:?}");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("config: unknown theme"),
+        "{bad:?}"
+    );
 }
 
 #[test]

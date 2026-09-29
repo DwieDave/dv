@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::app::run::run as run_app;
 use crate::app::screen::{App, AppEvent};
 use crate::app::terminal::TerminalGuard;
+use crate::config::{self, Config};
 use crate::document::Document;
 use crate::format::{Format, SNIFF_LEN, detect};
 use crate::load::{LoadEvent, Request, StreamBudget, load_spooled, load_stream};
@@ -23,6 +24,7 @@ use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
 use crate::source::file::FileSource;
 use crate::stream_tree::StreamTree;
 use crate::tree::TreeIndex;
+use crate::ui::theme::Theme;
 
 /// Input format override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -53,6 +55,9 @@ pub struct Cli {
     /// Keep the document in memory or stream it from disk.
     #[arg(long, value_enum, default_value_t)]
     pub mode: Mode,
+    /// Config file; defaults to `~/.config/dv/config.toml`.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
     /// Load and index without starting the UI, then print a summary (benchmarks).
     #[arg(long, hide = true)]
     pub index_only: bool,
@@ -98,52 +103,60 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 /// # Errors
 /// Unreadable input, parse errors (`--index-only`) or terminal failures.
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
-    match (open_input(cli)?, cli.index_only) {
-        (
-            Input::Memory {
-                reader,
-                request,
-                label,
-                spool_at,
-            },
-            true,
-        ) => index_only(reader, &request, &label, spool_at).map(Some),
-        (
-            Input::Memory {
-                reader,
-                request,
-                spool_at,
-                ..
-            },
-            false,
-        ) => tui(move |mut sink, cancel| {
-            load_spooled(
-                reader,
-                &request,
-                spool_at,
-                &mut sink,
-                cancel,
-                StreamBudget::default(),
-            );
-        })
-        .map(|()| None),
-        (
-            Input::Stream {
-                file,
-                label,
-                format,
-            },
-            true,
-        ) => index_only_stream(file, &label, format).map(Some),
-        (Input::Stream { file, format, .. }, false) => tui(move |mut sink, cancel| {
-            load_stream(&file, format, &mut sink, cancel, StreamBudget::default());
-        })
-        .map(|()| None),
+    let path = cli.config.clone().or_else(config::default_path);
+    let (config, warning) = path.map_or_else(|| (Config::default(), None), |p| config::load(&p));
+    let limit = config.threshold.unwrap_or_else(|| threshold(system_ram()));
+    let budget = config
+        .memory_budget
+        .map_or_else(StreamBudget::default, StreamBudget::within);
+    let input = open_input(cli, limit)?;
+    if cli.index_only {
+        if let Some(warning) = &warning {
+            eprintln!("dv: {warning}");
+        }
+        return index_only_input(input, budget).map(Some);
+    }
+    tui(loader(input, budget), config.theme, warning).map(|()| None)
+}
+
+/// The UI's loader thread body for `input`.
+type Loader = Box<dyn FnOnce(&mut dyn FnMut(LoadEvent<Document>), &AtomicBool) + Send>;
+
+fn loader(input: Input, budget: StreamBudget) -> Loader {
+    match input {
+        Input::Memory {
+            reader,
+            request,
+            spool_at,
+            ..
+        } => Box::new(move |mut sink, cancel| {
+            load_spooled(reader, &request, spool_at, &mut sink, cancel, budget);
+        }),
+        Input::Stream { file, format, .. } => Box::new(move |mut sink, cancel| {
+            load_stream(&file, format, &mut sink, cancel, budget);
+        }),
+    }
+}
+
+/// Loads `input` without the UI and summarizes it.
+fn index_only_input(input: Input, budget: StreamBudget) -> Result<String, CliError> {
+    match input {
+        Input::Memory {
+            reader,
+            request,
+            label,
+            spool_at,
+        } => index_only(reader, &request, &label, spool_at, budget),
+        Input::Stream {
+            file,
+            label,
+            format,
+        } => index_only_stream(file, &label, format, budget),
     }
 }
 
 /// The file named on the command line, or stdin when omitted or `-` (FR-1, FR-2).
-fn open_input(cli: &Cli) -> Result<Input, CliError> {
+fn open_input(cli: &Cli, limit: u64) -> Result<Input, CliError> {
     let format = cli.format.map(Format::from);
     let base = Request {
         format,
@@ -159,7 +172,7 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
             })?;
             let size_hint = file.metadata().ok().map(|m| m.len());
             let detected = detect(Some(path), &head(&file), format);
-            if choose(cli.mode, size_hint, system_ram(), detected)? == Storage::Stream {
+            if choose(cli.mode, size_hint, limit, detected)? == Storage::Stream {
                 return Ok(Input::Stream {
                     file,
                     label,
@@ -183,18 +196,18 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
             reader: Box::new(io::stdin()),
             request: base,
             label: "<stdin>".to_owned(),
-            spool_at: stdin_spool(cli.mode),
+            spool_at: stdin_spool(cli.mode, limit),
         }),
     }
 }
 
 /// Piped input moves to a temp file past this many bytes: at once when streaming, never
 /// in memory mode, and past the auto threshold otherwise.
-fn stdin_spool(mode: Mode) -> u64 {
+fn stdin_spool(mode: Mode, limit: u64) -> u64 {
     match mode {
         Mode::Stream => 0,
         Mode::Memory => u64::MAX,
-        Mode::Auto => threshold(system_ram()),
+        Mode::Auto => limit,
     }
 }
 
@@ -222,6 +235,7 @@ fn index_only(
     request: &Request,
     path: &str,
     spool_at: u64,
+    budget: StreamBudget,
 ) -> Result<String, CliError> {
     let mut outcome = None;
     let sink = &mut |event| {
@@ -229,7 +243,7 @@ fn index_only(
             outcome = Some(result);
         }
     };
-    let (cancel, budget) = (AtomicBool::new(false), StreamBudget::default());
+    let cancel = AtomicBool::new(false);
     load_spooled(file, request, spool_at, sink, &cancel, budget);
     match outcome {
         Some(Ok(tree)) => Ok(format!("indexed {} bytes", tree.stats().bytes)),
@@ -239,9 +253,7 @@ fn index_only(
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(
-    loader: impl FnOnce(&mut dyn FnMut(LoadEvent<Document>), &AtomicBool) + Send + 'static,
-) -> Result<(), CliError> {
+fn tui(loader: Loader, theme: Theme, warning: Option<String>) -> Result<(), CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
@@ -249,15 +261,21 @@ fn tui(
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
         loader(&mut sink, &loader_cancel);
     });
-    let mut app = App::new(cancel).with_events(tx.clone());
+    let mut app = App::new(cancel)
+        .with_events(tx.clone())
+        .with_config(theme, warning);
     thread::spawn(move || forward_input(&tx));
     let mut guard = TerminalGuard::enter()?;
     Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
 }
 
 /// Streams and indexes a file without starting the UI (benchmarks, NFR-12).
-fn index_only_stream(file: File, path: &str, format: Format) -> Result<String, CliError> {
-    let budget = StreamBudget::default();
+fn index_only_stream(
+    file: File,
+    path: &str,
+    format: Format,
+    budget: StreamBudget,
+) -> Result<String, CliError> {
     let fail = |err: &dyn std::fmt::Display| CliError::Parse(format!("{path}: {err}"));
     let source = FileSource::new(file, budget.parse_cache).map_err(|e| fail(&e))?;
     let (limits, spill, go_on) = (budget.stream, budget.spill, |_| ControlFlow::Continue(()));

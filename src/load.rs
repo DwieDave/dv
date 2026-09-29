@@ -197,26 +197,36 @@ pub struct StreamBudget {
     pub publish_every: u64,
 }
 
+/// Streaming mode's default memory budget (NFR-11).
+pub const DEFAULT_BUDGET: u64 = 512 << 20;
+
 impl Default for StreamBudget {
-    /// About 512 MB in total (NFR-11).
     fn default() -> Self {
-        Self {
-            parse_cache: 32 << 20,
-            view_cache: 128 << 20,
-            spill: SpillLimits {
-                cache: 64 << 20,
-                ..SpillLimits::default()
-            },
-            stream: StreamLimits {
-                initial: 4 << 20,
-                max: 128 << 20,
-            },
-            publish_every: 16 << 20,
-        }
+        Self::within(DEFAULT_BUDGET)
     }
 }
 
 impl StreamBudget {
+    /// Caches and buffers sized to fit `total` bytes (`mode.memory_budget`, FR-25): the parser's
+    /// cache takes 1/16, each view 1/4, the spilled index 1/8, and the longest token 1/4.
+    #[must_use]
+    pub fn within(total: u64) -> Self {
+        let part = |n: u64| total / n;
+        Self {
+            parse_cache: part(16),
+            view_cache: part(4),
+            spill: SpillLimits {
+                cache: part(8),
+                ..SpillLimits::default()
+            },
+            stream: StreamLimits {
+                initial: to_usize(part(128)),
+                max: to_usize(part(4)),
+            },
+            publish_every: 16 << 20,
+        }
+    }
+
     /// Small buffers and frequent publishes, for tests.
     #[must_use]
     pub fn testing() -> Self {
@@ -753,6 +763,29 @@ mod tests {
         assert_eq!(
             doc.children(root, 0..n).unwrap(),
             mem.children(root, 0..n).unwrap()
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn budgets_scale_and_stay_within_their_total(total in (64u64 << 20)..(64u64 << 30)) {
+            let b = StreamBudget::within(total);
+            let used = b.parse_cache + 2 * b.view_cache + b.spill.cache + b.stream.max as u64;
+            proptest::prop_assert!(used <= total, "{} > {}", used, total);
+            proptest::prop_assert!(b.stream.initial <= b.stream.max);
+        }
+    }
+
+    #[test]
+    fn the_default_budget_is_512_mib() {
+        let (a, b) = (StreamBudget::default(), StreamBudget::within(512 << 20));
+        assert_eq!(
+            (a.parse_cache, a.view_cache, a.spill.cache, a.stream.max),
+            (32 << 20, 128 << 20, 64 << 20, 128 << 20)
+        );
+        assert_eq!(
+            (b.parse_cache, b.view_cache, b.spill.cache, b.stream.max),
+            (a.parse_cache, a.view_cache, a.spill.cache, a.stream.max)
         );
     }
 

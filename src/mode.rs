@@ -29,17 +29,18 @@ pub fn threshold(ram: u64) -> u64 {
     MAX_AUTO_MEMORY.min(ram / 4)
 }
 
-/// Decides the storage for a document of `len` bytes (`None` when unknown, e.g. stdin).
+/// Decides the storage for a document of `len` bytes (`None` when unknown, e.g. stdin);
+/// `auto` streams documents larger than `limit` (see [`threshold`]).
 ///
 /// # Errors
 /// `YamlTooLarge` when YAML would have to be streamed.
 pub fn choose(
     mode: Mode,
     len: Option<u64>,
-    ram: u64,
+    limit: u64,
     format: Format,
 ) -> Result<Storage, ModeError> {
-    let too_big = len.is_some_and(|len| len > threshold(ram));
+    let too_big = len.is_some_and(|len| len > limit);
     let storage = match mode {
         Mode::Stream => Storage::Stream,
         Mode::Auto if too_big => Storage::Stream,
@@ -123,13 +124,13 @@ mod tests {
         ];
         for (mode, len, format, expected) in table {
             assert_eq!(
-                choose(mode, len, ram, format),
+                choose(mode, len, threshold(ram), format),
                 expected,
                 "{mode:?} {len:?} {format:?}"
             );
         }
         assert_eq!(
-            choose(Mode::Auto, Some(2 * GB), 4 * GB, Format::Json),
+            choose(Mode::Auto, Some(2 * GB), threshold(4 * GB), Format::Json),
             Ok(Storage::Stream),
             "small machines stream sooner"
         );

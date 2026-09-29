@@ -175,3 +175,23 @@ fn late_failures_leave_a_persistent_banner_above_the_status_bar() {
     assert_eq!(model.height, 3, "the banner takes a tree row");
     assert!(matches!(app.screen, Screen::Ready(_)));
 }
+
+#[test]
+fn the_config_theme_and_warning_reach_the_document_view() {
+    use ratatui::style::{Color, Style};
+    let theme = Theme {
+        key: Style::new().fg(Color::Red),
+        ..Theme::default()
+    };
+    let mut app = app().with_config(theme, Some("config: unknown theme \"x\"".to_owned()));
+    update_app(&mut app, loaded(br#"{"a": 1}"#));
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready")
+    };
+    assert_eq!(model.theme, theme);
+    assert!(
+        screen_text(&app).contains("config: unknown theme"),
+        "{}",
+        screen_text(&app)
+    );
+}

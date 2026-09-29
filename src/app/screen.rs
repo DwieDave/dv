@@ -44,6 +44,10 @@ pub struct App<T> {
     /// The event channel; when set, searches run on a worker that reports here.
     pub events: Option<Sender<AppEvent<T>>>,
     pub quit: bool,
+    /// Colors from the config (FR-21).
+    pub theme: Theme,
+    /// A config problem, shown once the document opens.
+    pub warning: Option<String>,
 }
 
 impl<T: TreeIndex> App<T> {
@@ -60,6 +64,18 @@ impl<T: TreeIndex> App<T> {
             size: (80, 24),
             events: None,
             quit: false,
+            theme: Theme::default(),
+            warning: None,
+        }
+    }
+
+    /// Uses the config's theme and reports its problem, if any, in the status bar.
+    #[must_use]
+    pub fn with_config(self, theme: Theme, warning: Option<String>) -> Self {
+        Self {
+            theme,
+            warning,
+            ..self
         }
     }
 
@@ -99,6 +115,10 @@ pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event:
 /// Shows the loaded document (or the failure).
 fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T, LoadFailure>) {
     app.screen = ready_or_failed(result, app.size);
+    if let Screen::Ready(model) = &mut app.screen {
+        model.theme = app.theme;
+        model.status = app.warning.take();
+    }
     if let (Screen::Ready(model), Some(events)) = (&mut app.screen, &app.events) {
         attach_worker(model, events);
     }
@@ -195,7 +215,7 @@ pub fn view_app<T: TreeIndex>(app: &App<T>, frame: &mut Frame) {
             frame.render_widget(gauge(progress), centered(frame.area(), 3));
         }
         Screen::Failed(failure) => {
-            let text = Paragraph::new(error_lines(failure, &Theme::default()));
+            let text = Paragraph::new(error_lines(failure, &app.theme));
             frame.render_widget(text, frame.area());
         }
     }
