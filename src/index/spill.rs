@@ -6,7 +6,11 @@ use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 
+use std::sync::{Arc, RwLock};
+
 use tempfile::tempfile;
+
+use crate::index::live::{LiveStore, LiveView, OpenNode, Shared};
 
 use crate::index::store::{BigNode, Builder, CHECKPOINT_EVERY, Fanout, MIN_NODE_LEN, NodeStore};
 use crate::index::to_usize;
@@ -70,6 +74,8 @@ pub struct SpillBuilder {
     cps: U64File,
     cache: u64,
     error: Option<io::Error>,
+    /// Set when readers follow the build; all file writes then wait for `publish`.
+    live: Option<Arc<Shared>>,
 }
 
 impl SpillBuilder {
@@ -84,6 +90,7 @@ impl SpillBuilder {
             cps: U64File::new(tempfile()?, limits.stack),
             cache: limits.cache,
             error: None,
+            live: None,
         })
     }
 
@@ -141,6 +148,10 @@ impl Builder for SpillBuilder {
             count: 0,
             cp_base: self.stack.len(),
         });
+        if self.live.is_some() {
+            let provisional = self.records.put(slot, encode([start, 0, 0, 0]));
+            provisional.unwrap_or_else(|err| self.fail(err));
+        }
         SpillSlot(slot)
     }
 
@@ -220,6 +231,10 @@ struct Records {
     low: u64,
     window: Vec<[u8; 32]>,
     limit: usize,
+    /// Hold every write until `flush` (live mode).
+    defer: bool,
+    /// Late closes waiting for `flush` in live mode.
+    late: Vec<(u64, [u8; 32])>,
 }
 
 impl Records {
@@ -229,10 +244,16 @@ impl Records {
             low: 0,
             window: Vec::new(),
             limit: limit.max(1),
+            defer: false,
+            late: Vec::new(),
         }
     }
 
     fn put(&mut self, slot: u64, record: [u8; 32]) -> io::Result<()> {
+        if slot < self.low && self.defer {
+            self.late.push((slot, record));
+            return Ok(());
+        }
         if slot < self.low {
             return self.file.write_all_at(&record, slot * RECORD);
         }
@@ -241,7 +262,7 @@ impl Records {
             self.window.resize(i + 1, [0; 32]);
         }
         self.window[i] = record;
-        if self.window.len() >= self.limit {
+        if self.window.len() >= self.limit && !self.defer {
             self.flush()
         } else {
             Ok(())
@@ -259,6 +280,9 @@ impl Records {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        for (slot, record) in std::mem::take(&mut self.late) {
+            self.file.write_all_at(&record, slot * RECORD)?;
+        }
         let bytes: Vec<u8> = self.window.iter().flatten().copied().collect();
         self.file.write_all_at(&bytes, self.low * RECORD)?;
         self.low += self.window.len() as u64;
@@ -274,6 +298,8 @@ struct U64File {
     flushed: u64,
     tail: Vec<u64>,
     limit: usize,
+    /// Hold every write until `flush` (live mode).
+    defer: bool,
 }
 
 impl U64File {
@@ -283,6 +309,7 @@ impl U64File {
             flushed: 0,
             tail: Vec::new(),
             limit: limit.max(1),
+            defer: false,
         }
     }
 
@@ -292,7 +319,7 @@ impl U64File {
 
     fn push(&mut self, value: u64) -> io::Result<()> {
         self.tail.push(value);
-        if self.tail.len() >= self.limit {
+        if self.tail.len() >= self.limit && !self.defer {
             self.flush()
         } else {
             Ok(())
@@ -379,6 +406,60 @@ impl NodeStore for SpillStore {
     }
 }
 
+impl SpillBuilder {
+    /// A builder whose progress readers can follow through the returned [`LiveStore`].
+    ///
+    /// # Errors
+    /// Temp file creation failures.
+    pub fn live(limits: SpillLimits) -> Result<(Self, LiveStore), SourceError> {
+        let mut builder = Self::new(limits)?;
+        builder.records.defer = true;
+        builder.stack.defer = true;
+        builder.cps.defer = true;
+        let shared = Shared {
+            view: RwLock::new(LiveView::default()),
+            records: builder.records.file.try_clone()?,
+            cps: builder.cps.file.try_clone()?,
+            stack: builder.stack.file.try_clone()?,
+        };
+        let shared = Arc::new(shared);
+        builder.live = Some(Arc::clone(&shared));
+        Ok((builder, LiveStore { shared }))
+    }
+
+    /// Makes everything parsed before `frontier` visible to readers.
+    pub fn publish(&mut self, frontier: u64, done: bool) {
+        let Some(shared) = self.live.clone() else {
+            return;
+        };
+        let Ok(mut view) = shared.view.write() else {
+            return;
+        };
+        let flushed = self
+            .records
+            .flush()
+            .and_then(|()| self.cps.flush())
+            .and_then(|()| self.stack.flush());
+        flushed.unwrap_or_else(|err| self.fail(err));
+        let opens = self
+            .open
+            .iter()
+            .map(|o| OpenNode {
+                slot: o.slot,
+                start: o.start,
+                count: o.count,
+                cp_base: o.cp_base,
+            })
+            .collect();
+        *view = LiveView {
+            next: self.next,
+            frontier,
+            opens,
+            done,
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::ControlFlow;
@@ -423,6 +504,79 @@ mod tests {
                 prop_assert_eq!(a.and_then(|n| n.fanout.map(|f| f.count)), b.and_then(|n| n.fanout.map(|f| f.count)));
                 prop_assert_eq!(checkpoints(&vec, a), checkpoints(&spill, b));
             }
+        }
+    }
+
+    fn live_checks(text: &str, buffer: usize) {
+        use crate::index::live::NodeState;
+        use crate::json::stream::{StreamLimits, parse_stream};
+        use crate::source::MemSource;
+        let final_store = Parser::with_builder(
+            text.as_bytes(),
+            |_| ControlFlow::Continue(()),
+            VecStoreBuilder::default(),
+        )
+        .run_with()
+        .unwrap()
+        .1
+        .finish();
+        let (builder, live) = SpillBuilder::live(SpillLimits {
+            window: 2,
+            stack: 2,
+            cache: 4096,
+        })
+        .unwrap();
+        let limits = StreamLimits {
+            initial: buffer,
+            max: 1 << 20,
+        };
+        let source = MemSource::new(text.as_bytes().to_vec());
+        let publish = |b: &mut SpillBuilder, frontier: u64| {
+            b.publish(frontier, false);
+            let view = live.view();
+            assert_eq!(view.frontier, frontier);
+            for (start, byte) in text
+                .bytes()
+                .enumerate()
+                .take(crate::index::to_usize(frontier))
+            {
+                if !matches!(byte, b'{' | b'[') {
+                    continue;
+                }
+                let start = start as u64;
+                let expected = final_store.node_at(start).unwrap();
+                match live.node(start).unwrap() {
+                    Some(NodeState::Closed(node)) => {
+                        assert_eq!(Some(node), expected, "closed node at {start}");
+                    }
+                    Some(NodeState::Open { .. }) => assert!(
+                        view.opens.iter().any(|o| o.start == start),
+                        "open node {start} not listed"
+                    ),
+                    None => assert!(
+                        expected.is_none_or(|n| n.end > frontier),
+                        "node at {start} closed before {frontier} but missing"
+                    ),
+                }
+            }
+        };
+        let parsed = parse_stream(
+            &source,
+            builder,
+            limits,
+            |_| ControlFlow::Continue(()),
+            publish,
+        )
+        .unwrap();
+        let _ = parsed;
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn live_store_agrees_with_the_final_index(value in json_value(), buffer in 1usize..48) {
+            let (text, _) = layout(&value, " ");
+            live_checks(&text, buffer);
         }
     }
 }

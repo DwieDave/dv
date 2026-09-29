@@ -43,6 +43,7 @@ pub fn parse_stream<R: Source, B: Builder>(
     builder: B,
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
+    mut publish: impl FnMut(&mut B, u64),
 ) -> Result<StreamParsed<B>, IndexError> {
     let mut window = Window::new(source, limits);
     window.refill(0)?;
@@ -56,6 +57,7 @@ pub fn parse_stream<R: Source, B: Builder>(
         match outcome {
             Ok(_) => break,
             Err(err) if err.kind == ParseErrorKind::UnexpectedEof && !window.eof => {
+                publish(&mut parser.builder, window.base + pos as u64);
                 window.refill(pos)?;
                 parser.pos = 0;
             }
@@ -223,6 +225,7 @@ mod tests {
             VecStoreBuilder::default(),
             limits,
             |_| ControlFlow::Continue(()),
+            |_, _| {},
         )
     }
 
@@ -292,6 +295,7 @@ mod tests {
             VecStoreBuilder::default(),
             limits,
             |_| ControlFlow::Continue(()),
+            |_, _| {},
         )
         .unwrap_err();
         assert!(
