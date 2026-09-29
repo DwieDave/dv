@@ -5,7 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+crossterm = "0.29.0"
 memchr = "2.8.3"
+ratatui = "0.30.2"
 thiserror = "2.0.21"
 
 [lints.rust]
