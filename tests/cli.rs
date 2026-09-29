@@ -121,6 +121,18 @@ fn stdin_is_read_with_dash_or_no_path() {
 }
 
 #[test]
+fn piped_input_can_be_streamed() {
+    let out = dv_stdin(&["--index-only", "--mode", "stream"], b"{\"a\": [1, 2]}").unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "indexed 13 bytes"
+    );
+    let lines = dv_stdin(&["--index-only", "--mode", "stream"], b"{\"a\":1}\n{bad\n").unwrap();
+    assert!(lines.status.success(), "{lines:?}");
+}
+
+#[test]
 fn piped_ndjson_is_detected_from_content() {
     let out = dv_stdin(&["--index-only"], b"{\"a\":1}\n{bad\n{\"a\":2}\n").unwrap();
     assert!(out.status.success(), "{out:?}");

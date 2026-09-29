@@ -18,8 +18,8 @@ use crate::app::screen::{App, AppEvent};
 use crate::app::terminal::TerminalGuard;
 use crate::document::Document;
 use crate::format::{Format, SNIFF_LEN, detect};
-use crate::load::{LoadEvent, Request, StreamBudget, load, load_stream};
-use crate::mode::{ModeError, Storage, choose, system_ram};
+use crate::load::{LoadEvent, Request, StreamBudget, load_spooled, load_stream};
+use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
 use crate::source::file::FileSource;
 use crate::stream_tree::StreamTree;
 use crate::tree::TreeIndex;
@@ -63,8 +63,6 @@ pub struct Cli {
 pub enum CliError {
     #[error("{path}: {source}")]
     Open { path: String, source: io::Error },
-    #[error("{0} is not supported yet")]
-    Unsupported(&'static str),
     #[error("{0}")]
     Parse(String),
     #[error("terminal: {0}")]
@@ -77,11 +75,12 @@ pub enum CliError {
 
 /// A readable input and the facts used to load it.
 enum Input {
-    /// Read fully into memory.
+    /// Read into memory; piped input longer than `spool_at` moves to a temp file (FR-28).
     Memory {
         reader: Box<dyn Read + Send>,
         request: Request,
         label: String,
+        spool_at: u64,
     },
     /// Indexed from disk (FR-22).
     Stream {
@@ -97,7 +96,7 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 /// Runs `dv`; returns a summary to print for `--index-only`.
 ///
 /// # Errors
-/// Unsupported options, unreadable input, parse errors (`--index-only`) or terminal failures.
+/// Unreadable input, parse errors (`--index-only`) or terminal failures.
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
     match (open_input(cli)?, cli.index_only) {
         (
@@ -105,15 +104,29 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
                 reader,
                 request,
                 label,
+                spool_at,
             },
             true,
-        ) => index_only(reader, &request, &label).map(Some),
+        ) => index_only(reader, &request, &label, spool_at).map(Some),
         (
             Input::Memory {
-                reader, request, ..
+                reader,
+                request,
+                spool_at,
+                ..
             },
             false,
-        ) => tui(move |mut sink, cancel| load(reader, &request, &mut sink, cancel)).map(|()| None),
+        ) => tui(move |mut sink, cancel| {
+            load_spooled(
+                reader,
+                &request,
+                spool_at,
+                &mut sink,
+                cancel,
+                StreamBudget::default(),
+            );
+        })
+        .map(|()| None),
         (
             Input::Stream {
                 file,
@@ -162,15 +175,26 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
                 reader: Box::new(file),
                 request,
                 label,
+                spool_at: u64::MAX,
             })
         }
         None if io::stdin().is_terminal() => Err(CliError::NoInput),
-        None if cli.mode == Mode::Stream => Err(CliError::Unsupported("streaming stdin")),
         None => Ok(Input::Memory {
             reader: Box::new(io::stdin()),
             request: base,
             label: "<stdin>".to_owned(),
+            spool_at: stdin_spool(cli.mode),
         }),
+    }
+}
+
+/// Piped input moves to a temp file past this many bytes: at once when streaming, never
+/// in memory mode, and past the auto threshold otherwise.
+fn stdin_spool(mode: Mode) -> u64 {
+    match mode {
+        Mode::Stream => 0,
+        Mode::Memory => u64::MAX,
+        Mode::Auto => threshold(system_ram()),
     }
 }
 
@@ -193,18 +217,20 @@ impl From<FormatArg> for Format {
 }
 
 /// Loads and indexes without starting the UI (benchmarks, NFR-1).
-fn index_only(file: impl Read, request: &Request, path: &str) -> Result<String, CliError> {
+fn index_only(
+    file: impl Read,
+    request: &Request,
+    path: &str,
+    spool_at: u64,
+) -> Result<String, CliError> {
     let mut outcome = None;
-    load(
-        file,
-        request,
-        &mut |event| {
-            if let LoadEvent::Loaded(result) = event {
-                outcome = Some(result);
-            }
-        },
-        &AtomicBool::new(false),
-    );
+    let sink = &mut |event| {
+        if let LoadEvent::Loaded(result) = event {
+            outcome = Some(result);
+        }
+    };
+    let (cancel, budget) = (AtomicBool::new(false), StreamBudget::default());
+    load_spooled(file, request, spool_at, sink, &cancel, budget);
     match outcome {
         Some(Ok(tree)) => Ok(format!("indexed {} bytes", tree.stats().bytes)),
         Some(Err(failure)) => Err(CliError::Parse(format!("{path}: {}", failure.message))),

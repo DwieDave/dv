@@ -1,7 +1,7 @@
 //! Loading and indexing on a worker thread, reporting progress (FR-8, D-12).
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +19,7 @@ use crate::json::ndjson::{ParsedLines, parse_lines};
 use crate::json::parse::parse_with;
 use crate::json::stream::{StreamLimits, parse_stream};
 use crate::live_tree::LiveTree;
+use crate::mode::ModeError;
 use crate::position::Position;
 use crate::snippet::{Snippet, snippet};
 use crate::source::file::FileSource;
@@ -95,17 +96,91 @@ pub fn load(
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
 ) {
-    let outcome = match read_all(reader, request.size_hint, request.max_len, sink, cancel) {
-        Ok(Some(bytes)) => {
-            let format = detect(request.path.as_deref(), &bytes, request.format);
-            index(MemSource::new(bytes), format, sink, cancel)
+    let mut reader = reader;
+    match read_head(&mut reader, request, u64::MAX, sink, cancel) {
+        Ok(Some(Head::Whole(bytes) | Head::Longer(bytes))) => {
+            load_bytes(bytes, request, sink, cancel);
         }
-        Ok(None) => None,
-        Err(failure) => Some(Err(failure)),
-    };
-    if let Some(result) = outcome {
+        Ok(None) => {}
+        Err(failure) => sink(LoadEvent::Loaded(Err(failure))),
+    }
+}
+
+/// Reads piped input: up to `spool_at` bytes it loads in memory like [`load`]; longer input
+/// continues into a private temp file, which is then streamed (FR-2, FR-28).
+pub fn load_spooled(
+    mut reader: impl Read,
+    request: &Request,
+    spool_at: u64,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) {
+    match read_head(&mut reader, request, spool_at, sink, cancel) {
+        Ok(Some(Head::Whole(bytes))) => load_bytes(bytes, request, sink, cancel),
+        Ok(Some(Head::Longer(head))) => {
+            spool_and_stream(head, reader, request, sink, cancel, budget);
+        }
+        Ok(None) => {}
+        Err(failure) => sink(LoadEvent::Loaded(Err(failure))),
+    }
+}
+
+/// Parses bytes read into memory and reports the document.
+fn load_bytes(
+    bytes: Vec<u8>,
+    request: &Request,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+) {
+    let format = detect(request.path.as_deref(), &bytes, request.format);
+    if let Some(result) = index(MemSource::new(bytes), format, sink, cancel) {
         sink(LoadEvent::Loaded(result.map(Document::Mem)));
     }
+}
+
+/// Copies input past the spool threshold to a temp file and streams it.
+fn spool_and_stream(
+    head: Vec<u8>,
+    reader: impl Read,
+    request: &Request,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) {
+    let format = detect(None, &head, request.format);
+    if format == Format::Yaml {
+        return sink(LoadEvent::Loaded(Err(plain(ModeError::YamlTooLarge))));
+    }
+    match spool(head, reader, sink, cancel) {
+        Ok(Some(file)) => load_stream(&file, format, sink, cancel, budget),
+        Ok(None) => {}
+        Err(failure) => sink(LoadEvent::Loaded(Err(failure))),
+    }
+}
+
+/// Writes `head` and the rest of `reader` to an unlinked temp file (created 0600);
+/// `None` when cancelled.
+fn spool(
+    head: Vec<u8>,
+    mut reader: impl Read,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+) -> Result<Option<File>, LoadFailure> {
+    let mut file = tempfile::tempfile().map_err(plain)?;
+    file.write_all(&head).map_err(plain)?;
+    let mut done = head.len() as u64;
+    drop(head);
+    while !cancel.load(Ordering::Relaxed) {
+        let copied = io::copy(&mut (&mut reader).take(CHUNK), &mut file).map_err(plain)?;
+        done += copied;
+        let (phase, total) = (Phase::Reading, done);
+        sink(LoadEvent::Progress(Progress { phase, done, total }));
+        if copied == 0 {
+            return Ok(Some(file));
+        }
+    }
+    Ok(None)
 }
 
 /// Memory and pacing for a streaming load (FR-25).
@@ -304,22 +379,33 @@ fn first_value(source: &impl Source) -> Result<u64, SourceError> {
     }
 }
 
-/// Reads everything in [`CHUNK`]s; `Ok(None)` when cancelled.
-fn read_all(
-    mut reader: impl Read,
-    size_hint: Option<u64>,
-    max_len: u64,
+/// Input read so far: all of it, or the head of input longer than the spool threshold.
+enum Head {
+    Whole(Vec<u8>),
+    Longer(Vec<u8>),
+}
+
+/// Reads in [`CHUNK`]s until the end, or until more than `spool_at` bytes have arrived;
+/// `Ok(None)` when cancelled.
+fn read_head(
+    reader: &mut impl Read,
+    request: &Request,
+    spool_at: u64,
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
-) -> Result<Option<Vec<u8>>, LoadFailure> {
-    let expected = size_hint.unwrap_or(0).min(max_len);
+) -> Result<Option<Head>, LoadFailure> {
+    let max_len = request.max_len;
+    let expected = request.size_hint.unwrap_or(0).min(max_len).min(spool_at);
     let mut bytes = Vec::with_capacity(to_usize(expected));
     while !cancel.load(Ordering::Relaxed) {
-        let read = (&mut reader)
+        let read = reader
             .take(CHUNK)
             .read_to_end(&mut bytes)
             .map_err(|e| LoadFailure::plain(&e))?;
         let done = bytes.len() as u64;
+        if done > spool_at {
+            return Ok(Some(Head::Longer(bytes)));
+        }
         if done > max_len {
             return Err(LoadFailure::plain(&SourceError::TooLarge { max_len }));
         }
@@ -329,7 +415,7 @@ fn read_all(
             total: expected.max(done),
         }));
         if read == 0 {
-            return Ok(Some(bytes));
+            return Ok(Some(Head::Whole(bytes)));
         }
     }
     Ok(None)
@@ -666,6 +752,64 @@ mod tests {
         assert_eq!(
             doc.children(root, 0..n).unwrap(),
             mem.children(root, 0..n).unwrap()
+        );
+    }
+
+    fn spooled(input: &[u8], spool_at: u64) -> Vec<LoadEvent<Document>> {
+        let request = Request {
+            max_len: u64::from(u32::MAX),
+            ..Request::default()
+        };
+        let mut events = Vec::new();
+        let sink = &mut |e| events.push(e);
+        let cancel = AtomicBool::new(false);
+        load_spooled(
+            input,
+            &request,
+            spool_at,
+            sink,
+            &cancel,
+            StreamBudget::testing(),
+        );
+        events
+    }
+
+    #[test]
+    fn small_piped_input_stays_in_memory() {
+        let events = spooled(br#"{"a": [1, 2]}"#, 1 << 20);
+        assert!(matches!(
+            events.last(),
+            Some(LoadEvent::Loaded(Ok(Document::Mem(_))))
+        ));
+    }
+
+    #[test]
+    fn large_piped_input_spools_to_a_temp_file_and_streams() {
+        let items: Vec<String> = (0..5000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
+        let text = format!("[{}]", items.join(","));
+        let events = spooled(text.as_bytes(), 1000);
+        assert!(events.iter().any(|e| matches!(e, LoadEvent::Live(_))));
+        let Some(LoadEvent::Loaded(Ok(doc @ Document::Stream(_)))) = events.last() else {
+            panic!("not streamed")
+        };
+        let mem = MemTree::parse(MemSource::new(text.into_bytes())).unwrap();
+        assert_eq!(
+            crate::test_support::to_value(doc, doc.root().unwrap()),
+            crate::test_support::to_value(&mem, mem.root().unwrap())
+        );
+        let lines = "{\"a\":1}\n".repeat(500);
+        let events = spooled(lines.as_bytes(), 100);
+        let Some(LoadEvent::Loaded(Ok(doc))) = events.last() else {
+            panic!("no document")
+        };
+        assert_eq!((doc.format(), doc.streamed()), (Format::Ndjson, true));
+    }
+
+    #[test]
+    fn large_piped_yaml_cannot_be_streamed() {
+        let events = spooled("a: 1\n".repeat(1000).as_bytes(), 100);
+        assert!(
+            matches!(events.last(), Some(LoadEvent::Loaded(Err(f))) if f.message.contains("cannot be streamed"))
         );
     }
 
