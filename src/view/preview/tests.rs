@@ -2,6 +2,7 @@ use proptest::prelude::*;
 use serde_json::Value;
 
 use super::*;
+use crate::json::format::Style;
 use crate::source::MemSource;
 use crate::test_support::{json_value, layout};
 use crate::tree::MemTree;
@@ -77,5 +78,54 @@ fn ndjson_roots_and_invalid_records_get_summaries() {
     assert_eq!(
         preview_lines(&tree, &bad, 0, 5).unwrap().lines,
         ["✗ unexpected byte 0x62", "{bad"]
+    );
+}
+
+proptest! {
+    #[test]
+    fn value_text_matches_serde(value in json_value(), child in any::<prop::sample::Index>()) {
+        let (text, _) = layout(&value, " \n");
+        let tree = tree_of(&text);
+        let root = TreeState::new(&tree).unwrap().root;
+        let (item, expected) = match &value {
+            Value::Object(map) if !map.is_empty() && map.len() <= 1024 => {
+                let i = child.index(map.len());
+                (resolve(&tree, &root, &[i as u64]).unwrap().unwrap(), map.values().nth(i).unwrap())
+            }
+            _ => (root.row(), &value),
+        };
+        let minified = value_text(&tree, &item, Style::Minify, usize::MAX).unwrap();
+        let pretty = value_text(&tree, &item, Style::Pretty, usize::MAX).unwrap();
+        prop_assert_eq!(minified, Some(serde_json::to_string(expected).unwrap()));
+        prop_assert_eq!(pretty, Some(serde_json::to_string_pretty(expected).unwrap()));
+    }
+}
+
+#[test]
+fn value_text_respects_the_limit_and_covers_buckets_and_records() {
+    let items: Vec<String> = (0..1100).map(|i| i.to_string()).collect();
+    let tree = tree_of(&format!("[{}]", items.join(", ")));
+    let root = TreeState::new(&tree).unwrap().root;
+    assert_eq!(
+        value_text(&tree, &root.row(), Style::Minify, 10).unwrap(),
+        None
+    );
+    let bucket = resolve(&tree, &root, &[1]).unwrap().unwrap();
+    let expected = format!(
+        "[{}]",
+        (1024..1100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    assert_eq!(
+        value_text(&tree, &bucket, Style::Minify, usize::MAX).unwrap(),
+        Some(expected)
+    );
+    let lines = MemTree::parse_lines(MemSource::new(b"{\"a\": 1}\n[2]\n".to_vec())).unwrap();
+    let root = TreeState::new(&lines).unwrap().root;
+    assert_eq!(
+        value_text(&lines, &root.row(), Style::Minify, usize::MAX).unwrap(),
+        Some("{\"a\":1}\n[2]".into())
     );
 }

@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::prompt::PromptKind;
-use crate::app::{Msg, PreviewCmd};
+use crate::app::{CopyWhat, Msg, PreviewCmd};
 use crate::search::Direction;
 use crate::view::nav::Nav;
 
@@ -18,9 +18,9 @@ impl Keymap {
     pub fn press(&mut self, key: KeyEvent) -> Option<Msg> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (self.pending.take(), key.code) {
-            (Some(prefix), KeyCode::Char(c)) => chord(prefix, c).map(Msg::Nav),
+            (Some(prefix), KeyCode::Char(c)) => chord(prefix, c),
             (Some(_), _) => None,
-            (None, KeyCode::Char(c @ ('g' | 'z'))) if !ctrl => {
+            (None, KeyCode::Char(c @ ('g' | 'z' | 'y'))) if !ctrl => {
                 self.pending = Some(c);
                 None
             }
@@ -29,14 +29,17 @@ impl Keymap {
     }
 }
 
-fn chord(prefix: char, c: char) -> Option<Nav> {
-    match (prefix, c) {
-        ('g', 'g') => Some(Nav::Top),
-        ('z', 'o') => Some(Nav::ExpandChildren),
-        ('z', 'c') => Some(Nav::CollapseSubtree),
-        ('z', 'M') => Some(Nav::CollapseAll),
-        _ => None,
-    }
+fn chord(prefix: char, c: char) -> Option<Msg> {
+    Some(match (prefix, c) {
+        ('g', 'g') => Msg::Nav(Nav::Top),
+        ('z', 'o') => Msg::Nav(Nav::ExpandChildren),
+        ('z', 'c') => Msg::Nav(Nav::CollapseSubtree),
+        ('z', 'M') => Msg::Nav(Nav::CollapseAll),
+        ('y', 'p') => Msg::Copy(CopyWhat::Path),
+        ('y', 'y') => Msg::Copy(CopyWhat::Minified),
+        ('y', 'Y') => Msg::Copy(CopyWhat::Pretty),
+        _ => return None,
+    })
 }
 
 fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
@@ -101,6 +104,9 @@ mod tests {
             (keys("zc"), Msg::Nav(Nav::CollapseSubtree)),
             (keys("zM"), Msg::Nav(Nav::CollapseAll)),
             (keys("q"), Msg::Quit),
+            (keys("yp"), Msg::Copy(CopyWhat::Path)),
+            (keys("yy"), Msg::Copy(CopyWhat::Minified)),
+            (keys("yY"), Msg::Copy(CopyWhat::Pretty)),
             (vec![ctrl('d')], Msg::Nav(Nav::HalfDown)),
             (vec![ctrl('u')], Msg::Nav(Nav::HalfUp)),
             (vec![KeyCode::Down.into()], Msg::Nav(Nav::Down)),

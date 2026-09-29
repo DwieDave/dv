@@ -20,6 +20,7 @@ use crate::app::keymap::Keymap;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::search::{Job, Outcome, SearchState};
 use crate::index::IndexError;
+use crate::json::format::Style;
 use crate::json::lex::Kind;
 use crate::path::{parse, render};
 use crate::search::{Direction, Query, Scope};
@@ -30,7 +31,7 @@ use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
-use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines};
+use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines, value_text};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
 
@@ -55,6 +56,10 @@ pub struct Model<T> {
     /// An open input line, which takes all keys.
     pub prompt: Option<Prompt>,
     pub search: Option<SearchState>,
+    /// Transient information for the status bar; the next key clears it.
+    pub note: Option<String>,
+    /// Side effects for the app layer to perform (keeps `update` pure).
+    pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
     pub jobs: Option<Sender<Job>>,
     /// Current search generation; older jobs and outcomes are stale.
@@ -80,6 +85,8 @@ impl<T: TreeIndex> Model<T> {
             status: None,
             prompt: None,
             search: None,
+            note: None,
+            effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
             quit: false,
@@ -101,7 +108,25 @@ pub enum Msg {
     SearchStep(Direction),
     SearchOutcome(Outcome),
     Preview(PreviewCmd),
+    Copy(CopyWhat),
 }
+
+/// What `y` chords copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyWhat {
+    Path,
+    Minified,
+    Pretty,
+}
+
+/// Work with side effects, performed by the app layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    Copy(String),
+}
+
+/// Largest value copied to the clipboard.
+const COPY_LIMIT: usize = 16 << 20;
 
 /// Preview pane commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +175,9 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
 }
 
 fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
+    if matches!(msg, Msg::Key(_)) {
+        model.note = None;
+    }
     match msg {
         Msg::Quit => model.quit = true,
         Msg::Redraw => {}
@@ -181,6 +209,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::SearchStep(direction) => search::step(model, direction),
         Msg::SearchOutcome(outcome) => search::apply(model, outcome),
         Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
+        Msg::Copy(what) => copy(model, what),
     }
 }
 
@@ -208,6 +237,32 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
                 prompt.error = Some(error);
             }
         }
+    }
+}
+
+/// Queues the cursor's path or value for the clipboard.
+fn copy<T: TreeIndex>(model: &mut Model<T>, what: CopyWhat) {
+    let style = match what {
+        CopyWhat::Path => None,
+        CopyWhat::Minified => Some(Style::Minify),
+        CopyWhat::Pretty => Some(Style::Pretty),
+    };
+    let text = match style {
+        None => cursor_facts(model).map(|(path, _)| Some(path)),
+        Some(style) => cursor_text(model, style),
+    };
+    match text {
+        Ok(Some(text)) => model.effects.push(Effect::Copy(text)),
+        Ok(None) => model.note = Some("too large to copy (limit 16 MiB)".to_owned()),
+        Err(err) => model.status = Some(err.to_string()),
+    }
+}
+
+fn cursor_text<T: TreeIndex>(model: &Model<T>, style: Style) -> Result<Option<String>, IndexError> {
+    let tree = &*model.tree;
+    match resolve(tree, &model.state.root, &model.state.cursor)? {
+        Some(item) => value_text(tree, &item, style, COPY_LIMIT),
+        None => Ok(None),
     }
 }
 
@@ -371,7 +426,10 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
         format: model.tree.format(),
         stats: model.tree.stats(),
         error: model.status.as_deref(),
-        note: model.search.as_ref().and_then(|s| s.note.as_deref()),
+        note: model
+            .note
+            .as_deref()
+            .or_else(|| model.search.as_ref().and_then(|s| s.note.as_deref())),
     };
     status_line(&status, width, &model.theme)
 }
@@ -546,6 +604,37 @@ mod tests {
         update(&mut model, Msg::Key(KeyCode::Char('l').into()));
         update(&mut model, wheel(10));
         assert_eq!(model.state.top, 1);
+    }
+
+    #[test]
+    fn y_chords_queue_copies_of_path_and_value() {
+        let mut model = model();
+        typed(&mut model, "jl");
+        typed(&mut model, "yp");
+        typed(&mut model, "yy");
+        typed(&mut model, "k");
+        typed(&mut model, "yY");
+        let expected = vec![
+            Effect::Copy(".a".into()),
+            Effect::Copy("[1,2]".into()),
+            Effect::Copy("{\n  \"a\": [\n    1,\n    2\n  ]\n}".into()),
+        ];
+        assert_eq!(model.effects, expected);
+    }
+
+    #[test]
+    fn notes_show_in_the_status_bar_until_the_next_key() {
+        let mut model = model();
+        model.note = Some("copied 5 bytes (pbcopy)".into());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
+        terminal.draw(|frame| view(&model, frame)).unwrap();
+        let row: String = (0..40)
+            .map(|x| terminal.backend().buffer()[(x, 2)].symbol())
+            .collect();
+        assert!(row.ends_with("copied 5 bytes (pbcopy)"), "{row}");
+        typed(&mut model, "j");
+        assert_eq!(model.note, None);
     }
 
     #[test]

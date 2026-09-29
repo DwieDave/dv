@@ -35,7 +35,9 @@ pub fn preview_lines(
         take,
     };
     match &item.kind {
-        RowKind::Bucket { container, range } => bucket(tree, *container, range, window),
+        RowKind::Bucket { container, range } => {
+            pretty(tree, &bucket_pieces(tree, *container, range)?, window)
+        }
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => {
             let records = match tree.child_count(*node)? {
                 Count::Known(n) => grouped(n),
@@ -49,6 +51,88 @@ pub fn preview_lines(
             _ => pretty(tree, &[Piece::Bytes(node.offset..*end)], window),
         },
     }
+}
+
+/// The whole text of `item` in `style`, or `None` when it exceeds `limit` bytes.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn value_text(
+    tree: &impl TreeIndex,
+    item: &RowItem,
+    style: Style,
+    limit: usize,
+) -> Result<Option<String>, IndexError> {
+    let pieces = match &item.kind {
+        RowKind::Bucket { container, range } => bucket_pieces(tree, *container, range)?,
+        RowKind::Value { node, .. } if node.offset == LINES_ROOT => {
+            return records_text(tree, *node, style, limit);
+        }
+        RowKind::Value { node, end, .. } if node.kind == Kind::Invalid => {
+            let raw = tree.bytes(node.offset..*end)?;
+            let text = String::from_utf8_lossy(&raw).trim_end().to_owned();
+            return Ok(Some(text).filter(|t| t.len() <= limit));
+        }
+        RowKind::Value { node, end, .. } => vec![Piece::Bytes(node.offset..*end)],
+    };
+    let mut out = Vec::new();
+    Ok(format_into(tree, &pieces, style, limit, &mut out)?
+        .then(|| String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// Formats `pieces` onto `out`; false once `out` exceeds `limit`.
+fn format_into(
+    tree: &impl TreeIndex,
+    pieces: &[Piece],
+    style: Style,
+    limit: usize,
+    out: &mut Vec<u8>,
+) -> Result<bool, IndexError> {
+    let mut formatter = Formatter::new(style);
+    for piece in pieces {
+        match piece {
+            Piece::Literal(bytes) => formatter.feed(bytes, out),
+            Piece::Bytes(range) => {
+                for chunk in chunks(range) {
+                    formatter.feed(&tree.bytes(chunk)?, out);
+                    if out.len() > limit {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out.len() <= limit)
+}
+
+/// NDJSON records, each formatted, one per line.
+fn records_text(
+    tree: &impl TreeIndex,
+    root: NodeRef,
+    style: Style,
+    limit: usize,
+) -> Result<Option<String>, IndexError> {
+    let Count::Known(n) = tree.child_count(root)? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for start in (0..n).step_by(1024) {
+        for record in tree.children(root, start..(start + 1024).min(n))? {
+            if !out.is_empty() {
+                out.push(b'\n');
+            }
+            if !format_into(
+                tree,
+                &[Piece::Bytes(record.value..record.end)],
+                style,
+                limit,
+                &mut out,
+            )? {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
 /// Bytes read per step while streaming a preview.
@@ -171,29 +255,27 @@ impl Lines {
     }
 }
 
-/// A bucket: its child slice wrapped in the container's brackets.
-fn bucket(
+/// A bucket's child slice wrapped in its container's brackets.
+fn bucket_pieces(
     tree: &impl TreeIndex,
     container: NodeRef,
     range: &Range<u64>,
-    window: Window,
-) -> Result<Preview, IndexError> {
+) -> Result<Vec<Piece>, IndexError> {
     let first = tree.children(container, range.start..range.start + 1)?;
     let last = tree.children(container, range.end - 1..range.end)?;
     let (Some(first), Some(last)) = (first.first(), last.first()) else {
-        return Ok(window.of(Vec::new()));
+        return Ok(Vec::new());
     };
     let (open, close): (&[u8], &[u8]) = if container.kind == Kind::Object {
         (b"{", b"}")
     } else {
         (b"[", b"]")
     };
-    let pieces = [
+    Ok(vec![
         Piece::Literal(open),
         Piece::Bytes(first.start()..last.end),
         Piece::Literal(close),
-    ];
-    pretty(tree, &pieces, window)
+    ])
 }
 
 /// A string's decoded text, one preview line per newline.

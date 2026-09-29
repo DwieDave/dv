@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod clipboard;
 pub mod error;
 pub mod format;
 pub mod index;

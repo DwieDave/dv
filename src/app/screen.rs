@@ -10,7 +10,8 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Gauge, Paragraph};
 
 use crate::app::search::{Outcome, spawn_worker};
-use crate::app::{Model, Msg, input_msg, update, view};
+use crate::app::{Effect, Model, Msg, input_msg, update, view};
+use crate::clipboard;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
 use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
@@ -95,6 +96,21 @@ pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event:
     }
 }
 
+/// Runs the model's queued side effects and notes their results.
+fn perform_effects<T>(model: &mut Model<T>) {
+    for effect in std::mem::take(&mut model.effects) {
+        match effect {
+            Effect::Copy(text) => {
+                let size = human_bytes(text.len() as u64);
+                model.note = Some(match clipboard::copy(&text) {
+                    Ok(method) => format!("copied {size} ({})", method.name()),
+                    Err(err) => format!("copy failed: {err}"),
+                });
+            }
+        }
+    }
+}
+
 /// Starts the search worker, reporting outcomes as app events.
 fn attach_worker<T: TreeIndex + Send + Sync + 'static>(
     model: &mut Model<T>,
@@ -138,6 +154,7 @@ fn on_input<T: TreeIndex>(app: &mut App<T>, input: &Event) {
         Screen::Ready(model) => {
             if let Some(msg) = input_msg(input) {
                 update(model, msg);
+                perform_effects(model);
             }
             model.quit
         }
