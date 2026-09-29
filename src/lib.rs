@@ -3,5 +3,6 @@
 
 pub mod error;
 pub mod index;
+pub mod json;
 pub mod position;
 pub mod source;
