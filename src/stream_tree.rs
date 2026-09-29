@@ -240,4 +240,34 @@ mod tests {
             }
         }
     }
+
+    fn file_tree(text: &str) -> StreamTree<crate::source::file::FileSource, SpillStore> {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        let source =
+            crate::source::file::FileSource::new(file, 2 * crate::source::file::CHUNK).unwrap();
+        let limits = StreamLimits {
+            initial: 64,
+            max: 1 << 20,
+        };
+        let spill = SpillLimits {
+            window: 8,
+            stack: 8,
+            cache: 8192,
+        };
+        StreamTree::index(source, limits, spill, |_| ControlFlow::Continue(())).unwrap()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn file_backed_streaming_equals_memory(value in json_value()) {
+            let (text, _) = layout(&value, "\n");
+            let mem = MemTree::parse(MemSource::new(text.as_bytes().to_vec())).unwrap();
+            let stream = file_tree(&text);
+            prop_assert_eq!(to_value(&stream, stream.root().unwrap()), to_value(&mem, mem.root().unwrap()));
+            prop_assert_eq!(stream.stats(), mem.stats());
+        }
+    }
 }
