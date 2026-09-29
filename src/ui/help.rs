@@ -44,6 +44,22 @@ const FINDING: &[Row] = &[
     row(":", "jump to a path, e.g. .items[-1].id", &[":"]),
     row("^p", "fuzzy picker over key paths", &["C-p"]),
     row("^o  tab", "back / forward through jumps", &["C-o", "Tab"]),
+    row(
+        "m{a-z}",
+        "set a mark",
+        &[
+            "ma", "mb", "mc", "md", "me", "mf", "mg", "mh", "mi", "mj", "mk", "ml", "mm", "mn",
+            "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz",
+        ],
+    ),
+    row(
+        "'{a-z}",
+        "go to a mark",
+        &[
+            "'a", "'b", "'c", "'d", "'e", "'f", "'g", "'h", "'i", "'j", "'k", "'l", "'m", "'n",
+            "'o", "'p", "'q", "'r", "'s", "'t", "'u", "'v", "'w", "'x", "'y", "'z",
+        ],
+    ),
 ];
 
 const PREVIEW: &[Row] = &[

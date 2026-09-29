@@ -79,6 +79,8 @@ pub struct Model<T> {
     pub help: Option<u16>,
     /// Where jumps came from, for `Ctrl-o` / `Tab` (HI-1).
     pub jumps: JumpList,
+    /// Marks `a`–`z` (HI-2), for this session.
+    pub marks: [Option<Vec<u64>>; 26],
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -114,6 +116,7 @@ impl<T: TreeIndex> Model<T> {
             footer: true,
             help: None,
             jumps: JumpList::default(),
+            marks: Default::default(),
             effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
@@ -220,6 +223,10 @@ pub enum Msg {
     OpenHelp,
     /// Back or forward through the jump list.
     History(Step),
+    /// `m{a-z}`: remember the cursor.
+    SetMark(char),
+    /// `'{a-z}`: return to a mark.
+    GoMark(char),
     /// Child counts may have grown (streaming progress).
     Refresh,
 }
@@ -249,6 +256,23 @@ fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
         let result = reveal(&*model.tree, &mut model.state, rows, model.height);
         model.status = result.err().map(|err| err.to_string());
     }
+}
+
+/// The index of mark `c` (`a`–`z`).
+fn mark_slot(c: char) -> Option<usize> {
+    c.is_ascii_lowercase().then(|| usize::from(c as u8 - b'a'))
+}
+
+/// `'{a-z}`: returns to a mark, as a jump.
+fn go_mark<T: TreeIndex>(model: &mut Model<T>, c: char) {
+    let Some(rows) = mark_slot(c).and_then(|slot| model.marks[slot].clone()) else {
+        model.note = Some(format!("mark {c} is not set"));
+        return;
+    };
+    let before = model.state.cursor.clone();
+    let result = reveal(&*model.tree, &mut model.state, rows, model.height);
+    model.status = result.err().map(|err| err.to_string());
+    jumped(model, before);
 }
 
 /// The most recent kind of find, repeated by `n`/`N`.
@@ -367,6 +391,13 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             }
         }
         Msg::History(step) => history(model, step),
+        Msg::SetMark(c) => {
+            if let Some(slot) = mark_slot(c) {
+                model.marks[slot] = Some(model.state.cursor.clone());
+                model.note = Some(format!("mark {c} set"));
+            }
+        }
+        Msg::GoMark(c) => go_mark(model, c),
         Msg::Mouse(mouse) => on_mouse(model, mouse),
         Msg::OpenPrompt(PromptKind::Search) => search::open(model),
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
@@ -906,6 +937,29 @@ mod tests {
         assert_eq!(model.state.cursor, vec![0, 1]);
         update(&mut model, Msg::Key(KeyCode::Tab.into()));
         assert_eq!(model.state.cursor, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn marks_remember_places_and_jumping_to_one_is_a_jump() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(40, 12));
+        typed(&mut model, "jlj");
+        assert_eq!(model.state.cursor, vec![0, 0]);
+        typed(&mut model, "ma");
+        typed(&mut model, "gg");
+        typed(&mut model, "'a");
+        assert_eq!(model.state.cursor, vec![0, 0]);
+        update(
+            &mut model,
+            Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            model.state.cursor,
+            Vec::<u64>::new(),
+            "the mark jump is in the history"
+        );
+        typed(&mut model, "'q");
+        assert_eq!(model.note.as_deref(), Some("mark q is not set"));
     }
 
     #[test]

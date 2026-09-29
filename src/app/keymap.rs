@@ -20,7 +20,7 @@ impl Keymap {
         match (self.pending.take(), key.code) {
             (Some(prefix), KeyCode::Char(c)) => chord(prefix, c),
             (Some(_), _) => None,
-            (None, KeyCode::Char(c @ ('g' | 'z' | 'y'))) if !ctrl => {
+            (None, KeyCode::Char(c @ ('g' | 'z' | 'y' | 'm' | '\''))) if !ctrl => {
                 self.pending = Some(c);
                 None
             }
@@ -38,6 +38,8 @@ fn chord(prefix: char, c: char) -> Option<Msg> {
         ('y', 'p') => Msg::Copy(CopyWhat::Path),
         ('y', 'y') => Msg::Copy(CopyWhat::Minified),
         ('y', 'Y') => Msg::Copy(CopyWhat::Pretty),
+        ('m', c @ 'a'..='z') => Msg::SetMark(c),
+        ('\'', c @ 'a'..='z') => Msg::GoMark(c),
         _ => return None,
     })
 }
