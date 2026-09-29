@@ -112,3 +112,10 @@ fn yaml_aliases_get_a_badge() {
     let lines = text_lines(&draw(&tree, &state, 30, 3));
     assert_eq!(lines, ["▼ {2}", "  ▶ a: [1]", "  ▶ b: [1] *alias"]);
 }
+
+#[test]
+fn badges_mark_pending_and_truncated_counts() {
+    use crate::tree::Count;
+    let texts = [Count::Known(3), Count::Pending(4), Count::Truncated(5)].map(super::count_text);
+    assert_eq!(texts, ["3", "4…", "5 ✗"]);
+}

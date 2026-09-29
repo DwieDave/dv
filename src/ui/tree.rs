@@ -99,11 +99,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
     }
 
     fn badge(&self, node: NodeRef) -> Result<Span<'static>, IndexError> {
-        let count = match self.tree.child_count(node)? {
-            Count::Known(n) => n.to_string(),
-            Count::Pending(n) => format!("{n}…"),
-            Count::Truncated(n) => format!("{n} ✗"),
-        };
+        let count = count_text(self.tree.child_count(node)?);
         let text = if node.kind == Kind::Object {
             format!("{{{count}}}")
         } else {
@@ -150,6 +146,15 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
 fn scalar_window(start: u64, end: u64, max: usize) -> Range<u64> {
     let enough = (max as u64 + 1) * 12 + 2;
     start..end.min(start.saturating_add(enough))
+}
+
+/// A child count as the badge shows it: `n`, `n…` while indexing, `n ✗` when indexing failed.
+fn count_text(count: Count) -> String {
+    match count {
+        Count::Known(n) => n.to_string(),
+        Count::Pending(n) => format!("{n}…"),
+        Count::Truncated(n) => format!("{n} ✗"),
+    }
 }
 
 #[cfg(test)]
