@@ -46,3 +46,11 @@ bench-load:
 suite dir file:
     cargo build --release
     scripts/suite-10g.sh {{dir}} {{file}}
+
+# Long hardening runs (NFR-6): a million cases per property.
+fuzz-long:
+    PROPTEST_CASES=1000000 cargo nextest run --release --test hardening
+
+# Run one cargo-fuzz target for `secs` seconds; needs `nix develop .#fuzz`.
+fuzz target secs="60":
+    cd fuzz && cargo fuzz run {{target}} -- -max_total_time={{secs}}

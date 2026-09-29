@@ -28,7 +28,7 @@ pub enum TranscodeError {
         col: usize,
         offset: usize,
     },
-    #[error("alias expansion exceeds the memory budget")]
+    #[error("the YAML expands beyond the memory budget (aliases or nested complex keys)")]
     Budget { offset: usize },
     #[error("alias refers to an unknown or unfinished anchor")]
     BadAlias { offset: usize },
@@ -124,8 +124,8 @@ impl<H: FnMut(u64) -> ControlFlow<()>> Writer<H> {
             }
             Event::SequenceStart(anchor, _) => self.open(None, anchor, b'['),
             Event::MappingStart(anchor, _) => self.open(Some(true), anchor, b'{'),
-            Event::SequenceEnd => self.close(b']'),
-            Event::MappingEnd => self.close(b'}'),
+            Event::SequenceEnd => return self.close(b']', offset),
+            Event::MappingEnd => return self.close(b'}', offset),
             Event::Alias(id) => return self.alias(id, offset),
             Event::StreamStart | Event::StreamEnd | Event::DocumentEnd | Event::Nothing => {}
         }
@@ -202,18 +202,19 @@ impl<H: FnMut(u64) -> ControlFlow<()>> Writer<H> {
         });
     }
 
-    fn close(&mut self, bracket: u8) {
+    fn close(&mut self, bracket: u8, offset: usize) -> Result<(), TranscodeError> {
         let Some(frame) = self.frames.pop() else {
-            return;
+            return Ok(());
         };
         self.out.push(bracket);
         self.remember(frame.anchor, frame.start..self.out.len());
         if frame.is_key {
-            self.stringify_from(frame.start);
+            self.stringify_from(frame.start, offset)?;
             self.key_done();
         } else {
             self.value_done();
         }
+        Ok(())
     }
 
     fn alias(&mut self, id: usize, offset: usize) -> Result<(), TranscodeError> {
@@ -229,7 +230,7 @@ impl<H: FnMut(u64) -> ControlFlow<()>> Writer<H> {
         let start = self.out.len();
         self.out.extend_from_within(range);
         if place == Place::Key {
-            self.stringify_from(start);
+            self.stringify_from(start, offset)?;
             self.key_done();
         } else {
             self.aliases.push(offset32(start));
@@ -244,10 +245,15 @@ impl<H: FnMut(u64) -> ControlFlow<()>> Writer<H> {
         }
     }
 
-    /// Replaces the JSON written since `start` with a JSON string of that text.
-    fn stringify_from(&mut self, start: usize) {
+    /// Replaces the JSON written since `start` with a JSON string of that text. Nested
+    /// complex keys escape again at every level, so this growth is held to the budget too.
+    fn stringify_from(&mut self, start: usize, offset: usize) -> Result<(), TranscodeError> {
         let raw = self.out.split_off(start);
         quote_into(&mut self.out, &String::from_utf8_lossy(&raw));
+        if self.out.len() > self.budget {
+            return Err(TranscodeError::Budget { offset });
+        }
+        Ok(())
     }
 
     fn finish(mut self) -> Transcoded {

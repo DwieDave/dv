@@ -31,6 +31,7 @@ criterion = "0.8.2"
 dhat = "0.3.3"
 insta = "1.48.0"
 proptest = "1.11.0"
+serde = "1.0.229"
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 
 [[example]]

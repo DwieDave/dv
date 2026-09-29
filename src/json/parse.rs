@@ -38,8 +38,26 @@ pub fn parse_with(
     hook: impl FnMut(u64) -> ControlFlow<()>,
 ) -> Result<Parsed, ParseError> {
     ensure_addressable(bytes.len())?;
-    std::str::from_utf8(bytes).map_err(|e| fail(ParseErrorKind::InvalidUtf8, e.valid_up_to()))?;
-    Parser::new(bytes, hook).run()
+    let utf8 = std::str::from_utf8(bytes)
+        .err()
+        .map(|e| fail(ParseErrorKind::InvalidUtf8, e.valid_up_to()));
+    first_error(Parser::new(bytes, hook).run(), utf8)
+}
+
+/// The parse outcome, unless a UTF-8 error comes strictly earlier. Both modes report the
+/// earliest error whatever order they found them in; a streamed parse may fail on a byte
+/// before knowing whether its UTF-8 sequence is complete, so the parse error wins ties.
+pub(crate) fn first_error<T>(
+    parsed: Result<T, ParseError>,
+    utf8: Option<ParseError>,
+) -> Result<T, ParseError> {
+    let Some(utf8) = utf8 else {
+        return parsed;
+    };
+    match parsed {
+        Err(err) if err.kind == ParseErrorKind::Cancelled || err.offset <= utf8.offset => Err(err),
+        _ => Err(utf8),
+    }
 }
 
 /// Validates `bytes` as one JSON document and indexes its big containers.

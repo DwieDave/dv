@@ -179,3 +179,15 @@ fn transcoding_is_linear_in_the_input() {
         yaml.len()
     );
 }
+
+#[test]
+fn nested_complex_keys_stop_at_the_budget() {
+    // Each level quotes the key below it again, doubling the backslashes (found by fuzzing).
+    let text = "? ".repeat(60) + "x\r";
+    let result = transcode(&text, budget(text.len()), |_| ControlFlow::Continue(()));
+    assert!(
+        matches!(result, Err(TranscodeError::Budget { .. })),
+        "{:?}",
+        result.map(|t| t.json.len())
+    );
+}

@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::IndexError;
 use crate::index::store::Builder;
-use crate::json::parse::{Parser, Phase};
+use crate::json::parse::{Parser, Phase, first_error};
 use crate::source::Source;
 
 /// Buffer sizes for streaming.
@@ -46,32 +46,40 @@ pub fn parse_stream<R: Source, B: Builder>(
     mut publish: impl FnMut(&mut B, u64, bool),
 ) -> Result<StreamParsed<B>, IndexError> {
     let mut window = Window::new(source, limits);
-    window.refill(0)?;
     let mut parser = Parser::with_builder(&[][..], hook, builder);
     let mut phase = Phase::Start;
-    loop {
+    let mut result = window.refill(0);
+    while result.is_ok() {
         let mut bound = parser.rebind(&window.bytes, window.base, window.eof);
         let outcome = bound.advance(&mut phase);
         let pos = bound.pos;
         parser = bound.rebind(&[], 0, false);
-        match outcome {
+        result = match outcome {
             Ok(_) => break,
             Err(err) if err.kind == ParseErrorKind::UnexpectedEof && !window.eof => {
                 publish(&mut parser.builder, window.base + pos as u64, false);
-                window.refill(pos)?;
                 parser.pos = 0;
+                window.refill(pos)
             }
-            Err(err) => {
-                let offset = err.offset + window.base;
-                publish(&mut parser.builder, offset, true);
-                return Err(ParseError { offset, ..err }.into());
+            Err(err) => Err(ParseError {
+                offset: err.offset + window.base,
+                ..err
             }
-        }
+            .into()),
+        };
     }
-    let (Phase::Body { root } | Phase::Trailing { root }) = phase else {
-        return Err(eof(window.base).into());
+    let root = result.and_then(|()| match phase {
+        Phase::Body { root } | Phase::Trailing { root } => Ok(root),
+        Phase::Start => Err(eof(window.base).into()),
+    });
+    let root = window.earliest(root);
+    let frontier = match &root {
+        Ok(_) => source.len(),
+        Err(IndexError::Parse(err)) => err.offset,
+        Err(IndexError::Source(_)) => window.base,
     };
-    publish(&mut parser.builder, source.len(), true);
+    publish(&mut parser.builder, frontier, true);
+    let root = root?;
     Ok(StreamParsed {
         root,
         builder: parser.builder,
@@ -96,6 +104,8 @@ pub(crate) struct Window<'s, R> {
     pub(crate) eof: bool,
     /// Whole-document UTF-8 validation; `None` when the caller validates.
     utf8: Option<Utf8>,
+    /// The first invalid UTF-8 read so far; reported only if no earlier error turns up.
+    utf8_error: Option<ParseError>,
 }
 
 impl<'s, R: Source> Window<'s, R> {
@@ -109,6 +119,7 @@ impl<'s, R: Source> Window<'s, R> {
             max: limits.max.max(size),
             eof: false,
             utf8: Some(Utf8::default()),
+            utf8_error: None,
         }
     }
 
@@ -145,15 +156,28 @@ impl<'s, R: Source> Window<'s, R> {
         let chunk = self
             .source
             .read(from..from + (self.size - self.bytes.len()) as u64)?;
-        if let Some(utf8) = &mut self.utf8 {
-            utf8.feed(&chunk, from)?;
+        if let Some(utf8) = self.utf8.as_mut().filter(|_| self.utf8_error.is_none()) {
+            self.utf8_error = utf8.feed(&chunk, from).err();
         }
         self.bytes.extend_from_slice(&chunk);
         self.eof = from + chunk.len() as u64 >= self.source.len();
-        if let Some(utf8) = self.utf8.as_ref().filter(|_| self.eof) {
-            utf8.finish()?;
+        if let Some(utf8) = self
+            .utf8
+            .as_ref()
+            .filter(|_| self.eof && self.utf8_error.is_none())
+        {
+            self.utf8_error = utf8.finish().err();
         }
         Ok(())
+    }
+
+    /// `result`, unless invalid UTF-8 was read before its error (see [`first_error`]).
+    pub(crate) fn earliest<T>(&self, result: Result<T, IndexError>) -> Result<T, IndexError> {
+        match result {
+            Err(IndexError::Source(err)) => Err(err.into()),
+            Err(IndexError::Parse(err)) => Ok(first_error(Err(err), self.utf8_error)?),
+            Ok(value) => Ok(first_error(Ok(value), self.utf8_error)?),
+        }
     }
 }
 
@@ -189,7 +213,11 @@ impl Utf8 {
             .min(chunk.len());
         self.carry.extend_from_slice(&chunk[..want]);
         if self.carry.len() < sequence_len(lead) {
-            return Ok(want);
+            // Still short, but a byte that cannot continue the sequence already decides it.
+            return match std::str::from_utf8(&self.carry) {
+                Err(err) if err.error_len().is_some() => Err(invalid(self.carry_at)),
+                _ => Ok(want),
+            };
         }
         std::str::from_utf8(&self.carry).map_err(|_| invalid(self.carry_at))?;
         self.carry.clear();
@@ -298,6 +326,19 @@ mod tests {
             matches!(err, IndexError::Parse(e) if e.kind == crate::error::ParseErrorKind::InvalidUtf8 && e.offset == 3),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn split_sequences_fail_as_soon_as_a_byte_rules_them_out() {
+        let text = b" \"{0\xed\n{";
+        let expected = parse(text).err();
+        for initial in 1..8 {
+            let got = streamed(text, initial).err().map(|err| match err {
+                IndexError::Parse(e) => e,
+                IndexError::Source(e) => panic!("source error {e}"),
+            });
+            assert_eq!(got, expected, "initial {initial}");
+        }
     }
 
     #[test]

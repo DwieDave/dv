@@ -7,8 +7,13 @@ const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]";
 
 #[test]
 fn every_crate_root_forbids_unsafe() {
-    let missing: Vec<&str> = CRATE_ROOTS
-        .into_iter()
+    let fuzz_targets = sources("fuzz/fuzz_targets");
+    assert!(!fuzz_targets.is_empty(), "fuzz targets not found");
+    let roots = CRATE_ROOTS
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(fuzz_targets);
+    let missing: Vec<std::path::PathBuf> = roots
         .filter(|path| {
             !fs::read_to_string(path)
                 .unwrap_or_default()
