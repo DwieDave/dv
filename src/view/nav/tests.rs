@@ -124,9 +124,9 @@ fn clicking_a_label_selects_and_the_marker_toggles() {
     click(&tree, &mut state, 2, 8, 10).unwrap();
     assert_eq!(state.cursor, vec![1]);
     assert!(!state.is_expanded(&[1]));
-    click(&tree, &mut state, 2, 2, 10).unwrap();
-    assert!(state.is_expanded(&[1]));
     click(&tree, &mut state, 2, 3, 10).unwrap();
+    assert!(state.is_expanded(&[1]));
+    click(&tree, &mut state, 2, 4, 10).unwrap();
     assert!(!state.is_expanded(&[1]));
 }
 

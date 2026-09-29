@@ -866,7 +866,7 @@ mod tests {
         };
         update(
             &mut model,
-            mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
         );
         assert_eq!(model.state.cursor, vec![0]);
         assert!(model.state.is_expanded(&[0]));

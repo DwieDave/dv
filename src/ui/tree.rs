@@ -50,7 +50,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
             return Ok(Line::default());
         };
         let expanded = self.state.is_expanded(path);
-        let mut spans = vec![Span::raw("  ".repeat(item.depth))];
+        let mut spans = self.indent(path);
         match &item.kind {
             RowKind::Bucket { range, .. } => {
                 spans.push(self.marker(true, expanded));
@@ -77,11 +77,30 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
         Ok(Line::from(spans))
     }
 
+    /// The gutter column, then a guide per nesting level: dim, except the level of the
+    /// cursor's container on the rows inside it (TA-2, TA-3).
+    fn indent(&self, path: &[u64]) -> Vec<Span<'static>> {
+        let cursor = &self.state.cursor;
+        let lit = cursor
+            .len()
+            .checked_sub(1)
+            .filter(|&level| path.len() > level && path.starts_with(&cursor[..level]));
+        let guides = (0..path.len()).map(|level| {
+            let style = if Some(level) == lit {
+                self.theme.marker
+            } else {
+                self.theme.badge
+            };
+            Span::styled("│ ", style)
+        });
+        std::iter::once(Span::raw(" ")).chain(guides).collect()
+    }
+
     fn marker(&self, container: bool, expanded: bool) -> Span<'static> {
         let symbol = match (container, expanded) {
             (false, _) => "  ",
-            (true, true) => "▼ ",
-            (true, false) => "▶ ",
+            (true, true) => "▾ ",
+            (true, false) => "▸ ",
         };
         Span::styled(symbol, self.theme.marker)
     }

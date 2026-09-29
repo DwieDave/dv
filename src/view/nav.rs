@@ -204,7 +204,8 @@ pub fn click(
     let Some(path) = state.locate(state.top + row) else {
         return Ok(());
     };
-    let marker = 2 * path.len() as u64;
+    // One gutter column, then two per nesting level (see the tree widget).
+    let marker = 1 + 2 * path.len() as u64;
     state.cursor = path;
     if (marker..marker + 2).contains(&column) {
         toggle(tree, state)?;

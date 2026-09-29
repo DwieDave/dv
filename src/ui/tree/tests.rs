@@ -53,12 +53,12 @@ fn renders_expanded_rows_with_markers_labels_and_badges() {
     expand(&tree, &mut state, &[1]);
     let lines = text_lines(&draw(&tree, &state, 30, 7));
     let expected = [
-        "▼ {3}",
-        "    a: 1",
-        "  ▼ b: [2]",
-        "      [0]: true",
-        "      [1]: null",
-        "    s: \"hello world\"",
+        " ▾ {3}",
+        " │   a: 1",
+        " │ ▾ b: [2]",
+        " │ │   [0]: true",
+        " │ │   [1]: null",
+        " │   s: \"hello world\"",
         "",
     ];
     assert_eq!(lines, expected);
@@ -69,7 +69,7 @@ fn truncates_scalars_to_the_width() {
     let tree = tree_of(DOC);
     let state = TreeState::new(&tree).unwrap();
     let lines = text_lines(&draw(&tree, &state, 12, 4));
-    assert_eq!(lines[3], "    s: \"he…\"");
+    assert_eq!(lines[3], " │   s: \"h…\"");
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn highlights_the_cursor_row_and_scrolls() {
     state.cursor = vec![2];
     state.top = 2;
     let buf = draw(&tree, &state, 20, 2);
-    assert_eq!(text_lines(&buf), ["  ▶ b: [2]", "    s: \"hello world\""]);
+    assert_eq!(text_lines(&buf), [" │ ▸ b: [2]", " │   s: \"hello wor…\""]);
     assert!(buf[(4, 1)].modifier.contains(Modifier::REVERSED));
     assert!(!buf[(4, 0)].modifier.contains(Modifier::REVERSED));
 }
@@ -92,9 +92,9 @@ fn invalid_records_render_as_errors() {
     assert_eq!(
         lines,
         [
-            "▼ [2]",
-            "    [0]: 1",
-            "    [1]: ✗ unexpected byte 0x62: {bad"
+            " ▾ [2]",
+            " │   [0]: 1",
+            " │   [1]: ✗ unexpected byte 0x62: {bad"
         ]
     );
 }
@@ -110,7 +110,7 @@ fn yaml_aliases_get_a_badge() {
         .with_aliases(transcoded.aliases);
     let state = TreeState::new(&tree).unwrap();
     let lines = text_lines(&draw(&tree, &state, 30, 3));
-    assert_eq!(lines, ["▼ {2}", "  ▶ a: [1]", "  ▶ b: [1] *alias"]);
+    assert_eq!(lines, [" ▾ {2}", " │ ▸ a: [1]", " │ ▸ b: [1] *alias"]);
 }
 
 #[test]
@@ -118,4 +118,39 @@ fn badges_mark_pending_and_truncated_counts() {
     use crate::tree::Count;
     let texts = [Count::Known(3), Count::Pending(4), Count::Truncated(5)].map(super::count_text);
     assert_eq!(texts, ["3", "4…", "5 ✗"]);
+}
+
+#[test]
+fn guides_mark_nesting_and_the_cursor_container_is_highlighted() {
+    let tree = tree_of(r#"{"a": {"b": 1, "c": [1]}, "d": 2}"#);
+    let mut state = TreeState::new(&tree).unwrap();
+    expand(&tree, &mut state, &[0]);
+    state.cursor = vec![0, 0];
+    let buf = draw(&tree, &state, 30, 5);
+    let lines = text_lines(&buf);
+    let theme = Theme::default();
+    assert!(lines[0].starts_with(" ▾ {2}"), "{lines:#?}");
+    assert!(lines[1].starts_with(" │ ▾ a: {2}"), "{lines:#?}");
+    assert_eq!(lines[2].chars().nth(3), Some('│'), "{lines:#?}");
+    assert!(
+        lines[2][lines[2].char_indices().nth(5).unwrap().0..].starts_with("  b: 1"),
+        "{lines:#?}"
+    );
+    assert!(lines[3].contains("│ │ ▸ c: [1]"), "{lines:#?}");
+    assert!(lines[4].starts_with(" │   d: 2"), "{lines:#?}");
+    assert_eq!(
+        buf[(1, 3)].fg,
+        theme.badge.fg.unwrap(),
+        "outer guide is dim"
+    );
+    assert_eq!(
+        buf[(3, 3)].fg,
+        theme.marker.fg.unwrap(),
+        "the cursor's container guide is lit"
+    );
+    assert_eq!(
+        buf[(1, 4)].fg,
+        theme.badge.fg.unwrap(),
+        "rows outside the container stay dim"
+    );
 }
