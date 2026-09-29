@@ -195,3 +195,94 @@ fn the_config_theme_and_warning_reach_the_document_view() {
         screen_text(&app)
     );
 }
+
+/// Every foreground and background color on screen.
+fn colors(app: &App<MemTree>) -> Vec<ratatui::style::Color> {
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    terminal.draw(|frame| view_app(app, frame)).unwrap();
+    let buf = terminal.backend().buffer();
+    buf.content()
+        .iter()
+        .flat_map(|cell| [cell.fg, cell.bg])
+        .collect()
+}
+
+/// The foreground of every top-left border corner on screen.
+fn corners(app: &App<MemTree>) -> Vec<ratatui::style::Color> {
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    terminal.draw(|frame| view_app(app, frame)).unwrap();
+    let buf = terminal.backend().buffer();
+    let found: Vec<_> = buf
+        .content()
+        .iter()
+        .filter(|c| c.symbol() == "┌")
+        .map(|c| c.fg)
+        .collect();
+    assert!(!found.is_empty(), "no borders");
+    found
+}
+
+#[test]
+fn every_colored_cell_comes_from_the_theme() {
+    use ratatui::style::{Color, Style};
+    let token = |i: u8| Style::new().fg(Color::Rgb(i, i, i)).bg(Color::Rgb(i, i, i));
+    let theme = Theme {
+        key: token(1),
+        string: token(2),
+        number: token(3),
+        bool: token(4),
+        null: token(5),
+        punct: token(6),
+        badge: token(7),
+        marker: token(8),
+        selection: token(9),
+        error: token(10),
+    };
+    let from_theme = |c: &Color| match *c {
+        Color::Reset => true,
+        Color::Rgb(r, g, b) => r == g && g == b && (1..=10).contains(&r),
+        _ => false,
+    };
+    let check = |app: &App<MemTree>, when: &str| {
+        let stray: Vec<Color> = colors(app).into_iter().filter(|c| !from_theme(c)).collect();
+        assert!(stray.is_empty(), "{when}: {stray:?}");
+    };
+    let mut shown = self::app().with_config(theme, Some("config: warning".to_owned()));
+    let progress = Progress {
+        phase: Phase::Indexing,
+        done: 1,
+        total: 2,
+    };
+    update_app(&mut shown, AppEvent::Load(LoadEvent::Progress(progress)));
+    check(&shown, "loading");
+    assert!(
+        corners(&shown).iter().all(|c| *c == Color::Rgb(7, 7, 7)),
+        "the gauge border"
+    );
+    assert!(
+        colors(&shown).contains(&Color::Rgb(8, 8, 8)),
+        "the loading bar uses the marker color"
+    );
+    update_app(
+        &mut shown,
+        loaded(br#"{"s": "x", "n": 1, "b": true, "z": null, "a": [1, 2]}"#),
+    );
+    check(&shown, "document");
+    update_app(&mut shown, key('p'));
+    update_app(
+        &mut shown,
+        AppEvent::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))),
+    );
+    check(&shown, "picker");
+    assert!(
+        corners(&shown).iter().all(|c| *c == Color::Rgb(7, 7, 7)),
+        "borders use the badge color"
+    );
+    let mut failed = self::app().with_config(theme, None);
+    let failure = LoadFailure::plain(&"broken");
+    update_app(&mut failed, AppEvent::Load(LoadEvent::Loaded(Err(failure))));
+    check(&failed, "error screen");
+}

@@ -212,7 +212,7 @@ pub fn view_app<T: TreeIndex>(app: &App<T>, frame: &mut Frame) {
     match &app.screen {
         Screen::Ready(model) => view(model, frame),
         Screen::Loading(progress) => {
-            frame.render_widget(gauge(progress), centered(frame.area(), 3));
+            frame.render_widget(gauge(progress, &app.theme), centered(frame.area(), 3));
         }
         Screen::Failed(failure) => {
             let text = Paragraph::new(error_lines(failure, &app.theme));
@@ -221,7 +221,7 @@ pub fn view_app<T: TreeIndex>(app: &App<T>, frame: &mut Frame) {
     }
 }
 
-fn gauge(progress: &Progress) -> Gauge<'static> {
+fn gauge(progress: &Progress, theme: &Theme) -> Gauge<'static> {
     let phase = match progress.phase {
         Phase::Reading => "Reading",
         Phase::Indexing => "Indexing",
@@ -238,7 +238,8 @@ fn gauge(progress: &Progress) -> Gauge<'static> {
         human_bytes(progress.total)
     );
     Gauge::default()
-        .block(Block::bordered())
+        .block(Block::bordered().border_style(theme.badge))
+        .gauge_style(theme.marker)
         .ratio(ratio.clamp(0.0, 1.0))
         .label(label)
 }

@@ -458,7 +458,7 @@ fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) 
     let title = picker_title(picker);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
+        Paragraph::new(lines).block(Block::bordered().title(title).border_style(theme.badge)),
         popup,
     );
 }
