@@ -570,6 +570,7 @@ mod tests {
     #[test]
     fn the_prompt_line_shows_search_flags() {
         let mut model = model();
+        model.footer = false;
         keys(&mut model, "/ab");
         ctrl(&mut model, 'r');
         press(&mut model, KeyCode::Tab);

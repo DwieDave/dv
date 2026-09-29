@@ -8,7 +8,7 @@ expression: "render(&app, 70, 10)"
       ok: true                     │  "ok": true                     │
   ▶ users: [1500]                  │}                                │
     note: null                     │                                 │
-                                   │                                 │
-                                   │                                 │
                                    └─────────────────────────────────┘
+──────────────────────────────────────────────────────────────────────
 .meta  object                              JSON  36.4 kB  6,006 values
+ j/k move  h/l fold  ␣ toggle  / search  n/N next  : jump  ? more

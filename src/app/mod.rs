@@ -28,6 +28,7 @@ use crate::json::lex::Kind;
 use crate::path::{parse, render};
 use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
+use crate::ui::footer::{Context, hint_line, hints};
 use crate::ui::preview::PreviewWidget;
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
@@ -69,6 +70,8 @@ pub struct Model<T> {
     pub note: Option<String>,
     /// A failure that stopped background indexing; stays until quit (FR-27).
     pub banner: Option<String>,
+    /// Show the rule and key-hint rows under the tree (KF-1, `[ui] footer`).
+    pub footer: bool,
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -101,6 +104,7 @@ impl<T: TreeIndex> Model<T> {
             last_find: LastFind::None,
             note: None,
             banner: None,
+            footer: true,
             effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
@@ -111,7 +115,37 @@ impl<T: TreeIndex> Model<T> {
 
 /// Rows below the tree: the status bar, plus the banner when there is one.
 fn chrome_rows<T>(model: &Model<T>) -> u16 {
-    STATUS_ROWS + u16::from(model.banner.is_some())
+    STATUS_ROWS + u16::from(model.banner.is_some()) + footer_rows(model) * 2
+}
+
+/// The rule row and the hint row, when the footer is on.
+fn footer_rows<T>(model: &Model<T>) -> u16 {
+    u16::from(model.footer)
+}
+
+/// What the keys do right now, for the hint row.
+fn context<T>(model: &Model<T>) -> Context {
+    match (&model.prompt, &model.picker) {
+        (Some(prompt), _) if prompt.kind == PromptKind::Search => Context::Search,
+        (Some(_), _) => Context::Query,
+        (None, Some(_)) => Context::Picker,
+        (None, None) => Context::Browse,
+    }
+}
+
+/// The rule above the status bar and the key hints below it.
+fn render_footer<T>(model: &Model<T>, frame: &mut Frame, rule: Rect, keys: Rect) {
+    let theme = &model.theme;
+    let line = Line::styled("─".repeat(usize::from(rule.width)), theme.badge);
+    frame.render_widget(line, rule);
+    let ctx = context(model);
+    let hints = hint_line(
+        hints(ctx),
+        usize::from(keys.width),
+        theme,
+        ctx == Context::Browse,
+    );
+    frame.render_widget(hints, keys);
 }
 
 /// Shows a persistent failure banner, giving it a row of the tree.
@@ -378,13 +412,19 @@ pub fn input_msg(event: &crossterm::event::Event) -> Option<Msg> {
 
 /// Renders `model` into `frame`: the tree above, the status bar in the last row.
 pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
-    let banner_rows = chrome_rows(model) - STATUS_ROWS;
-    let [main_area, banner_area, status_area] = Layout::vertical([
+    let footer = footer_rows(model);
+    let banner_rows = u16::from(model.banner.is_some());
+    let [main_area, banner_area, rule_area, status_area, keys_area] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(banner_rows),
+        Constraint::Length(footer),
         Constraint::Length(STATUS_ROWS),
+        Constraint::Length(footer),
     ])
     .areas(frame.area());
+    if model.footer {
+        render_footer(model, frame, rule_area, keys_area);
+    }
     if let Some(message) = &model.banner {
         let line = Line::styled(format!("✗ indexing stopped: {message}"), model.theme.error);
         frame.render_widget(line, banner_area);
@@ -569,6 +609,37 @@ mod tests {
         Model::new(tree).unwrap()
     }
 
+    /// The rendered rows of `model` in a `width`×`height` terminal.
+    fn rows(model: &Model<MemTree>, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| view(model, frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_footer_is_a_rule_the_status_and_key_hints() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(40, 12));
+        let shown = rows(&model, 40, 12);
+        assert_eq!(shown[9], "─".repeat(40));
+        assert!(shown[10].starts_with('.'), "{shown:#?}");
+        assert!(shown[11].starts_with(" j/k move  h/l fold"), "{shown:#?}");
+        assert!(shown[11].trim_end().ends_with("? more"), "{shown:#?}");
+        assert_eq!(model.height, 9, "the tree gets the rows above the footer");
+        update(&mut model, Msg::OpenPrompt(PromptKind::Search));
+        assert!(rows(&model, 40, 12)[11].starts_with(" ⏎ count  esc cancel"));
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        update(&mut model, Msg::OpenPrompt(PromptKind::Query));
+        assert!(rows(&model, 40, 12)[11].starts_with(" ⏎ jump  esc cancel"));
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        update(&mut model, Msg::OpenPicker);
+        assert!(rows(&model, 40, 12)[11].starts_with(" ↑↓ select  ⏎ jump"));
+    }
+
     #[test]
     fn quit_sets_the_flag() {
         let mut model = model();
@@ -656,6 +727,7 @@ mod tests {
     #[test]
     fn the_prompt_is_drawn_in_the_status_row() {
         let mut model = model();
+        model.footer = false;
         typed(&mut model, ":.a");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
@@ -724,6 +796,7 @@ mod tests {
     #[test]
     fn notes_show_in_the_status_bar_until_the_next_key() {
         let mut model = model();
+        model.footer = false;
         model.note = Some("copied 5 bytes (pbcopy)".into());
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
@@ -739,6 +812,7 @@ mod tests {
     #[test]
     fn view_puts_the_status_bar_in_the_last_row() {
         let mut model = model();
+        model.footer = false;
         update(&mut model, Msg::Key(KeyCode::Char('j').into()));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();

@@ -68,7 +68,7 @@ mod tests {
         ] {
             tx.send(event).unwrap();
         }
-        let mut terminal = Terminal::new(TestBackend::new(10, 3)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(10, 6)).unwrap();
         let mut app = app();
         run(&mut terminal, &mut app, &rx).unwrap();
         assert!(app.quit);

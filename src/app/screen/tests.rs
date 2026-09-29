@@ -166,13 +166,14 @@ fn late_failures_leave_a_persistent_banner_above_the_status_bar() {
     update_app(&mut app, key('j'));
     let rows: Vec<String> = screen_text(&app).lines().map(str::to_owned).collect();
     assert!(
-        rows[3].contains("✗ indexing stopped: bad byte 9:1"),
+        rows[1].contains("✗ indexing stopped: bad byte 9:1"),
         "{rows:#?}"
     );
     let Screen::Ready(model) = &app.screen else {
         panic!("not ready")
     };
-    assert_eq!(model.height, 3, "the banner takes a tree row");
+    // 5 rows: tree, banner, rule, status, hints.
+    assert_eq!(model.height, 1, "the banner takes a tree row");
     assert!(matches!(app.screen, Screen::Ready(_)));
 }
 

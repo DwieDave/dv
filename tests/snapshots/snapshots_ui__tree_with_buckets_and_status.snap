@@ -9,8 +9,8 @@ expression: "render(&app, 60, 12)"
   ▼ users: [1500]             │    "tags": [               │
     ▶ [0..1023]               │      "x"                   │
     ▶ [1024..1499]            │    ]                       │
-    note: null                │  },                        │
-                              │  {                         │
-                              │…                           │
+    note: null                │…                           │
                               └────────────────────────────┘
+────────────────────────────────────────────────────────────
 .users  array                    JSON  36.4 kB  6,006 values
+ j/k move  h/l fold  ␣ toggle  / search  n/N next  ? more
