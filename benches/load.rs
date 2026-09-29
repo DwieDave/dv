@@ -7,6 +7,7 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use dv::json::parse::parse;
 
 const FIXTURES: [&str; 8] = [
     "api-15M.json",
@@ -24,11 +25,21 @@ fn fixture(name: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+fn loaded(names: &[&'static str]) -> Vec<(&'static str, Vec<u8>)> {
+    let load = |name: &'static str| match fixture(name).map(fs::read) {
+        Some(Ok(bytes)) => Some((name, bytes)),
+        _ => {
+            eprintln!("missing fixture {name}: run `just data`");
+            None
+        }
+    };
+    names.iter().filter_map(|&name| load(name)).collect()
+}
+
 fn read_baseline(c: &mut Criterion) {
     let mut group = c.benchmark_group("read");
     for name in FIXTURES {
         let Some(path) = fixture(name) else {
-            eprintln!("missing fixture {name}: run `just data`");
             continue;
         };
         let len = fs::metadata(&path).map_or(0, |m| m.len());
@@ -38,5 +49,14 @@ fn read_baseline(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, read_baseline);
+fn parse_json(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parse");
+    for (name, bytes) in loaded(&FIXTURES[..6]) {
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        group.bench_function(name, |b| b.iter(|| parse(black_box(&bytes))));
+    }
+    group.finish();
+}
+
+criterion_group!(benches, read_baseline, parse_json);
 criterion_main!(benches);
