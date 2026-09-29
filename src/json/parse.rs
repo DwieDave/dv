@@ -92,6 +92,8 @@ pub(crate) struct Parser<'a, H, B: Builder = VecStoreBuilder> {
     base: u64,
     /// `bytes` reaches the end of the document.
     eof: bool,
+    /// The innermost container was just opened: its first child (or end) comes next.
+    fresh: bool,
 }
 
 impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
@@ -129,6 +131,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
             values: 0,
             base: 0,
             eof: true,
+            fresh: false,
         }
     }
 
@@ -142,6 +145,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
             stack,
             objects,
             values,
+            fresh,
             ..
         } = self;
         Parser {
@@ -155,6 +159,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
             values,
             base,
             eof,
+            fresh,
         }
     }
 
@@ -165,10 +170,10 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
 
     /// True once the stack is empty; otherwise performs one step inside the open container.
     pub(crate) fn step(&mut self) -> Result<bool, ParseError> {
-        let Some(start) = self.stack.last().map(|slot| self.builder.start(slot)) else {
+        if self.stack.is_empty() {
             return Ok(true);
-        };
-        if self.abs(self.pos) == start + 1 {
+        }
+        if self.fresh {
             self.first_child()?;
         } else {
             self.after_child()?;
@@ -238,6 +243,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     pub(crate) fn abandon(&mut self) {
         self.stack.clear();
         self.objects.clear();
+        self.fresh = false;
     }
 
     /// Reports the end position unless it was just reported.
@@ -284,6 +290,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
                 self.stack.push(self.builder.open(self.abs(self.pos)));
                 self.objects.push(kind == Kind::Object);
                 self.pos += 1;
+                self.fresh = true;
             }
             _ => self.pos = end,
         }
@@ -336,6 +343,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
             self.builder.add_child(slot, self.base + at as u64);
         }
         self.pos = value;
+        self.fresh = false;
         self.commit_value(scanned);
         Ok(())
     }
@@ -351,6 +359,7 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     fn close(&mut self) {
         if let Some(slot) = self.stack.pop() {
             self.objects.pop();
+            self.fresh = false;
             self.pos += 1;
             self.builder.close(slot, self.abs(self.pos));
         }

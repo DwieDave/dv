@@ -110,3 +110,31 @@ fn truncated_numbers_need_more_input() {
         ParseErrorKind::InvalidNumber
     );
 }
+
+/// The string scanner as a plain byte loop: the reference for the word-at-a-time one.
+fn scan_string_bytewise(bytes: &[u8], pos: usize) -> Result<usize, ParseError> {
+    let mut i = pos + 1;
+    loop {
+        match bytes.get(i) {
+            None => return Err(fail(ParseErrorKind::UnexpectedEof, bytes.len())),
+            Some(b'"') => return Ok(i + 1),
+            Some(b'\\') => i = scan_escape(bytes, i)?,
+            Some(&b) if b < 0x20 => return Err(fail(ParseErrorKind::ControlInString, i)),
+            Some(_) => i += 1,
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2048))]
+    #[test]
+    fn strings_scan_like_a_byte_loop(
+        body in prop::collection::vec(prop::sample::select(b"ab\"\\\x01\x1f \x7f\xff\xe2un0/".to_vec()), 0..48),
+        prefix in 0usize..9,
+    ) {
+        let mut bytes = vec![b' '; prefix];
+        bytes.push(b'"');
+        bytes.extend(body);
+        prop_assert_eq!(scan_string(&bytes, prefix), scan_string_bytewise(&bytes, prefix));
+    }
+}

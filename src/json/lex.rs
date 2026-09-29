@@ -1,6 +1,7 @@
 //! Validating JSON lexer primitives. Each takes `(bytes, pos)` and returns the end offset.
 
 use crate::error::{ParseError, ParseErrorKind};
+use crate::index::to_usize;
 
 /// The JSON type of a value, known from its first byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +25,12 @@ pub(crate) fn fail(kind: ParseErrorKind, pos: usize) -> ParseError {
 
 #[must_use]
 pub fn skip_ws(bytes: &[u8], pos: usize) -> usize {
-    pos + bytes[pos.min(bytes.len())..]
-        .iter()
-        .take_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-        .count()
+    let is_ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    // Minified JSON has no whitespace between tokens: answer that case first.
+    if !bytes.get(pos).is_some_and(is_ws) {
+        return pos;
+    }
+    pos + bytes[pos..].iter().take_while(|b| is_ws(b)).count()
 }
 
 /// `pos` is at the opening quote; returns the offset after the closing quote.
@@ -37,21 +40,41 @@ pub fn skip_ws(bytes: &[u8], pos: usize) -> usize {
 pub fn scan_string(bytes: &[u8], pos: usize) -> Result<usize, ParseError> {
     let mut i = pos + 1;
     loop {
-        let rest = bytes.get(i..).unwrap_or_default();
-        let stop = memchr::memchr2(b'"', b'\\', rest);
-        let plain = &rest[..stop.unwrap_or(rest.len())];
-        if let Some(c) = plain.iter().position(|&b| b < 0x20) {
-            return Err(fail(ParseErrorKind::ControlInString, i + c));
-        }
-        let Some(off) = stop else {
+        let Some(at) = plain_end(bytes, i) else {
             return Err(fail(ParseErrorKind::UnexpectedEof, bytes.len()));
         };
-        i += off;
-        if bytes[i] == b'"' {
-            return Ok(i + 1);
+        match bytes[at] {
+            b'"' => return Ok(at + 1),
+            b'\\' => i = scan_escape(bytes, at)?,
+            _ => return Err(fail(ParseErrorKind::ControlInString, at)),
         }
-        i = scan_escape(bytes, i)?;
     }
+}
+
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// High bits set at the bytes of `word` that end a plain run: `"`, `\` or a control byte.
+/// Borrows can also mark bytes above a true hit, so only the lowest set bit is exact.
+fn specials(word: u64) -> u64 {
+    let zero = |v: u64| v.wrapping_sub(ONES) & !v & HIGHS;
+    let control = word.wrapping_sub(ONES * 0x20) & !word & HIGHS;
+    zero(word ^ (ONES * u64::from(b'"'))) | zero(word ^ (ONES * u64::from(b'\\'))) | control
+}
+
+/// The first `"`, `\` or control byte at or after `i`, testing eight bytes at a time (SWAR).
+fn plain_end(bytes: &[u8], i: usize) -> Option<usize> {
+    let (words, tail) = bytes.get(i..)?.as_chunks::<8>();
+    for (k, word) in words.iter().enumerate() {
+        let found = specials(u64::from_le_bytes(*word));
+        if found != 0 {
+            return Some(i + 8 * k + to_usize(u64::from(found.trailing_zeros() / 8)));
+        }
+    }
+    let at = i + 8 * words.len();
+    tail.iter()
+        .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+        .map(|p| at + p)
 }
 
 /// `i` is at a backslash; returns the offset after the escape.
