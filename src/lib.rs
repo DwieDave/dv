@@ -8,6 +8,7 @@ pub mod path;
 pub mod position;
 pub mod source;
 pub mod tree;
+pub mod view;
 
 #[cfg(test)]
 mod test_support;
