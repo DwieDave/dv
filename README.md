@@ -109,9 +109,9 @@ number      = "yellow"
 bool        = "magenta"
 null        = "darkgray"
 punctuation = "gray"
-badge       = "darkgray"      # counts and borders
-marker      = "blue"          # expand markers, loading bar
-selection   = "bg:#303848 bold"
+badge       = "darkgray"      # counts, borders, indent guides
+marker      = "blue"          # markers, cursor bar, the cursor's container guide
+selection   = "bg:#303848"    # tint of the cursor row (keys there are bold)
 error       = "lightred"
 
 [ui]
