@@ -25,6 +25,8 @@ pub enum Nav {
     ExpandChildren,
     CollapseSubtree,
     CollapseAll,
+    ScrollDown,
+    ScrollUp,
 }
 
 /// Applies `nav`, then scrolls so the cursor is visible in a viewport of `height` rows.
@@ -55,6 +57,8 @@ pub fn apply(
         Nav::ExpandChildren => expand_children(tree, state)?,
         Nav::CollapseSubtree => collapse_subtree(state),
         Nav::CollapseAll => collapse_all(tree, state)?,
+        Nav::ScrollDown => scroll(state, 3, height),
+        Nav::ScrollUp => scroll(state, -3, height),
     }
     scroll_into_view(state, height);
     Ok(())
@@ -180,6 +184,40 @@ fn scroll_into_view(state: &mut TreeState, height: u64) {
     let row = state.row_of(&state.cursor).unwrap_or(0);
     let top = state.top.min(state.total_rows() - 1).min(row);
     state.top = top.max((row + 1).saturating_sub(height));
+}
+
+/// Selects the row `row` lines below the top; a click on its marker toggles it.
+///
+/// # Errors
+/// Storage or lexing failures while resolving rows.
+pub fn click(
+    tree: &impl TreeIndex,
+    state: &mut TreeState,
+    row: u64,
+    column: u64,
+    height: u64,
+) -> Result<(), IndexError> {
+    let Some(path) = state.locate(state.top + row) else {
+        return Ok(());
+    };
+    let marker = 2 * path.len() as u64;
+    state.cursor = path;
+    if (marker..marker + 2).contains(&column) {
+        toggle(tree, state)?;
+    }
+    scroll_into_view(state, height.max(1));
+    Ok(())
+}
+
+/// Moves the viewport by `delta` rows; the cursor follows only to stay visible.
+fn scroll(state: &mut TreeState, delta: i64, height: u64) {
+    let last = state.total_rows() - 1;
+    state.top = state.top.saturating_add_signed(delta).min(last);
+    let row = state.row_of(&state.cursor).unwrap_or(0);
+    jump(
+        state,
+        row.clamp(state.top, (state.top + height - 1).min(last)),
+    );
 }
 
 #[cfg(test)]

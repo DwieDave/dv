@@ -4,7 +4,7 @@ pub mod keymap;
 pub mod run;
 pub mod terminal;
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 
 use crate::app::keymap::Keymap;
@@ -55,6 +55,7 @@ pub enum Msg {
     Key(KeyEvent),
     Resize(u16),
     Nav(Nav),
+    Mouse(MouseEvent),
 }
 
 /// Applies `msg` to `model`; no I/O happens here.
@@ -72,6 +73,20 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             let result = nav::apply(&model.tree, &mut model.state, action, model.height);
             model.status = result.err().map(|err| err.to_string());
         }
+        Msg::Mouse(mouse) => on_mouse(model, mouse),
+    }
+}
+
+fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
+    match mouse.kind {
+        MouseEventKind::ScrollDown => update(model, Msg::Nav(Nav::ScrollDown)),
+        MouseEventKind::ScrollUp => update(model, Msg::Nav(Nav::ScrollUp)),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
+            let result = nav::click(&model.tree, &mut model.state, row, column, model.height);
+            model.status = result.err().map(|err| err.to_string());
+        }
+        _ => {}
     }
 }
 
@@ -87,7 +102,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
     use crate::source::MemSource;
@@ -112,5 +127,27 @@ mod tests {
             update(&mut model, Msg::Key(KeyCode::Char(c).into()));
         }
         assert_eq!(model.state.cursor, vec![0, 0]);
+    }
+
+    #[test]
+    fn mouse_clicks_and_wheel_drive_the_tree() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(10));
+        let mouse = |kind, column, row| {
+            Msg::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        );
+        assert_eq!(model.state.cursor, vec![0]);
+        assert!(model.state.is_expanded(&[0]));
+        update(&mut model, mouse(MouseEventKind::ScrollDown, 0, 0));
+        assert_eq!(model.state.top, 3);
     }
 }

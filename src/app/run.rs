@@ -38,6 +38,7 @@ fn to_msg(event: &Event) -> Option<Msg> {
     match event {
         Event::Key(key) if key.is_press() => Some(Msg::Key(*key)),
         Event::Resize(_, height) => Some(Msg::Resize(*height)),
+        Event::Mouse(mouse) => Some(Msg::Mouse(*mouse)),
         _ => None,
     }
 }

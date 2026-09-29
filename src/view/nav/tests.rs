@@ -117,3 +117,46 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn clicking_a_label_selects_and_the_marker_toggles() {
+    let (tree, mut state) = setup();
+    click(&tree, &mut state, 2, 8, 10).unwrap();
+    assert_eq!(state.cursor, vec![1]);
+    assert!(!state.is_expanded(&[1]));
+    click(&tree, &mut state, 2, 2, 10).unwrap();
+    assert!(state.is_expanded(&[1]));
+    click(&tree, &mut state, 2, 3, 10).unwrap();
+    assert!(!state.is_expanded(&[1]));
+}
+
+#[test]
+fn clicks_past_the_last_row_do_nothing() {
+    let (tree, mut state) = setup();
+    click(&tree, &mut state, 9, 0, 10).unwrap();
+    assert_eq!(state.cursor, Vec::<u64>::new());
+}
+
+#[test]
+fn wheel_scrolls_the_view_and_drags_the_cursor_along() {
+    let (tree, mut state) = setup();
+    run(&tree, &mut state, &[Nav::ExpandChildren]);
+    assert_eq!(state.total_rows(), 8);
+    apply(&tree, &mut state, Nav::ScrollDown, 2).unwrap();
+    assert_eq!((state.top, state.row_of(&state.cursor)), (3, Some(3)));
+    apply(&tree, &mut state, Nav::ScrollUp, 2).unwrap();
+    assert_eq!((state.top, state.row_of(&state.cursor)), (0, Some(1)));
+}
+
+proptest! {
+    #[test]
+    fn clicks_keep_the_cursor_visible(clicks in proptest::collection::vec((0u64..8, 0u64..12, nav()), 0..40), height in 1u64..8) {
+        let (tree, mut state) = setup();
+        for (row, column, nav) in clicks {
+            click(&tree, &mut state, row, column, height).unwrap();
+            apply(&tree, &mut state, nav, height).unwrap();
+            let row = state.row_of(&state.cursor).unwrap();
+            prop_assert!(state.top <= row && row < state.top + height);
+        }
+    }
+}
