@@ -93,10 +93,10 @@ fn descend(tree: &impl TreeIndex, item: &RowItem, row: Row) -> Result<Option<Row
             kind: RowKind::Bucket { container, range },
         }),
         Row::Child(k) => tree.children(container, k..k + 1)?.pop().map(|child| {
-            let label = child
-                .key
-                .clone()
-                .map_or(Label::Index(child.index), Label::Key);
+            let label = child.key.clone().map_or_else(
+                || Label::Index(tree.original_index(container, child.index)),
+                Label::Key,
+            );
             let kind = RowKind::Value {
                 label,
                 node: child.node(),

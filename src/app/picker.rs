@@ -12,6 +12,7 @@ use crate::path::render as render_path;
 use crate::schema::{self, Seg};
 use crate::search::Direction;
 use crate::tree::TreeIndex;
+use crate::view::filtered::Filtered;
 use crate::view::jump::reveal;
 use crate::view::resolve::{RootItem, RowKind, chain, segments};
 
@@ -169,7 +170,10 @@ fn subtree_of<T: TreeIndex>(model: &Model<T>) -> Subtree {
     if !model.tree.streamed() {
         return whole;
     }
-    let (tree, root) = (&*model.tree, &model.state.root);
+    let (tree, root) = (
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &model.state.root,
+    );
     container_at(tree, root, &model.state.cursor).unwrap_or(whole)
 }
 
@@ -224,7 +228,10 @@ pub fn step<T: TreeIndex>(
     direction: Direction,
     from: Option<u64>,
 ) {
-    let (tree, scope) = (&*model.tree, &target.scope);
+    let (tree, scope) = (
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &target.scope,
+    );
     match schema::find(tree, &scope.root, &target.segs, from, direction) {
         Ok(Some(rows)) => {
             let rows = [scope.rows.clone(), rows].concat();

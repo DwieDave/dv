@@ -18,6 +18,7 @@ use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
 use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
+use crate::view::filtered::Filtered;
 use crate::view::jump::{bucket_rows, reveal};
 use crate::view::resolve::resolve;
 
@@ -158,7 +159,7 @@ fn try_restore<T: TreeIndex>(app: &mut App<T>) {
     let (Screen::Ready(model), Some(rows)) = (&mut app.screen, &app.restore) else {
         return;
     };
-    let tree = &*model.tree;
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
     if !matches!(resolve(tree, &model.state.root, rows), Ok(Some(_))) {
         return;
     }
@@ -216,12 +217,19 @@ fn refresh<T: TreeIndex>(model: &mut Model<T>, tail: &mut u64) {
     let last = |n: u64| bucket_rows(n, n.saturating_sub(1));
     let on_last = model.following && *tail > 0 && model.state.cursor == last(*tail);
     update(model, Msg::Refresh);
-    let Ok(count) = model.tree.child_count(model.state.root.node) else {
+    let Ok(count) =
+        Filtered::new(&*model.tree, model.filter.as_deref()).child_count(model.state.root.node)
+    else {
         return;
     };
     let records = count.available();
     if on_last && records > *tail {
-        let moved = reveal(&*model.tree, &mut model.state, last(records), model.height);
+        let moved = reveal(
+            &Filtered::new(&*model.tree, model.filter.as_deref()),
+            &mut model.state,
+            last(records),
+            model.height,
+        );
         model.status = moved.err().map(|err| err.to_string());
     }
     *tail = records;

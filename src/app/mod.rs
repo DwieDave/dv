@@ -38,6 +38,7 @@ use crate::ui::table::TableWidget;
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
 use crate::ui::wrap::wrap;
+use crate::view::filtered::{FilterView, Filtered};
 use crate::view::history::JumpList;
 use crate::view::jump::{jump, reveal};
 use crate::view::nav::{self, Nav};
@@ -70,6 +71,8 @@ pub struct Model<T> {
     pub picker: Option<Picker>,
     /// The table view, while open (TB-1).
     pub table: Option<TableState>,
+    /// The active filter's matches (FI-4); everything reads the tree through it.
+    pub filter: Option<Arc<FilterView>>,
     /// Schema paths, collected the first time the picker opens.
     pub schema: Option<Catalog>,
     /// What `n`/`N` repeat.
@@ -117,6 +120,7 @@ impl<T: TreeIndex> Model<T> {
             search: None,
             picker: None,
             table: None,
+            filter: None,
             schema: None,
             last_find: LastFind::None,
             note: None,
@@ -267,7 +271,12 @@ fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
         Step::Forward => model.jumps.forward(current),
     };
     if let Some(rows) = target {
-        let result = reveal(&*model.tree, &mut model.state, rows, model.height);
+        let result = reveal(
+            &Filtered::new(&*model.tree, model.filter.as_deref()),
+            &mut model.state,
+            rows,
+            model.height,
+        );
         model.status = result.err().map(|err| err.to_string());
     }
 }
@@ -284,7 +293,12 @@ fn go_mark<T: TreeIndex>(model: &mut Model<T>, c: char) {
         return;
     };
     let before = model.state.cursor.clone();
-    let result = reveal(&*model.tree, &mut model.state, rows, model.height);
+    let result = reveal(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &mut model.state,
+        rows,
+        model.height,
+    );
     model.status = result.err().map(|err| err.to_string());
     jumped(model, before);
 }
@@ -401,7 +415,12 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         }
         Msg::Nav(action) => {
             let before = model.state.cursor.clone();
-            let result = nav::apply(&*model.tree, &mut model.state, action, model.height);
+            let result = nav::apply(
+                &Filtered::new(&*model.tree, model.filter.as_deref()),
+                &mut model.state,
+                action,
+                model.height,
+            );
             model.status = result.err().map(|err| err.to_string());
             if matches!(action, Nav::Top | Nav::Bottom) {
                 jumped(model, before);
@@ -428,7 +447,10 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::ToggleFollow => model.effects.push(Effect::ToggleFollow),
         Msg::OpenTable => table::open(model),
         Msg::Refresh => {
-            if let Err(err) = model.state.refresh(&*model.tree) {
+            if let Err(err) = model
+                .state
+                .refresh(&Filtered::new(&*model.tree, model.filter.as_deref()))
+            {
                 model.status = Some(err.to_string());
             }
         }
@@ -450,8 +472,13 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
     let result = parse(text)
         .map_err(|err| err.to_string())
         .and_then(|steps| {
-            jump(&*model.tree, &mut model.state, &steps, model.height)
-                .map_err(|err| err.to_string())
+            jump(
+                &Filtered::new(&*model.tree, model.filter.as_deref()),
+                &mut model.state,
+                &steps,
+                model.height,
+            )
+            .map_err(|err| err.to_string())
         });
     match result {
         Ok(()) => {
@@ -485,7 +512,7 @@ fn copy<T: TreeIndex>(model: &mut Model<T>, what: CopyWhat) {
 }
 
 fn cursor_text<T: TreeIndex>(model: &Model<T>, style: Style) -> Result<Option<String>, IndexError> {
-    let tree = &*model.tree;
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
     match resolve(tree, &model.state.root, &model.state.cursor)? {
         Some(item) => value_text(tree, &item, style, COPY_LIMIT),
         None => Ok(None),
@@ -539,7 +566,7 @@ fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) {
 /// Rows that preview line `line` wraps into, or `None` past the last line.
 fn wrapped_rows<T: TreeIndex>(model: &Model<T>, line: u64) -> Option<u64> {
     let width = preview_text_width(model)?;
-    let tree = &*model.tree;
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
     let item = resolve(tree, &model.state.root, &model.state.cursor).ok()??;
     let preview = preview_lines(tree, &item, line, 1).ok()?;
     let text = preview.lines.first()?;
@@ -585,7 +612,13 @@ fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) if over_preview => {}
         MouseEventKind::Down(MouseButton::Left) => {
             let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
-            let result = nav::click(&*model.tree, &mut model.state, row, column, model.height);
+            let result = nav::click(
+                &Filtered::new(&*model.tree, model.filter.as_deref()),
+                &mut model.state,
+                row,
+                column,
+                model.height,
+            );
             model.status = result.err().map(|err| err.to_string());
         }
         _ => {}
@@ -626,7 +659,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
     match &model.table {
         Some(table) => {
             let widget = TableWidget {
-                tree: &*model.tree,
+                tree: &Filtered::new(&*model.tree, model.filter.as_deref()),
                 table,
                 theme: &model.theme,
             };
@@ -662,7 +695,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
 fn render_tree<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
     let (tree_area, preview_area) = panes(&model.preview, area);
     let widget = TreeWidget {
-        tree: &*model.tree,
+        tree: &Filtered::new(&*model.tree, model.filter.as_deref()),
         state: &model.state,
         theme: &model.theme,
     };
@@ -733,7 +766,7 @@ fn picker_title(picker: &Picker) -> String {
 fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
     // Two border rows plus one for the `…` marker.
     let take = usize::from(area.height.saturating_sub(3));
-    let tree = &*model.tree;
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
     let preview = resolve(tree, &model.state.root, &model.state.cursor)
         .and_then(|item| {
             item.map(|item| preview_lines(tree, &item, model.preview.scroll, take))
@@ -789,8 +822,15 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
 
 /// The jq path and type name of the cursor row.
 fn cursor_facts<T: TreeIndex>(model: &Model<T>) -> Result<(String, String), IndexError> {
-    let items = chain(&*model.tree, &model.state.root, &model.state.cursor)?;
-    let path = render(&segments(&*model.tree, &items)?);
+    let items = chain(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &model.state.root,
+        &model.state.cursor,
+    )?;
+    let path = render(&segments(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &items,
+    )?);
     let kind = match items.last().map(|item| &item.kind) {
         Some(RowKind::Value { node, .. }) => kind_name(node.kind),
         Some(RowKind::Bucket { .. }) | None => "bucket",

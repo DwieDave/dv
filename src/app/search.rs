@@ -16,6 +16,7 @@ use crate::schema::{Collected, collect, render};
 use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError, count, find};
 use crate::tree::{LINES_ROOT, NodeRef, TreeIndex};
 use crate::ui::status::{grouped, human_bytes};
+use crate::view::filtered::{FilterView, Filtered};
 use crate::view::jump::reveal;
 use crate::view::resolve::{Label, RootItem, RowKind, chain};
 use crate::view::table::{SortDir, sort_order};
@@ -47,6 +48,8 @@ pub struct Job {
     pub root: RootItem,
     pub from: Option<u64>,
     pub work: Work,
+    /// The filter the job sees the tree through (FI-4).
+    pub filter: Option<Arc<FilterView>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +89,7 @@ pub struct SearchState {
 
 /// Runs one job to completion (or cancellation).
 pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome {
+    let tree = &Filtered::new(tree, job.filter.as_deref());
     let result = match (&job.work, &job.matcher) {
         (Work::Find(direction), Some(m)) => {
             find(tree, &job.root, m, job.from, *direction, pulse).map(JobResult::Found)
@@ -293,7 +297,12 @@ fn accept<T: TreeIndex>(model: &mut Model<T>) {
 }
 
 fn restore<T: TreeIndex>(model: &mut Model<T>, rows: Vec<u64>) {
-    let result = reveal(&*model.tree, &mut model.state, rows, model.height);
+    let result = reveal(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &mut model.state,
+        rows,
+        model.height,
+    );
     model.status = result.err().map(|err| err.to_string());
 }
 
@@ -343,6 +352,7 @@ pub(crate) fn submit_job<T: TreeIndex>(
         root,
         from,
         work,
+        filter: model.filter.clone(),
     };
     let unsent = match &model.jobs {
         Some(jobs) => jobs.send(job).err().map(|err| err.0),
@@ -410,7 +420,7 @@ fn clear_prompt_error<T>(model: &mut Model<T>) {
 
 /// The byte offset a row starts at: its key, its value, or a bucket's first child.
 pub(crate) fn offset_of<T: TreeIndex>(model: &Model<T>, rows: &[u64]) -> Option<u64> {
-    let tree = &*model.tree;
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
     let item = chain(tree, &model.state.root, rows).ok()?.pop()?;
     match item.kind {
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => Some(0),
@@ -460,6 +470,7 @@ mod tests {
             root: TreeState::new(tree).unwrap().root,
             from: None,
             work,
+            filter: None,
         }
     }
 

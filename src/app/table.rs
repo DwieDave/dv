@@ -9,6 +9,7 @@ use crate::app::{Model, jumped};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
 use crate::tree::TreeIndex;
+use crate::view::filtered::Filtered;
 use crate::view::jump::{bucket_rows, reveal};
 use crate::view::state::TreeState;
 pub use crate::view::table::TableState;
@@ -19,7 +20,10 @@ const HEADER_ROWS: u64 = 2;
 
 /// `t`: opens the table for the container at the cursor.
 pub fn open<T: TreeIndex>(model: &mut Model<T>) {
-    match table_at(&*model.tree, &model.state) {
+    match table_at(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &model.state,
+    ) {
         Ok(Some(table)) => model.table = Some(table),
         Ok(None) => model.note = Some("table needs an array of objects".to_owned()),
         Err(err) => model.status = Some(err.to_string()),
@@ -161,7 +165,12 @@ fn open_in_tree<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     let mut path = table.path;
     path.extend(bucket_rows(rows, element));
     let before = model.state.cursor.clone();
-    let result = reveal(&*model.tree, &mut model.state, path, model.height);
+    let result = reveal(
+        &Filtered::new(&*model.tree, model.filter.as_deref()),
+        &mut model.state,
+        path,
+        model.height,
+    );
     model.status = result.err().map(|err| err.to_string());
     jumped(model, before);
 }

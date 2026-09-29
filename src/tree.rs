@@ -121,6 +121,12 @@ pub trait TreeIndex {
         None
     }
 
+    /// The document's index of the child numbered `index` under `node` (they differ only
+    /// in a filtered view, FI-4).
+    fn original_index(&self, _node: NodeRef, index: u64) -> u64 {
+        index
+    }
+
     /// Whether the document is read in streaming mode (on demand from disk).
     fn streamed(&self) -> bool {
         false
