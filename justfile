@@ -28,6 +28,7 @@ data:
     target/release/examples/gen ndjson 15M {{data_dir}}/ndjson-15M.ndjson
     target/release/examples/gen yaml 15M {{data_dir}}/yaml-15M.yaml
     target/release/examples/gen api 100M {{data_dir}}/api-100M.json
+    target/release/examples/gen api 256M {{data_dir}}/api-256M.json
 
 bench:
     cargo bench

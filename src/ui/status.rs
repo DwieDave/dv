@@ -54,8 +54,11 @@ pub fn status_line(status: &Status<'_>, width: usize, theme: &Theme) -> Line<'st
         Some(error) => (error.to_owned(), theme.error),
         None => (facts(status), theme.badge),
     };
-    let room = width.saturating_sub(right.chars().count() + 2);
+    let room = width
+        .saturating_sub(right.chars().count() + 2)
+        .max(width / 2);
     let left = cut_left(&format!("{}  {}", status.path, status.kind), room);
+    let right = cut_left(&right, width.saturating_sub(left.chars().count() + 1));
     let pad = width.saturating_sub(left.chars().count() + right.chars().count());
     Line::from(vec![
         Span::styled(left, theme.key),
@@ -144,10 +147,28 @@ mod tests {
 
     #[test]
     fn long_paths_are_cut_from_the_left() {
-        let line = status_line(&status(None), 45, &Theme::default());
-        let shown = text(&line);
-        assert!(shown.starts_with("…"), "{shown}");
+        let long = Status {
+            path: ".users[3].address.billing.street.name",
+            ..status(None)
+        };
+        let shown = text(&status_line(&long, 45, &Theme::default()));
+        assert!(
+            shown.starts_with("…") && shown.contains("name  string"),
+            "{shown}"
+        );
         assert!(shown.chars().count() <= 45, "{shown}");
+    }
+
+    #[test]
+    fn narrow_bars_keep_half_the_width_for_the_path() {
+        let line = status_line(&status(None), 30, &Theme::default());
+        let shown = text(&line);
+        let left: String = shown.chars().take(15).collect();
+        assert!(left.contains("string"), "{shown}");
+        assert!(
+            shown.ends_with("values") && shown.chars().count() <= 30,
+            "{shown}"
+        );
     }
 
     #[test]
