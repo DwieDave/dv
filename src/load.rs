@@ -14,7 +14,7 @@ use crate::index::background::BackgroundSpill;
 use crate::index::lines::{LineSpill, PendingLines};
 use crate::index::spill::SpillLimits;
 use crate::index::to_usize;
-use crate::json::lines_stream::parse_lines_stream;
+use crate::json::lines_stream::{Moment, follow_lines_stream, parse_lines_stream};
 use crate::json::ndjson::{ParsedLines, parse_lines};
 use crate::json::parse::parse_with;
 use crate::json::stream::{StreamLimits, parse_stream};
@@ -256,9 +256,28 @@ pub fn load_stream(
     budget: StreamBudget,
 ) {
     let result = match format {
-        Format::Ndjson => stream_lines(file, sink, cancel, budget),
+        Format::Ndjson => stream_lines(file, sink, cancel, budget, false),
         Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
     };
+    report(result, sink);
+}
+
+/// Streams an NDJSON `file` and keeps following it: appended lines are indexed as they arrive,
+/// until cancelled or the file shrinks (FO-2, FO-5).
+pub fn load_follow(
+    file: &File,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) {
+    report(stream_lines(file, sink, cancel, budget, true), sink);
+}
+
+/// Sends the outcome of a streaming load (nothing when cancelled).
+fn report(
+    result: Result<Option<Document>, LoadFailure>,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+) {
     match result {
         Ok(Some(doc)) => sink(LoadEvent::Loaded(Ok(doc))),
         Ok(None) => {}
@@ -288,14 +307,18 @@ fn sources(file: &File, budget: StreamBudget) -> Result<Sources, LoadFailure> {
 
 /// Publishes the live index (nodes, then NDJSON lines) and reports progress every
 /// `publish_every` bytes and at the end.
-fn pacer(
+/// Publishing also happens whenever the pipeline goes idle (`idle`), so a followed file shows
+/// its appended lines at once.
+fn pacer<'a>(
     budget: StreamBudget,
-    total: u64,
-    sink: &mut impl FnMut(LoadEvent<Document>),
-) -> impl FnMut(&mut BackgroundSpill, Option<&mut PendingLines<'_>>, u64, bool) + '_ {
+    source: &'a FileSource,
+    sink: &'a mut impl FnMut(LoadEvent<Document>),
+) -> impl FnMut(&mut BackgroundSpill, Option<&mut PendingLines<'_>>, u64, bool, bool) + 'a {
     let mut last = 0;
-    move |builder, lines, frontier, done| {
-        if done || frontier.saturating_sub(last) >= budget.publish_every {
+    move |builder, lines, frontier, done, idle| {
+        let total = source.len();
+        let caught_up = idle && frontier > last;
+        if done || caught_up || frontier.saturating_sub(last) >= budget.publish_every {
             builder.publish(frontier, done);
             if let Some(lines) = lines {
                 lines.publish(done);
@@ -337,8 +360,8 @@ fn stream_json(
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let live = LiveTree::new(src.live, store, root);
     sink(LoadEvent::Live(Document::Live(live)));
-    let mut pace = pacer(budget, src.parse.len(), sink);
-    let publish = |b: &mut BackgroundSpill, frontier, done| pace(b, None, frontier, done);
+    let mut pace = pacer(budget, &src.parse, sink);
+    let publish = |b: &mut BackgroundSpill, frontier, done| pace(b, None, frontier, done, false);
     let parsed = parse_stream(&src.parse, builder, budget.stream, stopper(cancel), publish);
     let Some(parsed) = finished(parsed)? else {
         return Ok(None);
@@ -354,6 +377,7 @@ fn stream_lines(
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
+    follow: bool,
 ) -> Result<Option<Document>, LoadFailure> {
     let src = sources(file, budget)?;
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
@@ -361,12 +385,17 @@ fn stream_lines(
     sink(LoadEvent::Live(Document::Live(LiveTree::lines(
         src.live, store, lines,
     ))));
-    let mut pace = pacer(budget, src.parse.len(), sink);
-    let publish = |b: &mut BackgroundSpill, lines: &mut PendingLines<'_>, frontier, done| {
-        pace(b, Some(lines), frontier, done);
+    let mut pace = pacer(budget, &src.parse, sink);
+    let publish = |b: &mut BackgroundSpill, lines: &mut PendingLines<'_>, frontier, moment| {
+        let (done, idle) = (moment == Moment::Last, moment == Moment::Idle);
+        pace(b, Some(lines), frontier, done, idle);
     };
     let (source, limits) = (&src.parse, budget.stream);
-    let parsed = parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish);
+    let parsed = if follow {
+        follow_lines_stream(source, builder, spill, limits, stopper(cancel), publish)
+    } else {
+        parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish)
+    };
     let Some(parsed) = finished(parsed)? else {
         return Ok(None);
     };
@@ -845,6 +874,72 @@ mod tests {
         assert!(
             matches!(events.last(), Some(LoadEvent::Loaded(Err(f))) if f.message.contains("cannot be streamed"))
         );
+    }
+
+    #[test]
+    fn following_indexes_appended_lines_until_the_file_shrinks() {
+        use std::io::Write;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n")
+            .unwrap();
+        let reader = file.reopen().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = |e| drop(tx.send(e));
+            load_follow(
+                &reader,
+                &mut sink,
+                &AtomicBool::new(false),
+                StreamBudget::testing(),
+            );
+        });
+        let Ok(LoadEvent::Live(doc)) = rx.recv_timeout(Duration::from_secs(5)) else {
+            panic!("no live document")
+        };
+        let records = |doc: &Document| doc.child_count(doc.root().unwrap()).unwrap().available();
+        let wait_for = |n: u64| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while records(&doc) != n {
+                assert!(
+                    Instant::now() < deadline,
+                    "stuck at {} records, waiting for {n}",
+                    records(&doc)
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(3);
+        file.write_all(b"{\"a\":4}\n{\"a\":5}\n{\"a\":6").unwrap();
+        wait_for(5);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            records(&doc),
+            5,
+            "the unterminated line waits for its newline"
+        );
+        file.write_all(b"}\n").unwrap();
+        wait_for(6);
+        let root = doc.root().unwrap();
+        assert_eq!(
+            doc.children(root, 5..6).unwrap().len(),
+            1,
+            "appended records are readable"
+        );
+        file.as_file().set_len(0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(LoadEvent::Loaded(Err(failure))) => {
+                    assert!(failure.message.contains("truncated"), "{}", failure.message);
+                    break;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("no truncation reported: {err}"),
+            }
+        }
     }
 
     #[test]

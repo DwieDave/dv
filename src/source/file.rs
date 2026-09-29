@@ -7,9 +7,10 @@ use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::index::to_usize;
-use crate::source::{Source, SourceError};
+use crate::source::{Growth, Source, SourceError};
 
 /// Bytes per cached chunk.
 pub const CHUNK: u64 = 256 << 10;
@@ -26,7 +27,8 @@ pub struct CacheStats {
 #[derive(Debug)]
 pub struct FileSource {
     file: File,
-    len: u64,
+    /// Grows while following a file (FO-2).
+    len: AtomicU64,
     cache: Mutex<ChunkCache>,
 }
 
@@ -39,6 +41,10 @@ struct ChunkCache {
 }
 
 impl FileSource {
+    fn size(&self) -> u64 {
+        self.len.load(Ordering::Relaxed)
+    }
+
     /// # Errors
     /// When the file's length cannot be read.
     pub fn new(file: File, budget: u64) -> Result<Self, SourceError> {
@@ -48,7 +54,11 @@ impl FileSource {
             capacity,
             ..ChunkCache::default()
         });
-        Ok(Self { file, len, cache })
+        Ok(Self {
+            file,
+            len: AtomicU64::new(len),
+            cache,
+        })
     }
 
     /// Runs `f` on the bytes of `range`, borrowing the cached chunk (no copy) when the range
@@ -61,7 +71,7 @@ impl FileSource {
         range: Range<u64>,
         f: impl FnOnce(&[u8]) -> T,
     ) -> Result<T, SourceError> {
-        let (start, end) = (range.start.min(self.len), range.end.min(self.len));
+        let (start, end) = (range.start.min(self.size()), range.end.min(self.size()));
         if start >= end || start / CHUNK != (end - 1) / CHUNK {
             return Ok(f(&self.read(range)?));
         }
@@ -69,7 +79,7 @@ impl FileSource {
             .cache
             .lock()
             .map_err(|_| io::Error::other("chunk cache poisoned"))?;
-        let chunk = cache.chunk(start / CHUNK, &self.file, self.len)?;
+        let chunk = cache.chunk(start / CHUNK, &self.file, self.size())?;
         let base = start / CHUNK * CHUNK;
         let bytes = chunk
             .get(to_usize(start - base)..to_usize(end - base))
@@ -87,6 +97,12 @@ impl FileSource {
 }
 
 impl ChunkCache {
+    fn forget(&mut self, index: u64) {
+        if let Some((data, _)) = self.chunks.remove(&index) {
+            self.stats.resident -= data.len() as u64;
+        }
+    }
+
     /// Chunk `index`, loaded from `file` when not resident.
     fn chunk(&mut self, index: u64, file: &File, len: u64) -> Result<&[u8], SourceError> {
         self.tick += 1;
@@ -133,18 +149,34 @@ fn load(file: &File, index: u64, len: u64) -> Result<Vec<u8>, SourceError> {
 
 impl Source for FileSource {
     fn len(&self) -> u64 {
-        self.len
+        self.size()
+    }
+
+    /// Picks up growth; the cached chunk holding the old end is dropped (it was partial).
+    fn refresh(&self) -> Result<Growth, SourceError> {
+        let (old, new) = (self.size(), self.file.metadata()?.len());
+        if new < old {
+            return Ok(Growth::Shrank);
+        }
+        if new == old {
+            return Ok(Growth::Same);
+        }
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.forget(old / CHUNK);
+        }
+        self.len.store(new, Ordering::Relaxed);
+        Ok(Growth::Grew)
     }
 
     /// Sequential reads go straight to the file, bypassing (and not evicting) the cache.
     fn read_into(&self, at: u64, out: &mut [u8]) -> Result<usize, SourceError> {
-        let len = to_usize(self.len.saturating_sub(at)).min(out.len());
+        let len = to_usize(self.size().saturating_sub(at)).min(out.len());
         self.file.read_exact_at(&mut out[..len], at)?;
         Ok(len)
     }
 
     fn read(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, SourceError> {
-        let (start, end) = (range.start.min(self.len), range.end.min(self.len));
+        let (start, end) = (range.start.min(self.size()), range.end.min(self.size()));
         let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
         if start >= end {
             return Ok(Cow::Owned(out));
@@ -154,7 +186,7 @@ impl Source for FileSource {
             .lock()
             .map_err(|_| io::Error::other("chunk cache poisoned"))?;
         for index in start / CHUNK..=(end - 1) / CHUNK {
-            let chunk = cache.chunk(index, &self.file, self.len)?;
+            let chunk = cache.chunk(index, &self.file, self.size())?;
             let base = index * CHUNK;
             let (lo, hi) = (
                 start.max(base) - base,

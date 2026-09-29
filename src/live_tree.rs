@@ -70,9 +70,14 @@ impl<R: Source> LiveTree<R> {
     }
 
     fn capped(&self) -> Capped<'_, R> {
+        let cap = self.store.view().frontier;
+        if cap > self.source.len() {
+            // A followed file grew past what this reader has seen (FO-2).
+            let _ = self.source.refresh();
+        }
         Capped {
             inner: &self.source,
-            cap: self.store.view().frontier,
+            cap,
         }
     }
 
@@ -238,7 +243,7 @@ mod tests {
     use super::*;
     use crate::index::lines::{LineSpill, PendingLines};
     use crate::index::spill::{SpillBuilder, SpillLimits};
-    use crate::json::lines_stream::parse_lines_stream;
+    use crate::json::lines_stream::{Moment, parse_lines_stream};
     use crate::json::stream::{StreamLimits, parse_stream};
     use crate::source::MemSource;
     use crate::test_support::{Container, json_value, layout, ndjson};
@@ -356,7 +361,8 @@ mod tests {
             let (spill, lines) = LineSpill::live(2).unwrap();
             let live = LiveTree::lines(MemSource::new(bytes.clone()), store, lines);
             let mut failure = None;
-            let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier: u64, last: bool| {
+            let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier: u64, moment: Moment| {
+                let last = moment == Moment::Last;
                 b.publish(frontier, last);
                 lines.publish(last);
                 if failure.is_none() {

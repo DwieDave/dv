@@ -16,6 +16,17 @@ use crate::json::prefetch::{Chunk, Prefetch};
 use crate::json::stream::StreamLimits;
 use crate::source::Source;
 
+/// When the publish callback runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moment {
+    /// After a block, with more in flight.
+    Progress,
+    /// After a block, with nothing else in flight: a followed file is caught up.
+    Idle,
+    /// At the end, or before a fatal error.
+    Last,
+}
+
 /// A streamed NDJSON document: the filled builder, the line index and the value count.
 #[derive(Debug)]
 pub struct StreamLines<B> {
@@ -39,36 +50,80 @@ pub fn parse_lines_stream<R: Source + Sync, B: Builder>(
     lines: LineSpill,
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
-    mut publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, bool),
+    publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, Moment),
 ) -> Result<StreamLines<B>, IndexError> {
-    let mut merge = Merge {
-        builder,
-        lines,
-        values: 0,
-        frontier: 0,
-        carry: None,
-        max: limits.max,
+    let stream = LineStream {
+        limits,
+        follow: false,
     };
-    let result = scope(|scope| {
-        let blocks = Prefetch::lines(scope, source, limits.initial.max(1));
-        run(scope, &blocks, &mut merge, hook, &mut publish)
-    });
-    let mut pending = PendingLines {
-        spill: &mut merge.lines,
-        pending: false,
+    stream.run(source, builder, lines, hook, publish)
+}
+
+/// Like [`parse_lines_stream`], but at the end it waits for the file to grow and indexes
+/// appended lines as they arrive (FO-2); it ends only when cancelled or the file shrinks.
+///
+/// # Errors
+/// As [`parse_lines_stream`], plus `Truncated` when the file shrinks.
+pub fn follow_lines_stream<R: Source + Sync, B: Builder>(
+    source: &R,
+    builder: B,
+    lines: LineSpill,
+    limits: StreamLimits,
+    hook: impl FnMut(u64) -> ControlFlow<()>,
+    publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, Moment),
+) -> Result<StreamLines<B>, IndexError> {
+    let stream = LineStream {
+        limits,
+        follow: true,
     };
-    let frontier = if result.is_ok() {
-        source.len()
-    } else {
-        merge.frontier
-    };
-    publish(&mut merge.builder, &mut pending, frontier, true);
-    result?;
-    Ok(StreamLines {
-        builder: merge.builder,
-        lines: merge.lines.finish()?,
-        values: merge.values + 1,
-    })
+    stream.run(source, builder, lines, hook, publish)
+}
+
+/// How an NDJSON stream is read.
+struct LineStream {
+    limits: StreamLimits,
+    follow: bool,
+}
+
+impl LineStream {
+    fn run<R: Source + Sync, B: Builder>(
+        &self,
+        source: &R,
+        builder: B,
+        lines: LineSpill,
+        hook: impl FnMut(u64) -> ControlFlow<()>,
+        mut publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, Moment),
+    ) -> Result<StreamLines<B>, IndexError> {
+        let limits = self.limits;
+        let mut merge = Merge {
+            builder,
+            lines,
+            values: 0,
+            frontier: 0,
+            carry: None,
+            max: limits.max,
+        };
+        let result = scope(|scope| {
+            let blocks = Prefetch::lines(scope, source, limits.initial.max(1), self.follow);
+            run(scope, &blocks, &mut merge, hook, &mut publish)
+        });
+        let mut pending = PendingLines {
+            spill: &mut merge.lines,
+            pending: false,
+        };
+        let frontier = if result.is_ok() {
+            source.len()
+        } else {
+            merge.frontier
+        };
+        publish(&mut merge.builder, &mut pending, frontier, Moment::Last);
+        result?;
+        Ok(StreamLines {
+            builder: merge.builder,
+            lines: merge.lines.finish()?,
+            values: merge.values + 1,
+        })
+    }
 }
 
 /// Parses blocks on a fixed pool of threads (block `k` goes to worker `k % n`) and merges
@@ -78,13 +133,15 @@ fn run<'scope, B: Builder>(
     blocks: &Prefetch,
     merge: &mut Merge<B>,
     mut hook: impl FnMut(u64) -> ControlFlow<()>,
-    publish: &mut impl FnMut(&mut B, &mut PendingLines<'_>, u64, bool),
+    publish: &mut impl FnMut(&mut B, &mut PendingLines<'_>, u64, Moment),
 ) -> Result<(), IndexError> {
     let pool = Pool::spawn(scope, workers());
     let (mut sent, mut merged, mut spares) = (0usize, 0usize, Vec::new());
     loop {
+        // Wait for the reader only with nothing in flight, so finished blocks are merged
+        // (and published) while a followed file is idle.
         while sent - merged < pool.size()
-            && let Some(chunk) = blocks.next()
+            && let Some(chunk) = blocks.poll(sent == merged)
         {
             pool.send(
                 sent,
@@ -114,7 +171,12 @@ fn run<'scope, B: Builder>(
             spill: &mut merge.lines,
             pending: false,
         };
-        publish(&mut merge.builder, &mut pending, merge.frontier, false);
+        let moment = if sent == merged {
+            Moment::Idle
+        } else {
+            Moment::Progress
+        };
+        publish(&mut merge.builder, &mut pending, merge.frontier, moment);
     }
 }
 
@@ -460,7 +522,8 @@ mod tests {
             let records = all_records(&bytes);
             let (spill, live) = LineSpill::live(3).unwrap();
             let mut failure = None;
-            let publish = |_: &mut VecStoreBuilder, lines: &mut PendingLines<'_>, frontier: u64, last: bool| {
+            let publish = |_: &mut VecStoreBuilder, lines: &mut PendingLines<'_>, frontier: u64, moment: Moment| {
+                let last = moment == Moment::Last;
                 lines.publish(last);
                 if failure.is_none() {
                     failure = check_live(&live, &records, frontier, last).err();

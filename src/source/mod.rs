@@ -14,6 +14,16 @@ pub enum SourceError {
     Io(#[from] io::Error),
     #[error("input exceeds the in-memory limit of {max_len} bytes")]
     TooLarge { max_len: u64 },
+    #[error("the file was truncated; stopped following")]
+    Truncated,
+}
+
+/// How a source's length changed since it was last looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Growth {
+    Same,
+    Grew,
+    Shrank,
 }
 
 /// Random access to the bytes of a document.
@@ -29,6 +39,14 @@ pub trait Source {
     /// # Errors
     /// Fails when the underlying storage cannot be read.
     fn read(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, SourceError>;
+
+    /// Looks at the length again, for sources that grow (files being appended to).
+    ///
+    /// # Errors
+    /// When the length cannot be read.
+    fn refresh(&self) -> Result<Growth, SourceError> {
+        Ok(Growth::Same)
+    }
 
     /// Fills `out` from offset `at`, returning how many bytes were read (fewer only at the end).
     ///
