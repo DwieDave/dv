@@ -11,6 +11,7 @@ pub mod json;
 pub mod load;
 pub mod path;
 pub mod position;
+pub mod schema;
 pub mod search;
 pub mod snippet;
 pub mod source;

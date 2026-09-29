@@ -1,6 +1,7 @@
 //! The Elm-style application core: model, messages, update and view (D-8).
 
 pub mod keymap;
+pub mod picker;
 pub mod prompt;
 pub mod run;
 pub mod screen;
@@ -13,16 +14,19 @@ use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::keymap::Keymap;
+use crate::app::picker::{Entries, Picker};
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::search::{Job, Outcome, SearchState};
 use crate::index::IndexError;
 use crate::json::format::Style;
 use crate::json::lex::Kind;
 use crate::path::{parse, render};
+use crate::schema::Seg;
 use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
 use crate::ui::preview::PreviewWidget;
@@ -56,6 +60,12 @@ pub struct Model<T> {
     /// An open input line, which takes all keys.
     pub prompt: Option<Prompt>,
     pub search: Option<SearchState>,
+    /// The fuzzy schema-path picker, when open.
+    pub picker: Option<Picker>,
+    /// Schema paths, collected the first time the picker opens.
+    pub schema: Option<Entries>,
+    /// What `n`/`N` repeat.
+    pub last_find: LastFind,
     /// Transient information for the status bar; the next key clears it.
     pub note: Option<String>,
     /// Side effects for the app layer to perform (keeps `update` pure).
@@ -85,6 +95,9 @@ impl<T: TreeIndex> Model<T> {
             status: None,
             prompt: None,
             search: None,
+            picker: None,
+            schema: None,
+            last_find: LastFind::None,
             note: None,
             effects: Vec::new(),
             jobs: None,
@@ -109,6 +122,15 @@ pub enum Msg {
     SearchOutcome(Outcome),
     Preview(PreviewCmd),
     Copy(CopyWhat),
+    OpenPicker,
+}
+
+/// The most recent kind of find, repeated by `n`/`N`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastFind {
+    None,
+    Text,
+    Schema(Vec<Seg>),
 }
 
 /// What `y` chords copy.
@@ -190,6 +212,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             search::prompt_key(model, key);
         }
         Msg::Key(key) if model.prompt.is_some() => prompt_key(model, key),
+        Msg::Key(key) if model.picker.is_some() => picker::key(model, key),
         Msg::Key(key) => {
             if let Some(next) = model.keymap.press(key) {
                 update(model, next);
@@ -210,6 +233,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::SearchOutcome(outcome) => search::apply(model, outcome),
         Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
         Msg::Copy(what) => copy(model, what),
+        Msg::OpenPicker => picker::open(model),
     }
 }
 
@@ -345,6 +369,9 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
     if let Some(area) = preview_area {
         render_preview(model, frame, area);
     }
+    if let Some(picker) = &model.picker {
+        render_picker(picker, frame, main_area, &model.theme);
+    }
     match &model.prompt {
         Some(prompt) => {
             let flags = model
@@ -376,6 +403,33 @@ fn flags(query: &Query) -> String {
         scope,
     ];
     marks.into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+/// The picker popup: the query line, then matches with the selection highlighted.
+fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let [popup] = Layout::horizontal([Constraint::Percentage(80)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Percentage(70)])
+        .flex(Flex::Center)
+        .areas(popup);
+    let mut lines = vec![Line::raw(format!("> {}", picker.query))];
+    match &picker.entries {
+        None => lines.push(Line::styled("indexing keys…", theme.badge)),
+        Some(entries) => lines.extend(picker.matches.iter().enumerate().map(|(i, &m)| {
+            let line = Line::styled(entries[m].0.clone(), theme.key);
+            if i == picker.selected {
+                line.patch_style(theme.selection)
+            } else {
+                line
+            }
+        })),
+    }
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" keys ")),
+        popup,
+    );
 }
 
 /// The cursor item's preview, sized to the pane's inner height.

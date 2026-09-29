@@ -7,10 +7,12 @@ use std::thread;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::Model;
+use crate::app::picker::Entries;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
+use crate::app::{LastFind, Model, picker};
 use crate::index::children::Child;
-use crate::search::{Direction, Hit, Matcher, Query, Scope, count, find};
+use crate::schema::{Seg, collect, render};
+use crate::search::{Direction, Hit, Matcher, Query, Scope, SearchError, count, find};
 use crate::tree::{LINES_ROOT, TreeIndex};
 use crate::ui::status::grouped;
 use crate::view::jump::reveal;
@@ -21,12 +23,15 @@ use crate::view::resolve::{Label, RootItem, RowKind, chain};
 pub enum Work {
     Find(Direction),
     Count,
+    /// Collect the document's schema paths for the picker.
+    Schema,
 }
 
 #[derive(Debug, Clone)]
 pub struct Job {
     pub generation: u64,
-    pub matcher: Matcher,
+    /// The compiled query; `None` for schema collection.
+    pub matcher: Option<Matcher>,
     pub root: RootItem,
     pub from: Option<u64>,
     pub work: Work,
@@ -37,6 +42,8 @@ pub enum JobResult {
     Found(Option<Hit>),
     /// `None` when cancelled.
     Counted(Option<u64>),
+    /// `None` when cancelled.
+    Schema(Option<Entries>),
     Failed(String),
 }
 
@@ -58,23 +65,33 @@ pub struct SearchState {
 
 /// Runs one job to completion (or cancellation).
 pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, cancelled: &dyn Fn() -> bool) -> Outcome {
-    let result = match job.work {
-        Work::Find(direction) => find(
-            tree,
-            &job.root,
-            &job.matcher,
-            job.from,
-            direction,
-            cancelled,
-        )
-        .map(JobResult::Found),
-        Work::Count => count(tree, &job.root, &job.matcher, cancelled).map(JobResult::Counted),
+    let result = match (job.work, &job.matcher) {
+        (Work::Find(direction), Some(m)) => {
+            find(tree, &job.root, m, job.from, direction, cancelled).map(JobResult::Found)
+        }
+        (Work::Count, Some(m)) => count(tree, &job.root, m, cancelled).map(JobResult::Counted),
+        (Work::Schema, _) => collect(tree, &job.root, cancelled)
+            .map(|paths| JobResult::Schema(paths.map(entries)))
+            .map_err(SearchError::from),
+        (Work::Find(_) | Work::Count, None) => {
+            Ok(JobResult::Failed("no search pattern".to_owned()))
+        }
     };
     let result = result.unwrap_or_else(|err| JobResult::Failed(err.to_string()));
     Outcome {
         generation: job.generation,
         result,
     }
+}
+
+/// Schema paths paired with their rendering, for the picker.
+fn entries(paths: Vec<Vec<Seg>>) -> Entries {
+    Arc::new(
+        paths
+            .into_iter()
+            .map(|segs| (render(&segs), segs))
+            .collect(),
+    )
 }
 
 /// A thread that runs jobs of the current generation and reports through `notify`.
@@ -108,6 +125,7 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
         scope: Scope::Both,
     };
     let origin = model.state.cursor.clone();
+    model.last_find = LastFind::Text;
     model.search = Some(SearchState {
         query,
         origin,
@@ -205,6 +223,10 @@ fn restore<T: TreeIndex>(model: &mut Model<T>, rows: Vec<u64>) {
 
 /// `n` / `N`: the next or previous match, from the last hit if the cursor is still on it.
 pub fn step<T: TreeIndex>(model: &mut Model<T>, direction: Direction) {
+    if let LastFind::Schema(segs) = &model.last_find {
+        let (segs, from) = (segs.clone(), offset_of(model, &model.state.cursor));
+        return picker::step(model, &segs, direction, from);
+    }
     let Some(search) = model.search.as_ref() else {
         return;
     };
@@ -226,6 +248,16 @@ fn dispatch<T: TreeIndex>(model: &mut Model<T>, work: Work, from: Option<u64>) {
         Ok(matcher) => matcher,
         Err(err) => return note(model, err.to_string()),
     };
+    submit_job(model, work, Some(matcher), from);
+}
+
+/// Starts a job of a new generation, on the worker or inline.
+pub(crate) fn submit_job<T: TreeIndex>(
+    model: &mut Model<T>,
+    work: Work,
+    matcher: Option<Matcher>,
+    from: Option<u64>,
+) {
     let generation = model.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let job = Job {
         generation,
@@ -259,12 +291,13 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         }
         JobResult::Found(None) => note(model, "no match".to_owned()),
         JobResult::Counted(Some(n)) => note(model, format!("{} matches", grouped(n))),
-        JobResult::Counted(None) => {}
+        JobResult::Counted(None) | JobResult::Schema(None) => {}
+        JobResult::Schema(Some(entries)) => picker::receive(model, entries),
         JobResult::Failed(message) => note(model, message),
     }
 }
 
-fn note<T>(model: &mut Model<T>, text: String) {
+pub(crate) fn note<T>(model: &mut Model<T>, text: String) {
     if let Some(prompt) = model.prompt.as_mut() {
         prompt.error = Some(text.clone());
     }
@@ -280,7 +313,7 @@ fn clear_prompt_error<T>(model: &mut Model<T>) {
 }
 
 /// The byte offset a row starts at: its key, its value, or a bucket's first child.
-fn offset_of<T: TreeIndex>(model: &Model<T>, rows: &[u64]) -> Option<u64> {
+pub(crate) fn offset_of<T: TreeIndex>(model: &Model<T>, rows: &[u64]) -> Option<u64> {
     let tree = &*model.tree;
     let item = chain(tree, &model.state.root, rows).ok()?.pop()?;
     match item.kind {
@@ -327,7 +360,7 @@ mod tests {
         });
         Job {
             generation: 7,
-            matcher,
+            matcher: Some(matcher),
             root: TreeState::new(tree).unwrap().root,
             from: None,
             work,

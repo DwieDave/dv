@@ -56,6 +56,7 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
         (KeyCode::Char('N'), false) => return Some(Msg::SearchStep(Direction::Backward)),
         (KeyCode::Char('d'), true) => Nav::HalfDown,
         (KeyCode::Char('u'), true) => Nav::HalfUp,
+        (KeyCode::Char('p'), true) => return Some(Msg::OpenPicker),
         (KeyCode::Char('j') | KeyCode::Down, false) => Nav::Down,
         (KeyCode::Char('k') | KeyCode::Up, false) => Nav::Up,
         (KeyCode::Char('h') | KeyCode::Left, false) => Nav::Collapse,
