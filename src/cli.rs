@@ -22,6 +22,7 @@ use crate::format::{Format, SNIFF_LEN, detect};
 use crate::load::{LoadEvent, Request, StreamBudget, load_spooled, load_stream};
 use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
 use crate::source::file::FileSource;
+use crate::state_file::{self, FileKey, Positions};
 use crate::stream_tree::StreamTree;
 use crate::tree::TreeIndex;
 
@@ -115,7 +116,30 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
         }
         return index_only_input(input, budget).map(Some);
     }
-    tui(loader(input, budget), &config, warning).map(|()| None)
+    let key = cli
+        .path
+        .as_deref()
+        .filter(|p| *p != Path::new("-"))
+        .and_then(FileKey::of);
+    let state = state_file::default_path();
+    let restore = key
+        .as_ref()
+        .zip(state.as_ref())
+        .and_then(|(key, state)| Positions::load(state).get(key).cloned());
+    let cursor = tui(loader(input, budget), &config, warning, restore)?;
+    if let (Some(key), Some(state), Some(cursor)) = (key, state, cursor) {
+        remember(&state, key, cursor);
+    }
+    Ok(None)
+}
+
+/// Saves the cursor for next time (HI-3); failing to is only worth a warning.
+fn remember(state: &Path, key: FileKey, cursor: Vec<u64>) {
+    let mut positions = Positions::load(state);
+    positions.put(key, cursor);
+    if let Err(err) = positions.save(state) {
+        eprintln!("dv: could not remember the position: {err}");
+    }
 }
 
 /// The UI's loader thread body for `input`.
@@ -252,7 +276,13 @@ fn index_only(
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(loader: Loader, config: &Config, warning: Option<String>) -> Result<(), CliError> {
+/// Runs the UI; returns the final cursor of the open document.
+fn tui(
+    loader: Loader,
+    config: &Config,
+    warning: Option<String>,
+    restore: Option<Vec<u64>>,
+) -> Result<Option<Vec<u64>>, CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
@@ -260,12 +290,18 @@ fn tui(loader: Loader, config: &Config, warning: Option<String>) -> Result<(), C
         let mut sink = |event| drop(loader_tx.send(AppEvent::Load(event)));
         loader(&mut sink, &loader_cancel);
     });
-    let mut app = App::new(cancel)
+    let app = App::new(cancel)
         .with_events(tx.clone())
         .with_config(config, warning);
+    let mut app = match restore {
+        Some(rows) => app.with_position(rows),
+        None => app,
+    };
     thread::spawn(move || forward_input(&tx));
     let mut guard = TerminalGuard::enter()?;
-    Ok(run_app(&mut guard.terminal, &mut app, &rx)?)
+    run_app(&mut guard.terminal, &mut app, &rx)?;
+    drop(guard);
+    Ok(app.final_cursor())
 }
 
 /// Streams and indexes a file without starting the UI (benchmarks, NFR-12).

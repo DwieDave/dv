@@ -20,6 +20,7 @@ pub mod schema;
 pub mod search;
 pub mod snippet;
 pub mod source;
+pub mod state_file;
 pub mod stream_tree;
 pub mod temp;
 pub mod tree;

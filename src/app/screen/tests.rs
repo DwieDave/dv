@@ -314,3 +314,15 @@ fn the_footer_can_be_turned_off_in_the_config() {
     };
     assert_eq!(model.height, 4, "only the status row is taken");
 }
+
+#[test]
+fn a_remembered_position_is_restored_once_its_rows_exist() {
+    let mut app = app().with_position(vec![0, 1]);
+    update_app(&mut app, loaded(br#"{"a": [1, 2], "b": 3}"#));
+    let Screen::Ready(model) = &app.screen else {
+        panic!("not ready")
+    };
+    assert_eq!(model.state.cursor, vec![0, 1]);
+    assert!(model.state.is_expanded(&[0]));
+    assert_eq!(app.final_cursor(), Some(vec![0, 1]));
+}

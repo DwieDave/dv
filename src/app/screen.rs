@@ -18,6 +18,8 @@ use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
 use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
+use crate::view::jump::reveal;
+use crate::view::resolve::resolve;
 
 /// What is on screen.
 #[derive(Debug)]
@@ -51,6 +53,8 @@ pub struct App<T> {
     pub footer: bool,
     /// A config problem, shown once the document opens.
     pub warning: Option<String>,
+    /// A remembered cursor to restore once its rows exist (HI-3).
+    pub restore: Option<Vec<u64>>,
 }
 
 impl<T: TreeIndex> App<T> {
@@ -70,6 +74,25 @@ impl<T: TreeIndex> App<T> {
             theme: Theme::default(),
             footer: true,
             warning: None,
+            restore: None,
+        }
+    }
+
+    /// Restores the cursor at `rows` once the document has them.
+    #[must_use]
+    pub fn with_position(self, rows: Vec<u64>) -> Self {
+        Self {
+            restore: Some(rows),
+            ..self
+        }
+    }
+
+    /// The cursor when the document is open, to remember for next time.
+    #[must_use]
+    pub fn final_cursor(&self) -> Option<Vec<u64>> {
+        match &self.screen {
+            Screen::Ready(model) => Some(model.state.cursor.clone()),
+            _ => None,
         }
     }
 
@@ -97,6 +120,28 @@ impl<T: TreeIndex> App<T> {
 
 /// Applies one event to the app.
 pub fn update_app<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: AppEvent<T>) {
+    let loading = matches!(event, AppEvent::Load(_));
+    apply_event(app, event);
+    if loading {
+        try_restore(app);
+    }
+}
+
+/// Moves to the remembered position when its rows resolve (streamed rows may come later).
+fn try_restore<T: TreeIndex>(app: &mut App<T>) {
+    let (Screen::Ready(model), Some(rows)) = (&mut app.screen, &app.restore) else {
+        return;
+    };
+    let tree = &*model.tree;
+    if !matches!(resolve(tree, &model.state.root, rows), Ok(Some(_))) {
+        return;
+    }
+    let result = reveal(tree, &mut model.state, rows.clone(), model.height);
+    model.status = result.err().map(|err| err.to_string());
+    app.restore = None;
+}
+
+fn apply_event<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: AppEvent<T>) {
     match event {
         AppEvent::Input(input) => on_input(app, &input),
         AppEvent::Load(LoadEvent::Progress(progress)) => match &mut app.screen {
