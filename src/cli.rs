@@ -1,8 +1,8 @@
 //! Command-line interface (FR-1, FR-3).
 
 use std::fs::File;
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Sender};
@@ -39,8 +39,8 @@ pub enum Mode {
 #[derive(Debug, Parser)]
 #[command(name = "dv", version, about)]
 pub struct Cli {
-    /// File to open.
-    pub path: PathBuf,
+    /// File to open; omit it or pass `-` to read stdin.
+    pub path: Option<PathBuf>,
     /// Input format; detected from the file when omitted.
     #[arg(long, value_enum)]
     pub format: Option<FormatArg>,
@@ -63,7 +63,12 @@ pub enum CliError {
     Parse(String),
     #[error("terminal: {0}")]
     Terminal(#[from] io::Error),
+    #[error("no input: pass a file or pipe data into dv")]
+    NoInput,
 }
+
+/// A readable input and the facts used to load it.
+type Input = (Box<dyn Read + Send>, Request, String);
 
 /// In-memory mode never holds more than the u32 index can address (NFR-8).
 const MAX_IN_MEMORY: u64 = u32::MAX as u64;
@@ -76,21 +81,39 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
     if cli.mode == Mode::Stream {
         return Err(CliError::Unsupported("streaming mode"));
     }
-    let path = cli.path.display().to_string();
-    let file = File::open(&cli.path).map_err(|source| CliError::Open {
-        path: path.clone(),
-        source,
-    })?;
-    let request = Request {
-        path: Some(cli.path.clone()),
-        format: cli.format.map(Format::from),
-        size_hint: file.metadata().ok().map(|m| m.len()),
-        max_len: MAX_IN_MEMORY,
-    };
+    let (reader, request, label) = open_input(cli)?;
     if cli.index_only {
-        return index_only(file, &request, &path).map(Some);
+        return index_only(reader, &request, &label).map(Some);
     }
-    tui(file, request).map(|()| None)
+    tui(reader, request).map(|()| None)
+}
+
+/// The file named on the command line, or stdin when omitted or `-` (FR-1, FR-2).
+fn open_input(cli: &Cli) -> Result<Input, CliError> {
+    let format = cli.format.map(Format::from);
+    let base = Request {
+        format,
+        max_len: MAX_IN_MEMORY,
+        ..Request::default()
+    };
+    match cli.path.as_deref().filter(|p| *p != Path::new("-")) {
+        Some(path) => {
+            let label = path.display().to_string();
+            let file = File::open(path).map_err(|source| CliError::Open {
+                path: label.clone(),
+                source,
+            })?;
+            let size_hint = file.metadata().ok().map(|m| m.len());
+            let request = Request {
+                path: Some(path.to_path_buf()),
+                size_hint,
+                ..base
+            };
+            Ok((Box::new(file), request, label))
+        }
+        None if io::stdin().is_terminal() => Err(CliError::NoInput),
+        None => Ok((Box::new(io::stdin()), base, "<stdin>".to_owned())),
+    }
 }
 
 impl From<FormatArg> for Format {
@@ -104,7 +127,7 @@ impl From<FormatArg> for Format {
 }
 
 /// Loads and indexes without starting the UI (benchmarks, NFR-1).
-fn index_only(file: File, request: &Request, path: &str) -> Result<String, CliError> {
+fn index_only(file: impl Read, request: &Request, path: &str) -> Result<String, CliError> {
     let mut outcome = None;
     load(
         file,
@@ -124,7 +147,7 @@ fn index_only(file: File, request: &Request, path: &str) -> Result<String, CliEr
 }
 
 /// Opens the UI at once while a worker thread loads and indexes the file (FR-8).
-fn tui(file: File, request: Request) -> Result<(), CliError> {
+fn tui(file: impl Read + Send + 'static, request: Request) -> Result<(), CliError> {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let (loader_tx, loader_cancel) = (tx.clone(), Arc::clone(&cancel));
@@ -156,7 +179,7 @@ mod tests {
         let cli = Cli::try_parse_from(["dv", "a.json"]).unwrap();
         assert_eq!(
             (cli.path, cli.format, cli.mode, cli.index_only),
-            (PathBuf::from("a.json"), None, Mode::Auto, false)
+            (Some(PathBuf::from("a.json")), None, Mode::Auto, false)
         );
         let cli = Cli::try_parse_from([
             "dv",
@@ -177,6 +200,6 @@ mod tests {
     #[test]
     fn bad_values_are_rejected() {
         assert!(Cli::try_parse_from(["dv", "--format", "toml", "a"]).is_err());
-        assert!(Cli::try_parse_from(["dv"]).is_err());
+        assert!(Cli::try_parse_from(["dv"]).is_ok_and(|cli| cli.path.is_none()));
     }
 }

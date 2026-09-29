@@ -1,7 +1,7 @@
 //! End-to-end checks of the `dv` binary.
 
 use std::io::{self, Write};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn dv(args: &[&str]) -> io::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_dv")).args(args).output()
@@ -70,5 +70,38 @@ fn index_only_handles_ndjson_with_bad_lines() {
     std::fs::copy(file.path(), &path).unwrap();
     let out = dv(&["--index-only", path.to_str().unwrap()]).unwrap();
     std::fs::remove_file(&path).unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+
+fn dv_stdin(args: &[&str], input: &[u8]) -> io::Result<Output> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dv"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("no stdin"))?
+        .write_all(input)?;
+    child.wait_with_output()
+}
+
+#[test]
+fn stdin_is_read_with_dash_or_no_path() {
+    for args in [&["--index-only", "-"][..], &["--index-only"][..]] {
+        let out = dv_stdin(args, b"{\"a\": [1, 2]}").unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "indexed 13 bytes"
+        );
+    }
+}
+
+#[test]
+fn piped_ndjson_is_detected_from_content() {
+    let out = dv_stdin(&["--index-only"], b"{\"a\":1}\n{bad\n{\"a\":2}\n").unwrap();
     assert!(out.status.success(), "{out:?}");
 }
