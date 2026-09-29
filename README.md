@@ -46,6 +46,10 @@ temp file and streamed. YAML can't be streamed; convert it first (`yq -o=json`).
 
 ## Keys
 
+The footer shows the keys that matter right now, lazygit-style. It changes in the search
+prompt, the path prompt, the picker and the help overlay, and drops the least important hints
+on narrow terminals (`? more`). `?` opens an overlay listing every key.
+
 ### Navigation
 
 | Key | Action |
@@ -82,9 +86,11 @@ Collecting paths stops after 2M values ("partial list").
 |---|---|
 | `p` | Show or hide the preview pane |
 | `<` / `>` | Move the split |
-| `J` / `K` | Scroll the preview |
+| `J` / `K` | Scroll the preview (by screen rows when wrapped) |
+| `w` | Wrap long lines in the preview; continuation rows align with the value |
 | `yp` | Copy the jq path of the cursor |
 | `yy` / `yY` | Copy the value, minified / pretty-printed |
+| `?` | Help overlay with every key (`j`/`k` scroll, `?`/`Esc`/`q` close) |
 | `q` / `Ctrl-c` | Quit |
 
 Copying uses `pbcopy`, falling back to the OSC 52 terminal escape.
@@ -107,6 +113,9 @@ badge       = "darkgray"      # counts and borders
 marker      = "blue"          # expand markers, loading bar
 selection   = "bg:#303848 bold"
 error       = "lightred"
+
+[ui]
+footer = true             # the key-hint row and rule under the tree
 
 [mode]
 threshold     = "256MB"   # files above this stream (auto mode)
