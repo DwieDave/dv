@@ -8,6 +8,7 @@ use crate::index::children::Child;
 use crate::json::lex::Kind;
 use crate::json::text::unescape;
 use crate::path::{Segment, render as render_path};
+use crate::pulse::Pulse;
 use crate::search::Direction;
 use crate::tree::{NodeRef, TreeIndex};
 use crate::view::jump::{bucket_rows, count as child_total};
@@ -19,6 +20,8 @@ pub const MAX_ENTRIES: usize = 100_000;
 pub const MAX_DEPTH: usize = 256;
 /// Most values visited while collecting, which bounds the time a huge document takes.
 pub const MAX_VISITS: u64 = 2_000_000;
+/// Values visited between two partial lists.
+pub const PARTIAL_EVERY: u64 = 100_000;
 
 /// Collected schema paths; `truncated` when a cap stopped the walk early.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,7 @@ pub struct Collected {
 pub(crate) struct Caps {
     pub(crate) visits: u64,
     pub(crate) entries: usize,
+    pub(crate) partial_every: u64,
 }
 
 impl Default for Caps {
@@ -39,6 +43,7 @@ impl Default for Caps {
         Self {
             visits: MAX_VISITS,
             entries: MAX_ENTRIES,
+            partial_every: PARTIAL_EVERY,
         }
     }
 }
@@ -60,22 +65,22 @@ const WINDOW: u64 = 1024;
 pub fn collect(
     tree: &impl TreeIndex,
     root: &RootItem,
-    cancelled: &dyn Fn() -> bool,
+    pulse: &dyn Pulse,
 ) -> Result<Option<Collected>, IndexError> {
-    collect_within(tree, root, cancelled, Caps::default())
+    collect_within(tree, root, pulse, Caps::default())
 }
 
-/// [`collect`] with explicit caps.
+/// [`collect`] with explicit caps; the pulse hears the list so far every `partial_every` visits.
 pub(crate) fn collect_within(
     tree: &impl TreeIndex,
     root: &RootItem,
-    cancelled: &dyn Fn() -> bool,
+    pulse: &dyn Pulse,
     caps: Caps,
 ) -> Result<Option<Collected>, IndexError> {
     let (mut seen, mut visits) = (Trie::default(), 0);
     let mut stack = vec![Frame::new(tree, root.node, 0)?];
     while let Some(frame) = stack.last_mut() {
-        if cancelled() {
+        if pulse.cancelled() {
             return Ok(None);
         }
         let Some(child) = frame.next(tree)? else {
@@ -87,6 +92,9 @@ pub(crate) fn collect_within(
         }
         visits += 1;
         let id = seen.insert(frame.id, seg_of(tree, &child)?);
+        if visits.is_multiple_of(caps.partial_every.max(1)) {
+            pulse.schema(seen.collected(false));
+        }
         if is_container(child.node()) && stack.len() < MAX_DEPTH {
             stack.push(Frame::new(tree, child.node(), id)?);
         }

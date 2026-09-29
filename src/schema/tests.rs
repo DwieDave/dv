@@ -58,7 +58,12 @@ fn collection_stops_at_the_caps_and_says_so() {
     let (tree, root) = doc(&json!({"a": 1, "b": 2, "c": 3, "d": 4}));
     let key = |k: &str| vec![Seg::Key(k.to_owned())];
     let within = |visits, entries| {
-        collect_within(&tree, &root, &|| false, Caps { visits, entries })
+        let caps = Caps {
+            visits,
+            entries,
+            partial_every: u64::MAX,
+        };
+        collect_within(&tree, &root, &|| false, caps)
             .unwrap()
             .unwrap()
     };
@@ -77,6 +82,39 @@ fn collection_stops_at_the_caps_and_says_so() {
             truncated: false
         }
     );
+}
+
+/// Records partial lists; never cancels.
+struct Partials(std::cell::RefCell<Vec<Collected>>);
+
+impl crate::pulse::Pulse for Partials {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn schema(&self, partial: Collected) {
+        self.0.borrow_mut().push(partial);
+    }
+}
+
+#[test]
+fn partial_lists_stream_out_while_collecting() {
+    let (tree, root) = doc(&json!({"a": 1, "b": {"c": 2}, "d": 3, "e": 4}));
+    let caps = Caps {
+        partial_every: 2,
+        ..Caps::default()
+    };
+    let recorder = Partials(std::cell::RefCell::new(Vec::new()));
+    let done = collect_within(&tree, &root, &recorder, caps)
+        .unwrap()
+        .unwrap();
+    let partials = recorder.0.take();
+    assert_eq!(partials.len(), 2, "{partials:?}");
+    for partial in &partials {
+        assert!(!partial.truncated);
+        assert_eq!(partial.paths[..], done.paths[..partial.paths.len()]);
+    }
+    assert!(partials[0].paths.len() < partials[1].paths.len());
 }
 
 #[test]

@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
+use crate::pulse::Pulse;
 use crate::tree::TreeIndex;
 use crate::view::jump::{bucket_rows, count as child_total};
 use crate::view::resolve::RootItem;
@@ -28,19 +29,6 @@ pub struct Scanned {
     pub bytes: u64,
     /// Matches so far, when counting.
     pub matches: Option<u64>,
-}
-
-/// Consulted between windows: whether to stop, and where to send progress.
-pub trait Pulse {
-    fn cancelled(&self) -> bool;
-
-    fn report(&self, _scanned: Scanned) {}
-}
-
-impl<F: Fn() -> bool> Pulse for F {
-    fn cancelled(&self) -> bool {
-        self()
-    }
 }
 
 /// Where matches may fall.
@@ -257,7 +245,7 @@ impl Progress {
         if scanned - self.reported.get() >= self.every {
             self.reported.set(scanned);
             let matches = self.matches.get();
-            pulse.report(Scanned {
+            pulse.scanned(Scanned {
                 bytes: scanned,
                 matches,
             });

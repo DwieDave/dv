@@ -11,10 +11,9 @@ use crate::app::picker::Catalog;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::{LastFind, Model, picker};
 use crate::index::children::Child;
+use crate::pulse::Pulse;
 use crate::schema::{Collected, collect, render};
-use crate::search::{
-    Direction, Hit, Matcher, Pulse, Query, Scanned, Scope, SearchError, count, find,
-};
+use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError, count, find};
 use crate::tree::{LINES_ROOT, TreeIndex};
 use crate::ui::status::{grouped, human_bytes};
 use crate::view::jump::reveal;
@@ -74,8 +73,8 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
             find(tree, &job.root, m, job.from, direction, pulse).map(JobResult::Found)
         }
         (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
-        (Work::Schema, _) => collect(tree, &job.root, &|| pulse.cancelled())
-            .map(|collected| JobResult::Schema(collected.map(catalog)))
+        (Work::Schema, _) => collect(tree, &job.root, pulse)
+            .map(|collected| JobResult::Schema(collected.map(|c| catalog(c, true))))
             .map_err(SearchError::from),
         (Work::Find(_) | Work::Count, None) => {
             Ok(JobResult::Failed("no search pattern".to_owned()))
@@ -89,7 +88,7 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
 }
 
 /// Schema paths paired with their rendering, for the picker.
-fn catalog(collected: Collected) -> Catalog {
+fn catalog(collected: Collected, done: bool) -> Catalog {
     let entries = collected
         .paths
         .into_iter()
@@ -97,6 +96,7 @@ fn catalog(collected: Collected) -> Catalog {
     Catalog {
         entries: Arc::new(entries.collect()),
         truncated: collected.truncated,
+        done,
     }
 }
 
@@ -112,9 +112,19 @@ impl Pulse for WorkerPulse<'_> {
         self.generation.load(Ordering::Relaxed) != self.job
     }
 
-    fn report(&self, scanned: Scanned) {
+    fn scanned(&self, scanned: Scanned) {
+        self.interim(JobResult::Scanning(scanned));
+    }
+
+    fn schema(&self, partial: Collected) {
+        self.interim(JobResult::Schema(Some(catalog(partial, false))));
+    }
+}
+
+impl WorkerPulse<'_> {
+    /// Sends an interim result while the job is still current.
+    fn interim(&self, result: JobResult) {
         if !self.cancelled() {
-            let result = JobResult::Scanning(scanned);
             (self.notify)(Outcome {
                 generation: self.job,
                 result,
@@ -628,9 +638,9 @@ mod tests {
             bytes: 1,
             matches: None,
         };
-        pulse.report(scanned);
+        pulse.scanned(scanned);
         generation.store(8, Ordering::Relaxed);
-        pulse.report(scanned);
+        pulse.scanned(scanned);
         assert!(pulse.cancelled());
         let expected = Outcome {
             generation: 7,

@@ -51,6 +51,32 @@ impl FileSource {
         Ok(Self { file, len, cache })
     }
 
+    /// Runs `f` on the bytes of `range`, borrowing the cached chunk (no copy) when the range
+    /// lies within one chunk.
+    ///
+    /// # Errors
+    /// Read failures.
+    pub fn inspect<T>(
+        &self,
+        range: Range<u64>,
+        f: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, SourceError> {
+        let (start, end) = (range.start.min(self.len), range.end.min(self.len));
+        if start >= end || start / CHUNK != (end - 1) / CHUNK {
+            return Ok(f(&self.read(range)?));
+        }
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| io::Error::other("chunk cache poisoned"))?;
+        let chunk = cache.chunk(start / CHUNK, &self.file, self.len)?;
+        let base = start / CHUNK * CHUNK;
+        let bytes = chunk
+            .get(to_usize(start - base)..to_usize(end - base))
+            .unwrap_or_default();
+        Ok(f(bytes))
+    }
+
     #[must_use]
     pub fn stats(&self) -> CacheStats {
         self.cache
@@ -162,6 +188,17 @@ mod tests {
                 prop_assert_eq!(&*source.read(start..start + width).unwrap(), &bytes[lo..hi]);
                 prop_assert!(source.stats().resident <= 2 * CHUNK);
             }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn inspected_bytes_equal_the_slice(len in 0usize..(3 << 18), start in 0u64..(4 * CHUNK), width in 0u64..(2 * CHUNK)) {
+            let bytes: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+            let source = FileSource::new(file_with(&bytes), 2 * CHUNK).unwrap();
+            let lo = usize::try_from(start).unwrap().min(len);
+            let hi = usize::try_from(start + width).unwrap().min(len);
+            prop_assert_eq!(source.inspect(start..start + width, <[u8]>::to_vec).unwrap(), bytes[lo..hi].to_vec());
         }
     }
 

@@ -456,10 +456,10 @@ fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) 
             }
         })),
     }
-    let title = if picker.truncated {
-        " keys · partial list (collection capped) "
-    } else {
-        " keys "
+    let title = match (picker.collecting, picker.truncated) {
+        (true, _) => " keys · collecting… ",
+        (false, true) => " keys · partial list (collection capped) ",
+        (false, false) => " keys ",
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(

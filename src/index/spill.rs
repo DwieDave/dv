@@ -1,6 +1,5 @@
 //! A node store spilled to temporary files, for documents larger than memory (FR-23, D-14).
 
-use std::cmp::Ordering;
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -19,6 +18,8 @@ use crate::source::{Source, SourceError};
 
 /// Bytes per node record: start, len, child count, first checkpoint.
 pub const RECORD: u64 = 32;
+/// Records per block of the in-memory fence: a lookup reads one block.
+const FENCE: u64 = 256;
 
 /// Tuning for the builder's RAM use.
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +77,8 @@ pub struct SpillBuilder {
     error: Option<io::Error>,
     /// Set when readers follow the build; all file writes then wait for `publish`.
     live: Option<Arc<Shared>>,
+    /// Start of every `FENCE`th slot, so lookups find their block in memory.
+    fences: Vec<u64>,
 }
 
 impl SpillBuilder {
@@ -91,6 +94,7 @@ impl SpillBuilder {
             cache: limits.cache,
             error: None,
             live: None,
+            fences: Vec::new(),
         })
     }
 
@@ -108,10 +112,12 @@ impl SpillBuilder {
         }
         let nodes = FileSource::new(self.records.file, self.cache / 2)?;
         let cps = FileSource::new(self.cps.file, self.cache / 2)?;
+        self.fences.truncate(to_usize(self.next.div_ceil(FENCE)));
         Ok(SpillStore {
             nodes,
             cps,
             count: self.next,
+            fences: self.fences,
         })
     }
 
@@ -142,6 +148,11 @@ impl Builder for SpillBuilder {
     fn open(&mut self, start: u64) -> SpillSlot {
         let slot = self.next;
         self.next += 1;
+        if slot.is_multiple_of(FENCE) {
+            // A reused slot replaces the fence of the slot rewound before it.
+            self.fences.truncate(to_usize(slot / FENCE));
+            self.fences.push(start);
+        }
         self.open.push(Open {
             slot,
             start,
@@ -297,35 +308,41 @@ pub struct SpillStore {
     nodes: FileSource,
     cps: FileSource,
     count: u64,
+    /// Start of every `FENCE`th record.
+    fences: Vec<u64>,
 }
 
 impl SpillStore {
-    fn record(&self, index: u64) -> Result<[u64; 4], SourceError> {
-        let bytes = self.nodes.read(index * RECORD..(index + 1) * RECORD)?;
-        Ok([0, 8, 16, 24].map(|at| u64_at(&bytes, at)))
+    /// The record starting at `start`: the fence picks its block, then one read searches it.
+    fn record_at(&self, start: u64) -> Result<Option<[u64; 4]>, SourceError> {
+        let Some(block) = self.fences.partition_point(|&f| f <= start).checked_sub(1) else {
+            return Ok(None);
+        };
+        let lo = block as u64 * FENCE;
+        let hi = (lo + FENCE).min(self.count);
+        self.nodes
+            .inspect(lo * RECORD..hi * RECORD, |bytes| find_record(bytes, start))
     }
+}
+
+/// Binary search over the 32-byte records of `block` for the one starting at `start`.
+fn find_record(block: &[u8], start: u64) -> Option<[u64; 4]> {
+    let records = block.as_chunks::<32>().0;
+    let at = |r: &[u8; 32]| [0, 8, 16, 24].map(|i| u64_at(r, i));
+    let i = records.partition_point(|r| u64_at(r, 0) < start);
+    records.get(i).map(at).filter(|r| r[0] == start)
 }
 
 impl NodeStore for SpillStore {
     fn node_at(&self, start: u64) -> Result<Option<BigNode>, SourceError> {
-        let (mut lo, mut hi) = (0, self.count);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let [node_start, len, count, first] = self.record(mid)?;
-            match node_start.cmp(&start) {
-                Ordering::Less => lo = mid + 1,
-                Ordering::Greater => hi = mid,
-                Ordering::Equal => {
-                    let fanout = (count > CHECKPOINT_EVERY).then(|| Fanout::new(count, first));
-                    return Ok(Some(BigNode {
-                        start,
-                        end: start + len,
-                        fanout,
-                    }));
-                }
+        Ok(self.record_at(start)?.map(|[start, len, count, first]| {
+            let fanout = (count > CHECKPOINT_EVERY).then(|| Fanout::new(count, first));
+            BigNode {
+                start,
+                end: start + len,
+                fanout,
             }
-        }
-        Ok(None)
+        }))
     }
 
     fn checkpoint(&self, fanout: &Fanout, k: u64) -> Result<Option<u64>, SourceError> {
@@ -508,6 +525,59 @@ mod tests {
         fn live_store_agrees_with_the_final_index(value in json_value(), buffer in 1usize..48) {
             let (text, _) = layout(&value, " ");
             live_checks(&text, buffer);
+        }
+    }
+
+    #[test]
+    fn node_lookups_read_about_one_block() {
+        let items: Vec<String> = (0..5000)
+            .map(|i| format!(r#"{{"id":{i},"pad":"{}"}}"#, "x".repeat(60)))
+            .collect();
+        let text = format!("[{}]", items.join(","));
+        let (vec, spill) = both(&text, SpillLimits::default());
+        let starts: Vec<u64> = (0..text.len() as u64)
+            .filter(|&o| vec.node_at(o).unwrap().is_some())
+            .collect();
+        assert!(starts.len() > 5000);
+        let before = spill.nodes.stats();
+        for &start in &starts {
+            assert_eq!(
+                spill.node_at(start).unwrap().map(|n| n.end),
+                vec.node_at(start).unwrap().map(|n| n.end)
+            );
+        }
+        let after = spill.nodes.stats();
+        let reads = (after.hits + after.misses) - (before.hits + before.misses);
+        assert!(
+            reads <= 2 * starts.len() as u64,
+            "{reads} chunk reads for {} lookups",
+            starts.len()
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+        #[test]
+        fn rolled_back_records_keep_lookups_right(broken in prop::collection::vec(prop::bool::weighted(0.2), 300..700)) {
+            use crate::index::lines::LineSpill;
+            use crate::json::lines_stream::parse_lines_stream;
+            use crate::json::stream::StreamLimits;
+            use crate::source::MemSource;
+            let pad = "y".repeat(70);
+            let lines: Vec<String> = broken.iter().enumerate().map(|(i, &bad)| {
+                if bad { format!(r#"{{"k":[{i},"{pad}"#) } else { format!(r#"{{"k":[{i},"{pad}"]}}"#) }
+            }).collect();
+            let text = lines.join("\n");
+            let source = MemSource::new(text.clone().into_bytes());
+            let limits = StreamLimits { initial: 256, max: 1 << 20 };
+            let go = |_| ControlFlow::Continue(());
+            let spill = parse_lines_stream(&source, SpillBuilder::new(SpillLimits { window: 8, stack: 8, cache: 1 << 16 }).unwrap(), LineSpill::new(8).unwrap(), limits, go, |_, _, _, _| {}).unwrap();
+            let vec = parse_lines_stream(&source, VecStoreBuilder::default(), LineSpill::new(8).unwrap(), limits, go, |_, _, _, _| {}).unwrap();
+            let (spill, vec) = (spill.builder.finish().unwrap(), vec.builder.finish());
+            for offset in 0..=text.len() as u64 {
+                let (a, b) = (vec.node_at(offset).unwrap(), spill.node_at(offset).unwrap());
+                prop_assert_eq!(a.map(|n| (n.start, n.end)), b.map(|n| (n.start, n.end)), "offset {}", offset);
+            }
         }
     }
 }

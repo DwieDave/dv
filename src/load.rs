@@ -260,7 +260,7 @@ fn stream_json(
     let store = parsed.builder.finish().map_err(plain)?;
     let (root, values) = (parsed.root, parsed.values);
     let tree = StreamTree::new(src.finished, store, root, values, 64 << 10);
-    Ok(Some(Document::Stream(tree)))
+    Ok(Some(Document::Stream(Box::new(tree))))
 }
 
 fn stream_lines(
@@ -286,7 +286,7 @@ fn stream_lines(
     };
     let store = parsed.builder.finish().map_err(plain)?;
     let tree = StreamTree::from_lines(src.finished, store, parsed.lines, parsed.values);
-    Ok(Some(Document::Stream(tree)))
+    Ok(Some(Document::Stream(Box::new(tree))))
 }
 
 /// Offset of the first non-whitespace byte (the root value).

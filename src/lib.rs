@@ -14,6 +14,7 @@ pub mod load;
 pub mod mode;
 pub mod path;
 pub mod position;
+pub mod pulse;
 pub mod schema;
 pub mod search;
 pub mod snippet;

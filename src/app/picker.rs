@@ -15,11 +15,13 @@ use crate::view::jump::reveal;
 /// Rendered schema paths with their segments, shared with the model.
 pub type Entries = Arc<Vec<(String, Vec<Seg>)>>;
 
-/// Schema paths for the picker, and whether collection stopped at a cap.
+/// Schema paths for the picker, whether collection stopped at a cap, and whether it is over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
     pub entries: Entries,
     pub truncated: bool,
+    /// `false` for a partial list sent while collection runs.
+    pub done: bool,
 }
 
 /// Most matches kept and shown.
@@ -41,6 +43,8 @@ pub struct Picker {
     pub entries: Option<Entries>,
     /// The entries are a partial list (a collection cap was hit).
     pub truncated: bool,
+    /// Collection is still running; more entries may arrive.
+    pub collecting: bool,
     /// Indices into `entries`, best match first.
     pub matches: Vec<usize>,
     pub selected: usize,
@@ -54,6 +58,7 @@ impl Picker {
 
     pub fn set_catalog(&mut self, catalog: &Catalog) {
         self.truncated = catalog.truncated;
+        self.collecting = !catalog.done;
         self.set_entries(Arc::clone(&catalog.entries));
     }
 
@@ -125,12 +130,14 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
     }
 }
 
-/// Stores collected schema paths and shows them if the picker is open.
+/// Shows collected schema paths if the picker is open; keeps finished lists for next time.
 pub fn receive<T>(model: &mut Model<T>, catalog: Catalog) {
     if let Some(picker) = model.picker.as_mut() {
         picker.set_catalog(&catalog);
     }
-    model.schema = Some(catalog);
+    if catalog.done {
+        model.schema = Some(catalog);
+    }
 }
 
 /// Keys while the picker is open.
@@ -320,6 +327,7 @@ mod flow_tests {
         let truncated = super::Catalog {
             entries,
             truncated: true,
+            done: true,
         };
         super::receive(&mut model, truncated);
         assert!(
@@ -327,6 +335,34 @@ mod flow_tests {
             "{}",
             screen(&model)
         );
+    }
+
+    #[test]
+    fn partial_catalogs_show_while_collecting_and_only_finished_ones_are_kept() {
+        let mut model = model();
+        open(&mut model);
+        // Without a worker the list was collected inline; pretend it is still running.
+        model.schema = None;
+        let entries = std::sync::Arc::new(vec![(".early".to_owned(), Vec::new())]);
+        let partial = super::Catalog {
+            entries,
+            truncated: false,
+            done: false,
+        };
+        super::receive(&mut model, partial.clone());
+        let shown = screen(&model);
+        assert!(
+            shown.contains("collecting") && shown.contains(".early"),
+            "{shown}"
+        );
+        assert_eq!(model.schema, None);
+        let done = super::Catalog {
+            done: true,
+            ..partial
+        };
+        super::receive(&mut model, done.clone());
+        assert!(!screen(&model).contains("collecting"));
+        assert_eq!(model.schema, Some(done));
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::tree::{Count, MemTree, NodeRef, Stats, TreeIndex};
 pub enum Document {
     Mem(MemTree),
     Live(LiveTree<FileSource>),
-    Stream(StreamTree<FileSource, SpillStore>),
+    /// Boxed: the finished index is much larger than the other variants.
+    Stream(Box<StreamTree<FileSource, SpillStore>>),
 }
 
 impl Document {
@@ -26,7 +27,7 @@ impl Document {
         match self {
             Self::Mem(tree) => tree,
             Self::Live(tree) => tree,
-            Self::Stream(tree) => tree,
+            Self::Stream(tree) => tree.as_ref(),
         }
     }
 }

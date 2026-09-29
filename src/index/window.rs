@@ -2,7 +2,7 @@
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::children::{Child, Lexed, after_value, checkpoint_before, lex_child, skip_value};
-use crate::index::store::{BigNode, Fanout, NodeStore};
+use crate::index::store::{BigNode, Fanout, MIN_NODE_LEN, NodeStore};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::source::{Source, SourceError};
@@ -34,6 +34,8 @@ impl<S: NodeStore> NodeStore for OffsetStore<'_, S> {
 
 /// Bytes a window must still hold past `pos` before it is re-read.
 const SLACK: usize = 64;
+/// First window for a container too small to have a node (under `MIN_NODE_LEN` bytes).
+const SMALL_WINDOW: u64 = 2 * MIN_NODE_LEN;
 
 /// A re-readable window over a source: `bytes` starts at absolute offset `base`.
 pub struct ReadWindow<'a, R> {
@@ -224,8 +226,13 @@ pub fn stream_seek<'a, S: NodeStore, R: Source>(
         b']'
     };
     let (index, pos) = checkpoint_before(store, node.offset, k)?;
+    // Containers without a node are shorter than MIN_NODE_LEN; the window grows if needed.
+    let size = match store.node_at(node.offset)? {
+        Some(big) => window.min(to_usize(big.end.saturating_sub(pos as u64)).saturating_add(SLACK)),
+        None => window.min(to_usize(SMALL_WINDOW)),
+    };
     let mut it = StreamChildren {
-        win: ReadWindow::new(source, window),
+        win: ReadWindow::new(source, size),
         store,
         close,
         pos: pos as u64,
@@ -317,5 +324,82 @@ mod tests {
                 prop_assert_eq!(got, expected, "container at {} k {}", c.start, k);
             }
         }
+    }
+
+    /// Records the largest read.
+    struct Spy {
+        inner: MemSource,
+        widest: std::cell::Cell<u64>,
+    }
+
+    impl Source for Spy {
+        fn len(&self) -> u64 {
+            self.inner.len()
+        }
+
+        fn read(
+            &self,
+            range: std::ops::Range<u64>,
+        ) -> Result<std::borrow::Cow<'_, [u8]>, SourceError> {
+            let bytes = self.inner.read(range)?;
+            self.widest.set(self.widest.get().max(bytes.len() as u64));
+            Ok(bytes)
+        }
+    }
+
+    #[test]
+    fn small_containers_are_read_in_small_windows() {
+        let items: Vec<String> = (0..5000)
+            .map(|i| format!(r#"{{"id":{i},"ok":true}}"#))
+            .collect();
+        let text = format!("[{}]", items.join(","));
+        let parsed = parse(text.as_bytes()).unwrap();
+        let source = Spy {
+            inner: MemSource::new(text.clone().into_bytes()),
+            widest: std::cell::Cell::new(0),
+        };
+        let node = NodeRef {
+            offset: 1,
+            kind: Kind::Object,
+        };
+        let kids: Vec<Child> = stream_seek(&source, &parsed.store, node, 0, 64 << 10)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(kids.len(), 2);
+        assert!(
+            source.widest.get() <= 4 * crate::index::store::MIN_NODE_LEN,
+            "read {} bytes",
+            source.widest.get()
+        );
+    }
+
+    #[test]
+    fn known_containers_are_read_only_to_their_end() {
+        let pad = "z".repeat(150);
+        let items: Vec<String> = (0..500)
+            .map(|i| format!(r#"{{"id":{i},"pad":"{pad}"}}"#))
+            .collect();
+        let text = format!("[{}]", items.join(","));
+        let parsed = parse(text.as_bytes()).unwrap();
+        let source = Spy {
+            inner: MemSource::new(text.clone().into_bytes()),
+            widest: std::cell::Cell::new(0),
+        };
+        let node = NodeRef {
+            offset: 1,
+            kind: Kind::Object,
+        };
+        let big = parsed.store.node_at(1).unwrap().unwrap();
+        let kids: Vec<Child> = stream_seek(&source, &parsed.store, node, 0, 64 << 10)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(kids.len(), 2);
+        assert!(
+            source.widest.get() <= big.end - big.start + 2 * SLACK as u64,
+            "read {} bytes",
+            source.widest.get()
+        );
     }
 }

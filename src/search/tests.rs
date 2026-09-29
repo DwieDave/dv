@@ -337,12 +337,12 @@ proptest! {
 /// Records progress reports; never cancels.
 struct Recorder(std::cell::RefCell<Vec<Scanned>>);
 
-impl Pulse for Recorder {
+impl crate::pulse::Pulse for Recorder {
     fn cancelled(&self) -> bool {
         false
     }
 
-    fn report(&self, scanned: Scanned) {
+    fn scanned(&self, scanned: Scanned) {
         self.0.borrow_mut().push(scanned);
     }
 }
