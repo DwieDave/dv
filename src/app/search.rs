@@ -9,23 +9,34 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::picker::Catalog;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
-use crate::app::{LastFind, Model, jumped, picker};
+use crate::app::{LastFind, Model, jumped, picker, table};
 use crate::index::children::Child;
 use crate::pulse::Pulse;
 use crate::schema::{Collected, collect, render};
 use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError, count, find};
-use crate::tree::{LINES_ROOT, TreeIndex};
+use crate::tree::{LINES_ROOT, NodeRef, TreeIndex};
 use crate::ui::status::{grouped, human_bytes};
 use crate::view::jump::reveal;
 use crate::view::resolve::{Label, RootItem, RowKind, chain};
+use crate::view::table::{SortDir, sort_order};
 
 /// What a job computes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
     Find(Direction),
     Count,
     /// Collect the document's schema paths for the picker.
     Schema,
+    /// Order a table's rows by a column (TB-5).
+    Sort(SortSpec),
+}
+
+/// A table sort: the container's children by one key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortSpec {
+    pub node: NodeRef,
+    pub key: String,
+    pub dir: SortDir,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +59,13 @@ pub enum JobResult {
     Failed(String),
     /// Progress of a long scan; the final result follows.
     Scanning(Scanned),
+    /// Table rows in sorted order; `None` when cancelled.
+    Sorted(Option<Vec<u64>>),
+    /// Rows read so far by a sort.
+    Sorting {
+        done: u64,
+        total: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,10 +86,13 @@ pub struct SearchState {
 
 /// Runs one job to completion (or cancellation).
 pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome {
-    let result = match (job.work, &job.matcher) {
+    let result = match (&job.work, &job.matcher) {
         (Work::Find(direction), Some(m)) => {
-            find(tree, &job.root, m, job.from, direction, pulse).map(JobResult::Found)
+            find(tree, &job.root, m, job.from, *direction, pulse).map(JobResult::Found)
         }
+        (Work::Sort(spec), _) => sort_order(tree, spec.node, &spec.key, spec.dir, pulse)
+            .map(JobResult::Sorted)
+            .map_err(SearchError::from),
         (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
         (Work::Schema, _) => collect(tree, &job.root, pulse)
             .map(|collected| JobResult::Schema(collected.map(|c| catalog(c, true, job.root))))
@@ -121,6 +142,10 @@ impl Pulse for WorkerPulse<'_> {
 
     fn schema(&self, partial: Collected) {
         self.interim(JobResult::Schema(Some(catalog(partial, false, self.root))));
+    }
+
+    fn sorting(&self, done: u64, total: u64) {
+        self.interim(JobResult::Sorting { done, total });
     }
 }
 
@@ -348,10 +373,14 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         }
         JobResult::Found(None) => note(model, "no match".to_owned()),
         JobResult::Counted(Some(n)) => note(model, format!("{} matches", grouped(n))),
-        JobResult::Counted(None) | JobResult::Schema(None) => {}
+        JobResult::Counted(None) | JobResult::Schema(None) | JobResult::Sorted(None) => {}
         JobResult::Schema(Some(entries)) => picker::receive(model, entries),
         JobResult::Failed(message) => note(model, message),
         JobResult::Scanning(scanned) => note(model, scanning(scanned)),
+        JobResult::Sorted(Some(order)) => table::sorted(model, order),
+        JobResult::Sorting { done, total } => {
+            model.note = Some(format!("sorting… {}%", done * 100 / total.max(1)));
+        }
     }
 }
 

@@ -160,3 +160,43 @@ fn the_footer_shows_table_keys() {
         rows(&model)
     );
 }
+
+fn column_values(model: &Model<MemTree>, column: usize) -> Vec<String> {
+    rows(model)[2..]
+        .iter()
+        .take_while(|r| !r.is_empty() && !r.starts_with('─'))
+        .map(|r| {
+            let cells = r.trim_start_matches('▎');
+            cells
+                .split_whitespace()
+                .nth(column)
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn s_sorts_the_column_ascending_then_descending_then_off() {
+    let text = r#"[{"n": 2, "s": "b"}, {"n": 10, "s": "a"}, {"s": "c"}, {"n": 1, "s": "d"}]"#;
+    let mut model = model_of(text, 40, 12);
+    keys(&mut model, "ts");
+    assert_eq!(column_values(&model, 1), ["1", "2", "10", "—"]);
+    assert!(rows(&model)[0].contains("▲n"), "{:#?}", rows(&model));
+    keys(&mut model, "s");
+    assert_eq!(column_values(&model, 1), ["10", "2", "1", "—"]);
+    assert!(rows(&model)[0].contains("▼n"), "{:#?}", rows(&model));
+    keys(&mut model, "s");
+    assert_eq!(column_values(&model, 1), ["2", "10", "—", "1"]);
+    keys(&mut model, "ls");
+    assert_eq!(column_values(&model, 2), ["a", "b", "c", "d"]);
+}
+
+#[test]
+fn enter_on_a_sorted_row_opens_that_element() {
+    let text = r#"[{"n": 2}, {"n": 1}]"#;
+    let mut model = model_of(text, 40, 12);
+    keys(&mut model, "ts");
+    press(&mut model, KeyCode::Enter);
+    assert_eq!(model.state.cursor, vec![1]);
+}

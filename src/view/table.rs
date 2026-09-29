@@ -1,14 +1,16 @@
 //! The table view's model: columns sampled from an array of objects, and their cells
 //! (TB-2, TB-3).
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::index::IndexError;
 use crate::index::children::Child;
+use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::json::text::{inline, scalar_window, unescape};
+use crate::pulse::Pulse;
 use crate::tree::{Count, NodeRef, TreeIndex};
 use crate::view::resolve::{RootItem, RowKind, chain};
 
@@ -76,6 +78,10 @@ pub struct TableState {
     pub top: u64,
     /// `g` was pressed; a second `g` goes to the top.
     pub chord: bool,
+    /// The sorted column (an index into `columns`) and direction.
+    pub sort: Option<(usize, SortDir)>,
+    /// Element indices in sorted order, once the sort is done.
+    pub order: Option<Vec<u64>>,
 }
 
 /// Where the cursor moves.
@@ -100,6 +106,28 @@ impl TableState {
             row: 0,
             top: 0,
             chord: false,
+            sort: None,
+            order: None,
+        }
+    }
+
+    /// The element shown at display row `row` (rows past a sorted snapshot keep their place).
+    #[must_use]
+    pub fn element(&self, row: u64) -> u64 {
+        self.order
+            .as_ref()
+            .and_then(|order| order.get(to_usize(row)).copied())
+            .unwrap_or(row)
+    }
+
+    /// The next sort of the current column: ascending, descending, off.
+    #[must_use]
+    pub fn next_sort(&self) -> Option<(usize, SortDir)> {
+        let (column, _) = self.shown().nth(self.col)?;
+        match self.sort {
+            Some((c, SortDir::Asc)) if c == column => Some((column, SortDir::Desc)),
+            Some((c, SortDir::Desc)) if c == column => None,
+            _ => Some((column, SortDir::Asc)),
         }
     }
 
@@ -284,6 +312,125 @@ fn cell_of<T: TreeIndex + ?Sized>(tree: &T, child: &Child) -> Result<Cell, Index
             Cell::Scalar { text, kind }
         }
     })
+}
+
+/// The most rows a sort takes (TB-5).
+pub const MAX_SORT: u64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+/// Whether `rows` rows can be sorted (TB-5).
+///
+/// # Errors
+/// The note to show when there are too many.
+pub fn sortable(rows: u64) -> Result<(), &'static str> {
+    if rows > MAX_SORT {
+        Err("too many rows to sort (max 1M)")
+    } else {
+        Ok(())
+    }
+}
+
+/// Rows read between progress reports and cancellation checks.
+const SORT_BATCH: u64 = 4096;
+
+/// The children of `node` ordered by their `key` member (TB-5): numbers, then strings,
+/// booleans, null and containers; missing values last in both directions; stable. `None`
+/// when cancelled.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn sort_order<T: TreeIndex + ?Sized>(
+    tree: &T,
+    node: NodeRef,
+    key: &str,
+    dir: SortDir,
+    pulse: &dyn Pulse,
+) -> Result<Option<Vec<u64>>, IndexError> {
+    let total = tree.child_count(node)?.available();
+    let mut keyed: Vec<(Option<SortKey>, u64)> = Vec::new();
+    for start in (0..total).step_by(to_usize(SORT_BATCH)) {
+        if pulse.cancelled() {
+            return Ok(None);
+        }
+        for child in tree.children(node, start..start.saturating_add(SORT_BATCH).min(total))? {
+            keyed.push((sort_key(tree, child.node(), key)?, child.index));
+        }
+        pulse.sorting(keyed.len() as u64, total);
+    }
+    keyed.sort_by(|(a, _), (b, _)| compare(a.as_ref(), b.as_ref(), dir));
+    Ok(Some(keyed.into_iter().map(|(_, i)| i).collect()))
+}
+
+/// A value as it sorts; the variant order is the TB-5 type order.
+#[derive(Debug, Clone, PartialEq)]
+enum SortKey {
+    Number(f64),
+    String(String),
+    Bool(bool),
+    Null,
+    Container,
+}
+
+impl SortKey {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Number(_) => 0,
+            Self::String(_) => 1,
+            Self::Bool(_) => 2,
+            Self::Null => 3,
+            Self::Container => 4,
+        }
+    }
+
+    fn order(&self, other: &Self) -> Ordering {
+        let within = match (self, other) {
+            (Self::Number(a), Self::Number(b)) => a.total_cmp(b),
+            (Self::String(a), Self::String(b)) => a.cmp(b),
+            (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        };
+        self.rank().cmp(&other.rank()).then(within)
+    }
+}
+
+fn compare(a: Option<&SortKey>, b: Option<&SortKey>, dir: SortDir) -> Ordering {
+    match (a, b, dir) {
+        (None, None, _) => Ordering::Equal,
+        (None, Some(_), _) => Ordering::Greater,
+        (Some(_), None, _) => Ordering::Less,
+        (Some(a), Some(b), SortDir::Asc) => a.order(b),
+        (Some(a), Some(b), SortDir::Desc) => b.order(a),
+    }
+}
+
+/// The sort key of `row`'s `key` member, if it has one.
+fn sort_key<T: TreeIndex + ?Sized>(
+    tree: &T,
+    row: NodeRef,
+    key: &str,
+) -> Result<Option<SortKey>, IndexError> {
+    let fields = fields(tree, row)?;
+    let Some((_, child)) = fields.iter().find(|(k, _)| k == key) else {
+        return Ok(None);
+    };
+    let raw = || tree.bytes(child.value..child.end);
+    Ok(Some(match child.kind {
+        Kind::Number => SortKey::Number(
+            std::str::from_utf8(&raw()?)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(f64::NAN),
+        ),
+        Kind::String => SortKey::String(unescape(&raw()?).into_owned()),
+        Kind::Bool => SortKey::Bool(raw()?.first() == Some(&b't')),
+        Kind::Null | Kind::Invalid => SortKey::Null,
+        Kind::Object | Kind::Array => SortKey::Container,
+    }))
 }
 
 #[cfg(test)]

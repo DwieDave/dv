@@ -79,6 +79,7 @@ const PREVIEW: &[Row] = &[
 const TABLE: &[Row] = &[
     row("j k  gg G", "rows (^d ^u PgDn PgUp too)", &[]),
     row("h l", "columns", &[]),
+    row("s", "sort by the column: ▲ ▼ off", &[]),
     row("x  X", "hide the column / show all", &[]),
     row("⏎", "open the row in the tree", &[]),
     row("t  esc  q", "close the table", &[]),

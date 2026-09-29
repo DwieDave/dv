@@ -59,6 +59,7 @@ const HELP: &[Hint] = &[hint("j/k", "scroll"), hint("esc", "close")];
 const TABLE: &[Hint] = &[
     hint("j/k", "rows"),
     hint("h/l", "columns"),
+    hint("s", "sort"),
     hint("⏎", "open"),
     hint("esc", "close"),
     hint("x", "hide"),

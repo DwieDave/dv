@@ -12,6 +12,9 @@ pub trait Pulse {
 
     /// The schema paths collected so far.
     fn schema(&self, _partial: Collected) {}
+
+    /// Rows read so far while sorting a table.
+    fn sorting(&self, _done: u64, _total: u64) {}
 }
 
 impl<F: Fn() -> bool> Pulse for F {

@@ -1,7 +1,10 @@
 //! The table view over an array of objects: opening it and its keys (TB-1, TB-4).
 
+use std::sync::atomic::Ordering;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::app::search::{SortSpec, Work, submit_job};
 use crate::app::{Model, jumped};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
@@ -9,7 +12,7 @@ use crate::tree::TreeIndex;
 use crate::view::jump::{bucket_rows, reveal};
 use crate::view::state::TreeState;
 pub use crate::view::table::TableState;
-use crate::view::table::{RowTo, columns, index_width, target};
+use crate::view::table::{RowTo, columns, index_width, sortable, target};
 
 /// Rows under the header and its rule.
 const HEADER_ROWS: u64 = 2;
@@ -44,6 +47,7 @@ enum Action {
     Chord,
     Hide,
     ShowAll,
+    Sort,
     Open,
     Close,
     Help,
@@ -66,6 +70,7 @@ fn action(key: KeyEvent, chord: bool, page: i64) -> Action {
         (KeyCode::Char('l') | KeyCode::Right, false) => Action::Column(1),
         (KeyCode::Char('h') | KeyCode::Left, false) => Action::Column(-1),
         (KeyCode::Char('x'), false) => Action::Hide,
+        (KeyCode::Char('s'), false) => Action::Sort,
         (KeyCode::Char('X'), false) => Action::ShowAll,
         (KeyCode::Enter, _) => Action::Open,
         (KeyCode::Char('t' | 'q') | KeyCode::Esc, false) => Action::Close,
@@ -89,11 +94,49 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
         Action::Chord => table.chord = true,
         Action::Hide => table.hide(),
         Action::ShowAll => table.show_all(),
+        Action::Sort => sort(model, rows),
         Action::Open => open_in_tree(model, rows),
         Action::Close => model.table = None,
         Action::Help => model.help = Some(0),
         Action::Ignore => {}
     }
+}
+
+/// `s`: cycles the current column's sort, running it on the worker (TB-5).
+fn sort<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
+    if let Err(note) = sortable(rows) {
+        model.note = Some(note.to_owned());
+        return;
+    }
+    let Some(table) = model.table.as_mut() else {
+        return;
+    };
+    table.sort = table.next_sort();
+    table.order = None;
+    let spec = table.sort.and_then(|(column, dir)| {
+        let key = table.columns.get(column)?.key.clone();
+        Some(SortSpec {
+            node: table.node,
+            key,
+            dir,
+        })
+    });
+    let Some(spec) = spec else {
+        // Nothing to wait for: a running sort's result is now stale.
+        model.generation.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    model.note = Some("sorting…".to_owned());
+    let root = model.state.root;
+    submit_job(model, Work::Sort(spec), None, None, root);
+}
+
+/// A finished sort: rows now show in its order.
+pub fn sorted<T>(model: &mut Model<T>, order: Vec<u64>) {
+    if let Some(table) = model.table.as_mut() {
+        table.order = Some(order);
+    }
+    model.note = None;
 }
 
 /// The rows known so far (a pending array grows, TB-6).
@@ -114,8 +157,9 @@ fn open_in_tree<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     if rows == 0 {
         return;
     }
+    let element = table.element(table.row);
     let mut path = table.path;
-    path.extend(bucket_rows(rows, table.row));
+    path.extend(bucket_rows(rows, element));
     let before = model.state.cursor.clone();
     let result = reveal(&*model.tree, &mut model.state, path, model.height);
     model.status = result.err().map(|err| err.to_string());

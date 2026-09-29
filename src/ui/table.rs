@@ -8,10 +8,11 @@ use ratatui::widgets::Widget;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::index::IndexError;
+use crate::index::children::Child;
 use crate::json::lex::Kind;
-use crate::tree::{NodeRef, TreeIndex};
+use crate::tree::TreeIndex;
 use crate::ui::theme::Theme;
-use crate::view::table::{Cell, Column, GAP, GUTTER, TableState, index_width, row_cells};
+use crate::view::table::{Cell, Column, GAP, GUTTER, SortDir, TableState, index_width, row_cells};
 
 pub struct TableWidget<'a, T> {
     pub tree: &'a T,
@@ -42,10 +43,13 @@ impl<T: TreeIndex> TableWidget<'_, T> {
         let rule = Line::styled("─".repeat(usize::from(area.width)), self.theme.badge);
         let mut lines = vec![self.header(&columns, index), rule];
         let top = self.table.top;
-        let count = u64::from(area.height.saturating_sub(2));
-        let children = self.tree.children(self.table.node, top..top + count)?;
-        for child in children {
-            lines.push(self.row(child.index, child.node(), &columns, index)?);
+        let end = rows.min(top + u64::from(area.height.saturating_sub(2)));
+        for row in top..end {
+            let element = self.table.element(row);
+            let children = self.tree.children(self.table.node, element..element + 1)?;
+            if let Some(child) = children.first() {
+                lines.push(self.row(row, child, &columns, index)?);
+            }
         }
         Ok(lines)
     }
@@ -80,19 +84,21 @@ impl<T: TreeIndex> TableWidget<'_, T> {
                 key
             };
             spans.push(Span::raw(" ".repeat(GAP)));
-            spans.push(Span::styled(fit(&column.key, column.width, false), style));
+            let title = format!("{}{}", self.arrow(column), column.key);
+            spans.push(Span::styled(fit(&title, column.width, false), style));
         }
         Line::from(spans)
     }
 
     fn row(
         &self,
-        i: u64,
-        node: NodeRef,
+        row: u64,
+        child: &Child,
         columns: &[(usize, &Column)],
         index: usize,
     ) -> Result<Line<'static>, IndexError> {
-        let gutter = if i == self.table.row {
+        let (i, node) = (child.index, child.node());
+        let gutter = if row == self.table.row {
             Span::styled("▎", self.theme.marker)
         } else {
             Span::raw(" ")
@@ -118,6 +124,19 @@ impl<T: TreeIndex> TableWidget<'_, T> {
             ));
         }
         Ok(Line::from(spans))
+    }
+
+    /// `▲` or `▼` on the sorted column.
+    fn arrow(&self, column: &Column) -> &'static str {
+        let sorted = self
+            .table
+            .sort
+            .and_then(|(i, dir)| Some((self.table.columns.get(i)?, dir)));
+        match sorted {
+            Some((c, SortDir::Asc)) if c.key == column.key => "▲",
+            Some((c, SortDir::Desc)) if c.key == column.key => "▼",
+            _ => "",
+        }
     }
 
     fn style(&self, cell: &Cell) -> Style {
