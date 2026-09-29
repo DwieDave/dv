@@ -7,3 +7,4 @@ pub mod preview;
 pub mod status;
 pub mod theme;
 pub mod tree;
+pub mod wrap;

@@ -16,6 +16,7 @@ saphyr-parser = "0.1.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 toml = "1"
+unicode-width = "0.2"
 
 [lints.rust]
 unsafe_code = "forbid"
