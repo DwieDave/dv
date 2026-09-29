@@ -53,7 +53,7 @@ fn renders_expanded_rows_with_markers_labels_and_badges() {
     expand(&tree, &mut state, &[1]);
     let lines = text_lines(&draw(&tree, &state, 30, 7));
     let expected = [
-        " ▾ {3}",
+        "▎▾ {3}",
         " │   a: 1",
         " │ ▾ b: [2]",
         " │ │   [0]: true",
@@ -79,9 +79,35 @@ fn highlights_the_cursor_row_and_scrolls() {
     state.cursor = vec![2];
     state.top = 2;
     let buf = draw(&tree, &state, 20, 2);
-    assert_eq!(text_lines(&buf), [" │ ▸ b: [2]", " │   s: \"hello wor…\""]);
-    assert!(buf[(4, 1)].modifier.contains(Modifier::REVERSED));
-    assert!(!buf[(4, 0)].modifier.contains(Modifier::REVERSED));
+    assert_eq!(text_lines(&buf), [" │ ▸ b: [2]", "▎│   s: \"hello wor…\""]);
+    let theme = Theme::default();
+    let tint = theme.selection.bg.unwrap();
+    assert!(
+        (0..20).all(|x| buf[(x, 1)].bg == tint),
+        "the whole cursor row is tinted"
+    );
+    assert!(
+        (0..20).all(|x| buf[(x, 0)].bg != tint),
+        "other rows are not"
+    );
+    assert_eq!(
+        (buf[(0, 1)].symbol(), buf[(0, 1)].fg),
+        ("▎", theme.marker.fg.unwrap())
+    );
+    assert_eq!(
+        buf[(5, 1)].fg,
+        theme.key.fg.unwrap(),
+        "tokens keep their colors"
+    );
+    assert!(
+        buf[(5, 1)].modifier.contains(Modifier::BOLD),
+        "the key is bold"
+    );
+    assert!(
+        !buf[(9, 1)].modifier.contains(Modifier::BOLD),
+        "the value is not"
+    );
+    assert!((0..20).all(|x| !buf[(x, 1)].modifier.contains(Modifier::REVERSED)));
 }
 
 #[test]
@@ -92,7 +118,7 @@ fn invalid_records_render_as_errors() {
     assert_eq!(
         lines,
         [
-            " ▾ [2]",
+            "▎▾ [2]",
             " │   [0]: 1",
             " │   [1]: ✗ unexpected byte 0x62: {bad"
         ]
@@ -110,7 +136,7 @@ fn yaml_aliases_get_a_badge() {
         .with_aliases(transcoded.aliases);
     let state = TreeState::new(&tree).unwrap();
     let lines = text_lines(&draw(&tree, &state, 30, 3));
-    assert_eq!(lines, [" ▾ {2}", " │ ▸ a: [1]", " │ ▸ b: [1] *alias"]);
+    assert_eq!(lines, ["▎▾ {2}", " │ ▸ a: [1]", " │ ▸ b: [1] *alias"]);
 }
 
 #[test]

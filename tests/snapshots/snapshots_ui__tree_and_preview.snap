@@ -3,7 +3,7 @@ source: tests/snapshots_ui.rs
 expression: "render(&app, 70, 10)"
 ---
  ▾ {3}                             ┌ preview ────────────────────────┐
- │ ▾ meta: {2}                     │{                                │
+▎│ ▾ meta: {2}                     │{                                │
  │ │   version: "1.2"              │  "version": "1.2",              │
  │ │   ok: true                    │  "ok": true                     │
  │ ▸ users: [1500]                 │}                                │

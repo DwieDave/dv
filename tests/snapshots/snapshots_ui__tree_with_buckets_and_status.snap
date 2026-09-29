@@ -6,7 +6,7 @@ expression: "render(&app, 60, 12)"
  │ ▾ meta: {2}                │[                           │
  │ │   version: "1.2"         │  {                         │
  │ │   ok: true               │    "id": 0,                │
- │ ▾ users: [1500]            │    "tags": [               │
+▎│ ▾ users: [1500]            │    "tags": [               │
  │ │ ▸ [0..1023]              │      "x"                   │
  │ │ ▸ [1024..1499]           │    ]                       │
  │   note: null               │…                           │

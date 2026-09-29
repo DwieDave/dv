@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -30,14 +30,14 @@ impl<T: TreeIndex> Widget for TreeWidget<'_, T> {
         let mut path = self.state.locate(self.state.top);
         for y in area.top()..area.bottom() {
             let Some(current) = path else { break };
+            let selected = current == self.state.cursor;
             let line = self
-                .line(&current, area.width.into())
+                .line(&current, area.width.into(), selected)
                 .unwrap_or_else(|err| Line::styled(err.to_string(), self.theme.error));
-            let line = if current == self.state.cursor {
-                line.patch_style(self.theme.selection)
-            } else {
-                line
-            };
+            if selected {
+                // One band: the tint across the whole row, under the tokens' own colors.
+                buf.set_style(Rect::new(area.x, y, area.width, 1), self.theme.selection);
+            }
             buf.set_line(area.x, y, &line, area.width);
             path = self.state.next(&current);
         }
@@ -45,12 +45,20 @@ impl<T: TreeIndex> Widget for TreeWidget<'_, T> {
 }
 
 impl<T: TreeIndex> TreeWidget<'_, T> {
-    fn line(&self, path: &[u64], width: usize) -> Result<Line<'static>, IndexError> {
+    fn line(
+        &self,
+        path: &[u64],
+        width: usize,
+        selected: bool,
+    ) -> Result<Line<'static>, IndexError> {
         let Some(item) = resolve(self.tree, &self.state.root, path)? else {
             return Ok(Line::default());
         };
         let expanded = self.state.is_expanded(path);
         let mut spans = self.indent(path);
+        if selected {
+            spans[0] = Span::styled("▎", self.theme.marker);
+        }
         match &item.kind {
             RowKind::Bucket { range, .. } => {
                 spans.push(self.marker(true, expanded));
@@ -62,7 +70,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
             RowKind::Value { label, node, end } => {
                 let container = matches!(node.kind, Kind::Object | Kind::Array);
                 spans.push(self.marker(container, expanded));
-                spans.extend(self.label(label)?);
+                spans.extend(self.label(label, selected)?);
                 let used: usize = spans.iter().map(Span::width).sum();
                 spans.push(if container {
                     self.badge(*node)?
@@ -105,15 +113,26 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
         Span::styled(symbol, self.theme.marker)
     }
 
-    fn label(&self, label: &Label) -> Result<Vec<Span<'static>>, IndexError> {
+    /// The key or index and its colon; bold on the cursor row.
+    fn label(&self, label: &Label, selected: bool) -> Result<Vec<Span<'static>>, IndexError> {
         let colon = Span::styled(": ", self.theme.punct);
+        let bold = |style: Style| {
+            if selected {
+                style.add_modifier(Modifier::BOLD)
+            } else {
+                style
+            }
+        };
         Ok(match label {
             Label::Root => Vec::new(),
             Label::Key(span) => {
                 let key = inline(&self.tree.bytes(span.clone())?, MAX_KEY_CHARS);
-                vec![Span::styled(key, self.theme.key), colon]
+                vec![Span::styled(key, bold(self.theme.key)), colon]
             }
-            Label::Index(i) => vec![Span::styled(format!("[{i}]"), self.theme.punct), colon],
+            Label::Index(i) => vec![
+                Span::styled(format!("[{i}]"), bold(self.theme.punct)),
+                colon,
+            ],
         })
     }
 

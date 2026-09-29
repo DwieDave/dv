@@ -75,7 +75,7 @@ mod tests {
         let first_row: String = (0..10)
             .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
             .collect();
-        assert_eq!(first_row, " ▾ [1]    ");
+        assert_eq!(first_row, "▎▾ [1]    ");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Styles per syntax token (FR-21 makes them configurable).
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 
 /// One style per visual token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,8 @@ impl Default for Theme {
             punct: Style::new().fg(Color::Gray),
             badge: Style::new().fg(Color::DarkGray),
             marker: Style::new().fg(Color::Blue),
-            selection: Style::new().add_modifier(Modifier::REVERSED),
+            // A dark gray tint (256-color 236): the cursor row reads as one calm band.
+            selection: Style::new().bg(Color::Indexed(236)),
             error: Style::new().fg(Color::Red),
         }
     }
