@@ -84,7 +84,11 @@ enum Input {
         label: String,
     },
     /// Indexed from disk (FR-22).
-    Stream { file: File, label: String },
+    Stream {
+        file: File,
+        label: String,
+        format: Format,
+    },
 }
 
 /// In-memory mode never holds more than the u32 index can address (NFR-8).
@@ -110,9 +114,16 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
             },
             false,
         ) => tui(move |mut sink, cancel| load(reader, &request, &mut sink, cancel)).map(|()| None),
-        (Input::Stream { file, label }, true) => index_only_stream(file, &label).map(Some),
-        (Input::Stream { file, .. }, false) => tui(move |mut sink, cancel| {
-            load_stream(&file, &mut sink, cancel, StreamBudget::default());
+        (
+            Input::Stream {
+                file,
+                label,
+                format,
+            },
+            true,
+        ) => index_only_stream(file, &label, format).map(Some),
+        (Input::Stream { file, format, .. }, false) => tui(move |mut sink, cancel| {
+            load_stream(&file, format, &mut sink, cancel, StreamBudget::default());
         })
         .map(|()| None),
     }
@@ -136,7 +147,11 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
             let size_hint = file.metadata().ok().map(|m| m.len());
             let detected = detect(Some(path), &head(&file), format);
             if choose(cli.mode, size_hint, system_ram(), detected)? == Storage::Stream {
-                return Ok(Input::Stream { file, label });
+                return Ok(Input::Stream {
+                    file,
+                    label,
+                    format: detected,
+                });
             }
             let request = Request {
                 path: Some(path.to_path_buf()),
@@ -215,13 +230,15 @@ fn tui(
 }
 
 /// Streams and indexes a file without starting the UI (benchmarks, NFR-12).
-fn index_only_stream(file: File, path: &str) -> Result<String, CliError> {
+fn index_only_stream(file: File, path: &str, format: Format) -> Result<String, CliError> {
     let budget = StreamBudget::default();
     let fail = |err: &dyn std::fmt::Display| CliError::Parse(format!("{path}: {err}"));
     let source = FileSource::new(file, budget.parse_cache).map_err(|e| fail(&e))?;
-    let tree = StreamTree::index(source, budget.stream, budget.spill, |_| {
-        ControlFlow::Continue(())
-    })
+    let (limits, spill, go_on) = (budget.stream, budget.spill, |_| ControlFlow::Continue(()));
+    let tree = match format {
+        Format::Ndjson => StreamTree::index_lines(source, limits, spill, go_on),
+        Format::Json | Format::Yaml => StreamTree::index(source, limits, spill, go_on),
+    }
     .map_err(|e| fail(&e))?;
     Ok(format!("indexed {} bytes", tree.stats().bytes))
 }

@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use memchr::memchr;
 
 use crate::error::{ParseError, ParseErrorKind};
-use crate::index::lines::{BadLine, LineSpill, LineStore};
+use crate::index::lines::{BadLine, LineSpill, LineStore, PendingLines};
 use crate::index::store::Builder;
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::skip_ws;
@@ -24,8 +24,9 @@ pub struct StreamLines<B> {
 /// Validates and indexes NDJSON without holding it in memory; malformed records are
 /// recorded, not fatal, exactly as in [`crate::json::ndjson::parse_lines`].
 ///
-/// `publish(builder, frontier, last)` runs before each refill, and once with `last` at the
-/// end or before a fatal error; the frontier is always a record boundary.
+/// `publish(builder, lines, frontier, last)` runs before each refill, and once with `last` at
+/// the end or before a fatal error; the frontier is always a record boundary. Publish the
+/// builder before `lines`, so readers never count records they cannot read yet.
 ///
 /// # Errors
 /// Read or spill failures, a token longer than `limits.max`, or `Cancelled`.
@@ -35,7 +36,7 @@ pub fn parse_lines_stream<R: Source, B: Builder>(
     mut lines: LineSpill,
     limits: StreamLimits,
     hook: impl FnMut(u64) -> ControlFlow<()>,
-    mut publish: impl FnMut(&mut B, u64, bool),
+    mut publish: impl FnMut(&mut B, &mut PendingLines<'_>, u64, bool),
 ) -> Result<StreamLines<B>, IndexError> {
     let mut window = Window::unchecked(source, limits);
     let mut parser = Parser::with_builder(&[][..], hook, builder);
@@ -49,8 +50,11 @@ pub fn parse_lines_stream<R: Source, B: Builder>(
             Ok(()) => break,
             Err(Stop::More) => {
                 at.feed(&window.bytes[..pos], window.base);
-                lines.publish(at.pending(), false);
-                publish(&mut parser.builder, frontier, false);
+                let mut pending = PendingLines {
+                    spill: &mut lines,
+                    pending: at.pending(),
+                };
+                publish(&mut parser.builder, &mut pending, frontier, false);
                 window.refill(pos)
             }
             Err(Stop::Seek(offset)) => window.seek(offset),
@@ -58,8 +62,11 @@ pub fn parse_lines_stream<R: Source, B: Builder>(
         };
         parser.pos = 0;
     }
-    lines.publish(at.pending(), true);
-    publish(&mut parser.builder, frontier, true);
+    let mut pending = PendingLines {
+        spill: &mut lines,
+        pending: at.pending(),
+    };
+    publish(&mut parser.builder, &mut pending, frontier, true);
     result?;
     Ok(StreamLines {
         builder: parser.builder,
@@ -439,7 +446,7 @@ mod tests {
             spill,
             limits,
             hook,
-            |_, _, _| {},
+            |_, _, _, _| {},
         )
         .unwrap()
     }
@@ -472,7 +479,8 @@ mod tests {
             let records = all_records(&bytes);
             let (spill, live) = LineSpill::live(3).unwrap();
             let mut failure = None;
-            let publish = |_: &mut VecStoreBuilder, frontier: u64, last: bool| {
+            let publish = |_: &mut VecStoreBuilder, lines: &mut PendingLines<'_>, frontier: u64, last: bool| {
+                lines.publish(last);
                 if failure.is_none() {
                     failure = check_live(&live, &records, frontier, last).err();
                 }

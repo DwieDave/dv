@@ -10,9 +10,11 @@ use crate::document::Document;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::{Format, detect};
 use crate::index::IndexError;
+use crate::index::lines::{LineSpill, PendingLines};
 use crate::index::spill::SpillBuilder;
 use crate::index::spill::SpillLimits;
 use crate::index::to_usize;
+use crate::json::lines_stream::parse_lines_stream;
 use crate::json::ndjson::{ParsedLines, parse_lines};
 use crate::json::parse::parse_with;
 use crate::json::stream::{StreamLimits, parse_stream};
@@ -162,72 +164,129 @@ impl StreamBudget {
 /// Streams `file` into a spilled index: browsable at once, finished when indexing completes.
 pub fn load_stream(
     file: &File,
+    format: Format,
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
 ) {
-    match stream(file, sink, cancel, budget) {
+    let result = match format {
+        Format::Ndjson => stream_lines(file, sink, cancel, budget),
+        Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
+    };
+    match result {
         Ok(Some(doc)) => sink(LoadEvent::Loaded(Ok(doc))),
         Ok(None) => {}
         Err(failure) => sink(LoadEvent::Loaded(Err(failure))),
     }
 }
 
-fn stream(
-    file: &File,
-    sink: &mut impl FnMut(LoadEvent<Document>),
-    cancel: &AtomicBool,
+fn plain(err: impl std::fmt::Display) -> LoadFailure {
+    LoadFailure::plain(&err)
+}
+
+/// The file opened three times: for the parser, the live view and the final view.
+struct Sources {
+    parse: FileSource,
+    live: FileSource,
+    finished: FileSource,
+}
+
+fn sources(file: &File, budget: StreamBudget) -> Result<Sources, LoadFailure> {
+    let open = |cache| FileSource::new(file.try_clone().map_err(plain)?, cache).map_err(plain);
+    Ok(Sources {
+        parse: open(budget.parse_cache)?,
+        live: open(budget.view_cache)?,
+        finished: open(budget.view_cache)?,
+    })
+}
+
+/// Publishes the live index (nodes, then NDJSON lines) and reports progress every
+/// `publish_every` bytes and at the end.
+fn pacer(
     budget: StreamBudget,
-) -> Result<Option<Document>, LoadFailure> {
-    let plain = |err: &dyn std::fmt::Display| LoadFailure::plain(&err.to_string());
-    let open = |cache| {
-        FileSource::new(file.try_clone().map_err(|e| plain(&e))?, cache).map_err(|e| plain(&e))
-    };
-    let (parse_source, live_source, final_source) = (
-        open(budget.parse_cache)?,
-        open(budget.view_cache)?,
-        open(budget.view_cache)?,
-    );
-    let total = parse_source.len();
-    let root = first_value(&parse_source).map_err(|e| plain(&e))?;
-    let (builder, store) = SpillBuilder::live(budget.spill).map_err(|e| plain(&e))?;
-    sink(LoadEvent::Live(Document::Live(LiveTree::new(
-        live_source,
-        store,
-        root,
-    ))));
+    total: u64,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+) -> impl FnMut(&mut SpillBuilder, Option<&mut PendingLines<'_>>, u64, bool) + '_ {
     let mut last = 0;
-    let publish = |b: &mut SpillBuilder, frontier: u64, done: bool| {
+    move |builder, lines, frontier, done| {
         if done || frontier.saturating_sub(last) >= budget.publish_every {
-            b.publish(frontier, done);
-            sink(LoadEvent::Progress(Progress {
-                phase: Phase::Indexing,
-                done: frontier,
-                total,
-            }));
+            builder.publish(frontier, done);
+            if let Some(lines) = lines {
+                lines.publish(done);
+            }
+            let (phase, done) = (Phase::Indexing, frontier);
+            sink(LoadEvent::Progress(Progress { phase, done, total }));
             last = frontier;
         }
-    };
-    let stop = |_| {
+    }
+}
+
+fn stopper(cancel: &AtomicBool) -> impl FnMut(u64) -> ControlFlow<()> + '_ {
+    |_| {
         if cancel.load(Ordering::Relaxed) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         }
+    }
+}
+
+/// `Ok(None)` when cancelled; other errors become failures.
+fn finished<T>(result: Result<T, IndexError>) -> Result<Option<T>, LoadFailure> {
+    match result {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::Cancelled => Ok(None),
+        Err(err) => Err(plain(err)),
+    }
+}
+
+fn stream_json(
+    file: &File,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) -> Result<Option<Document>, LoadFailure> {
+    let src = sources(file, budget)?;
+    let root = first_value(&src.parse).map_err(plain)?;
+    let (builder, store) = SpillBuilder::live(budget.spill).map_err(plain)?;
+    let live = LiveTree::new(src.live, store, root);
+    sink(LoadEvent::Live(Document::Live(live)));
+    let mut pace = pacer(budget, src.parse.len(), sink);
+    let publish = |b: &mut SpillBuilder, frontier, done| pace(b, None, frontier, done);
+    let parsed = parse_stream(&src.parse, builder, budget.stream, stopper(cancel), publish);
+    let Some(parsed) = finished(parsed)? else {
+        return Ok(None);
     };
-    let parsed = match parse_stream(&parse_source, builder, budget.stream, stop, publish) {
-        Ok(parsed) => parsed,
-        Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::Cancelled => return Ok(None),
-        Err(err) => return Err(plain(&err)),
+    let store = parsed.builder.finish().map_err(plain)?;
+    let (root, values) = (parsed.root, parsed.values);
+    let tree = StreamTree::new(src.finished, store, root, values, 64 << 10);
+    Ok(Some(Document::Stream(tree)))
+}
+
+fn stream_lines(
+    file: &File,
+    sink: &mut impl FnMut(LoadEvent<Document>),
+    cancel: &AtomicBool,
+    budget: StreamBudget,
+) -> Result<Option<Document>, LoadFailure> {
+    let src = sources(file, budget)?;
+    let (builder, store) = SpillBuilder::live(budget.spill).map_err(plain)?;
+    let (spill, lines) = LineSpill::live(budget.spill.stack).map_err(plain)?;
+    sink(LoadEvent::Live(Document::Live(LiveTree::lines(
+        src.live, store, lines,
+    ))));
+    let mut pace = pacer(budget, src.parse.len(), sink);
+    let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier, done| {
+        pace(b, Some(lines), frontier, done);
     };
-    let store = parsed.builder.finish().map_err(|e| plain(&e))?;
-    Ok(Some(Document::Stream(StreamTree::new(
-        final_source,
-        store,
-        parsed.root,
-        parsed.values,
-        64 << 10,
-    ))))
+    let (source, limits) = (&src.parse, budget.stream);
+    let parsed = parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish);
+    let Some(parsed) = finished(parsed)? else {
+        return Ok(None);
+    };
+    let store = parsed.builder.finish().map_err(plain)?;
+    let tree = StreamTree::from_lines(src.finished, store, parsed.lines, parsed.values);
+    Ok(Some(Document::Stream(tree)))
 }
 
 /// Offset of the first non-whitespace byte (the root value).
@@ -533,6 +592,7 @@ mod tests {
         let mut seen = Vec::new();
         load_stream(
             &file,
+            Format::Json,
             &mut |e| seen.push(e),
             &AtomicBool::new(false),
             StreamBudget::testing(),
@@ -555,6 +615,61 @@ mod tests {
     }
 
     #[test]
+    fn streaming_ndjson_goes_live_with_readable_records_then_finishes() {
+        use std::io::Write;
+        let lines: Vec<String> = (0..20_000)
+            .map(|i| {
+                if i % 97 == 0 {
+                    "{bad".to_owned()
+                } else {
+                    format!(r#"{{"id":{i}}}"#)
+                }
+            })
+            .collect();
+        let text = lines.join("\n");
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        let (mut live, mut checks, mut last) = (None, 0, None);
+        let mut sink = |e| match e {
+            LoadEvent::Live(doc) => live = Some(doc),
+            LoadEvent::Progress(_) => {
+                let doc: &Document = live.as_ref().unwrap();
+                let root = doc.root().unwrap();
+                let n = doc.child_count(root).unwrap().available();
+                assert_eq!(
+                    doc.children(root, 0..n).unwrap().len() as u64,
+                    n,
+                    "every counted record is readable"
+                );
+                checks += 1;
+            }
+            LoadEvent::Loaded(result) => last = Some(result),
+        };
+        load_stream(
+            &file,
+            Format::Ndjson,
+            &mut sink,
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        assert!(checks > 1, "{checks} progress events");
+        assert_eq!(live.map(|doc| doc.format()), Some(Format::Ndjson));
+        let Some(Ok(doc @ Document::Stream(_))) = last else {
+            panic!("no final stream tree")
+        };
+        let mem = MemTree::parse_lines(MemSource::new(text.into_bytes())).unwrap();
+        let (root, n) = (mem.root().unwrap(), 20_000);
+        assert_eq!(
+            doc.child_count(root).unwrap(),
+            mem.child_count(root).unwrap()
+        );
+        assert_eq!(
+            doc.children(root, 0..n).unwrap(),
+            mem.children(root, 0..n).unwrap()
+        );
+    }
+
+    #[test]
     fn broken_streams_stay_browsable_up_to_the_error() {
         use std::io::Write;
         let items: Vec<String> = (0..20_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
@@ -564,6 +679,7 @@ mod tests {
         let mut seen = Vec::new();
         load_stream(
             &file,
+            Format::Json,
             &mut |e| seen.push(e),
             &AtomicBool::new(false),
             StreamBudget::testing(),

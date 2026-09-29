@@ -84,12 +84,20 @@ impl<R: Source> StreamTree<R, SpillStore> {
     ) -> Result<Self, IndexError> {
         let builder = SpillBuilder::new(spill)?;
         let lines = LineSpill::new(spill.stack)?;
-        let parsed = parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _| {})?;
+        let parsed = parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _, _| {})?;
         let store = parsed.builder.finish()?;
-        Ok(Self {
-            lines: Some(Box::new(parsed.lines)),
-            ..Self::new(source, store, LINES_ROOT, parsed.values, 64 << 10)
-        })
+        Ok(Self::from_lines(source, store, parsed.lines, parsed.values))
+    }
+}
+
+impl<R: Source, S: NodeStore> StreamTree<R, S> {
+    /// An indexed NDJSON document.
+    #[must_use]
+    pub fn from_lines(source: R, store: S, lines: LineStore, values: u64) -> Self {
+        Self {
+            lines: Some(Box::new(lines)),
+            ..Self::new(source, store, LINES_ROOT, values, 64 << 10)
+        }
     }
 }
 

@@ -127,6 +127,7 @@ fn a_live_document_is_browsable_and_swapped_when_finished() {
     let mut events = Vec::new();
     load_stream(
         &file,
+        crate::format::Format::Json,
         &mut |e| events.push(e),
         &AtomicBool::new(false),
         StreamBudget::testing(),

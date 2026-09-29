@@ -70,6 +70,20 @@ fn streaming_mode_indexes_files() {
 }
 
 #[test]
+fn streaming_mode_indexes_ndjson_with_bad_lines() {
+    let file = temp_file(b"{\"a\":1}\n{bad\n[2]\n").unwrap();
+    let path = file.path().with_extension("ndjson");
+    std::fs::copy(file.path(), &path).unwrap();
+    let out = dv(&["--index-only", "--mode", "stream", path.to_str().unwrap()]).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "indexed 17 bytes"
+    );
+}
+
+#[test]
 fn index_only_handles_ndjson_with_bad_lines() {
     let file = temp_file(b"{\"a\":1}\n{bad\n[2]\n").unwrap();
     let path = file.path().with_extension("ndjson");

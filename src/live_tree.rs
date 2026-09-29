@@ -233,7 +233,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::index::lines::LineSpill;
+    use crate::index::lines::{LineSpill, PendingLines};
     use crate::index::spill::{SpillBuilder, SpillLimits};
     use crate::json::lines_stream::parse_lines_stream;
     use crate::json::stream::{StreamLimits, parse_stream};
@@ -353,8 +353,9 @@ mod tests {
             let (spill, lines) = LineSpill::live(2).unwrap();
             let live = LiveTree::lines(MemSource::new(bytes.clone()), store, lines);
             let mut failure = None;
-            let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
+            let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier: u64, last: bool| {
                 b.publish(frontier, last);
+                lines.publish(last);
                 if failure.is_none() {
                     failure = check_lines(&finished, &live, last).err();
                 }

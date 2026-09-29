@@ -196,6 +196,19 @@ pub trait Lines {
     }
 }
 
+/// A line spill as the parser sees it at a publish: whether a record is in progress.
+pub struct PendingLines<'a> {
+    pub(crate) spill: &'a mut LineSpill,
+    pub(crate) pending: bool,
+}
+
+impl PendingLines<'_> {
+    /// Makes the records before the frontier visible (no-op unless live).
+    pub fn publish(&mut self, done: bool) {
+        self.spill.publish(self.pending, done);
+    }
+}
+
 /// The finished line index, read with positional reads.
 #[derive(Debug)]
 pub struct LineStore {
