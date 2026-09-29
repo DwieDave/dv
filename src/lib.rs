@@ -9,6 +9,7 @@ pub mod format;
 pub mod index;
 pub mod json;
 pub mod load;
+pub mod mode;
 pub mod path;
 pub mod position;
 pub mod schema;

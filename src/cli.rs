@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -14,8 +15,9 @@ use thiserror::Error;
 use crate::app::run::run as run_app;
 use crate::app::screen::{App, AppEvent};
 use crate::app::terminal::TerminalGuard;
-use crate::format::Format;
+use crate::format::{Format, SNIFF_LEN, detect};
 use crate::load::{LoadEvent, Request, load};
+use crate::mode::{ModeError, Storage, choose, system_ram};
 use crate::tree::{MemTree, TreeIndex};
 
 /// Input format override.
@@ -65,6 +67,8 @@ pub enum CliError {
     Terminal(#[from] io::Error),
     #[error("no input: pass a file or pipe data into dv")]
     NoInput,
+    #[error(transparent)]
+    Mode(#[from] ModeError),
 }
 
 /// A readable input and the facts used to load it.
@@ -78,9 +82,6 @@ const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 /// # Errors
 /// Unsupported options, unreadable input, parse errors (`--index-only`) or terminal failures.
 pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
-    if cli.mode == Mode::Stream {
-        return Err(CliError::Unsupported("streaming mode"));
-    }
     let (reader, request, label) = open_input(cli)?;
     if cli.index_only {
         return index_only(reader, &request, &label).map(Some);
@@ -104,6 +105,10 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
                 source,
             })?;
             let size_hint = file.metadata().ok().map(|m| m.len());
+            let detected = detect(Some(path), &head(&file), format);
+            if choose(cli.mode, size_hint, system_ram(), detected)? == Storage::Stream {
+                return Err(CliError::Unsupported("streaming mode"));
+            }
             let request = Request {
                 path: Some(path.to_path_buf()),
                 size_hint,
@@ -112,8 +117,17 @@ fn open_input(cli: &Cli) -> Result<Input, CliError> {
             Ok((Box::new(file), request, label))
         }
         None if io::stdin().is_terminal() => Err(CliError::NoInput),
+        None if cli.mode == Mode::Stream => Err(CliError::Unsupported("streaming stdin")),
         None => Ok((Box::new(io::stdin()), base, "<stdin>".to_owned())),
     }
+}
+
+/// The first bytes of `file`, for format sniffing.
+fn head(file: &File) -> Vec<u8> {
+    let mut head = vec![0; SNIFF_LEN];
+    let read = file.read_at(&mut head, 0).unwrap_or(0);
+    head.truncate(read);
+    head
 }
 
 impl From<FormatArg> for Format {
