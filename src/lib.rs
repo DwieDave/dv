@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod config;
 pub mod document;
 pub mod error;
+pub mod filter;
 pub mod format;
 pub mod index;
 pub mod json;
