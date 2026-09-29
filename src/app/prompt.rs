@@ -7,14 +7,18 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub enum PromptKind {
     Query,
     Search,
+    /// `f`: a filter expression (FI-3).
+    Filter,
 }
 
 impl PromptKind {
+    /// What the prompt line starts with.
     #[must_use]
-    pub fn symbol(self) -> char {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Query => ':',
-            Self::Search => '/',
+            Self::Query => ":",
+            Self::Search => "/",
+            Self::Filter => "filter> ",
         }
     }
 }

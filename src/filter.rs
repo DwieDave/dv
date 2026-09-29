@@ -10,7 +10,8 @@ use crate::index::children::Child;
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::json::text::{quote_into, unescape};
-use crate::tree::TreeIndex;
+use crate::pulse::Pulse;
+use crate::tree::{NodeRef, TreeIndex};
 
 mod parse;
 
@@ -306,6 +307,61 @@ fn compare<T: TreeIndex + ?Sized>(
         _ => None,
     };
     Ok(order.is_some_and(|order| op.holds(order)))
+}
+
+/// Children scanned between progress reports (FI-3).
+pub const FILTER_BATCH: u64 = 65_536;
+
+/// The most matches a filter keeps (FI-3).
+pub const MAX_MATCHES: usize = 1_000_000;
+
+/// Matches not yet reported, and how far the scan got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    pub found: Vec<u64>,
+    pub scanned: u64,
+    pub total: u64,
+    pub capped: bool,
+}
+
+/// Scans the children of `node` for matches of `expr`, keeping at most `max`, reporting
+/// each batch through `pulse`. The result holds the matches `pulse` did not take; `None`
+/// when cancelled.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn scan<T: TreeIndex + ?Sized>(
+    tree: &T,
+    node: NodeRef,
+    expr: &Expr,
+    max: usize,
+    pulse: &dyn Pulse,
+) -> Result<Option<Scan>, IndexError> {
+    let total = tree.child_count(node)?.available();
+    let (mut found, mut reported, mut scanned) = (Vec::new(), 0, 0);
+    while scanned < total && found.len() < max {
+        if pulse.cancelled() {
+            return Ok(None);
+        }
+        let end = scanned.saturating_add(FILTER_BATCH).min(total);
+        for child in tree.children(node, scanned..end)? {
+            if found.len() < max && matches(tree, &child, expr)? {
+                found.push(child.index);
+            }
+        }
+        scanned = end;
+        if pulse.matched(&found[reported..], scanned, total) {
+            reported = found.len();
+        }
+    }
+    let capped = found.len() >= max;
+    let found = found.split_off(reported);
+    Ok(Some(Scan {
+        found,
+        scanned,
+        total,
+        capped,
+    }))
 }
 
 #[cfg(test)]

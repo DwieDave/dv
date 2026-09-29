@@ -15,6 +15,12 @@ pub trait Pulse {
 
     /// Rows read so far while sorting a table.
     fn sorting(&self, _done: u64, _total: u64) {}
+
+    /// New filter matches after `scanned` of `total` children; `true` when they were
+    /// delivered (otherwise they come with the final result).
+    fn matched(&self, _found: &[u64], _scanned: u64, _total: u64) -> bool {
+        false
+    }
 }
 
 impl<F: Fn() -> bool> Pulse for F {

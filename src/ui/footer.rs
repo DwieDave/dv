@@ -26,6 +26,10 @@ pub enum Context {
     Picker,
     Help,
     Table,
+    /// The `filter>` prompt.
+    Filter,
+    /// Browsing a filtered view.
+    Filtered,
 }
 
 const BROWSE: &[Hint] = &[
@@ -56,6 +60,17 @@ const PICKER: &[Hint] = &[
     hint("esc", "close"),
 ];
 const HELP: &[Hint] = &[hint("j/k", "scroll"), hint("esc", "close")];
+const FILTER: &[Hint] = &[hint("⏎", "run"), hint("esc", "cancel")];
+const FILTERED: &[Hint] = &[
+    hint("o", "open"),
+    hint("esc", "clear"),
+    hint("f", "edit"),
+    hint("j/k", "move"),
+    hint("h/l", "fold"),
+    hint("/", "search"),
+    hint("t", "table"),
+    hint("?", "help"),
+];
 const TABLE: &[Hint] = &[
     hint("j/k", "rows"),
     hint("h/l", "columns"),
@@ -77,6 +92,8 @@ pub fn hints(context: Context) -> &'static [Hint] {
         Context::Picker => PICKER,
         Context::Help => HELP,
         Context::Table => TABLE,
+        Context::Filter => FILTER,
+        Context::Filtered => FILTERED,
     }
 }
 

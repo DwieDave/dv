@@ -97,7 +97,10 @@ impl<T: TreeIndex> TableWidget<'_, T> {
         columns: &[(usize, &Column)],
         index: usize,
     ) -> Result<Line<'static>, IndexError> {
-        let (i, node) = (child.index, child.node());
+        let (i, node) = (
+            self.tree.original_index(self.table.node, child.index),
+            child.node(),
+        );
         let gutter = if row == self.table.row {
             Span::styled("▎", self.theme.marker)
         } else {

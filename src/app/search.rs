@@ -9,7 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::picker::Catalog;
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
-use crate::app::{LastFind, Model, jumped, picker, table};
+use crate::app::{LastFind, Model, filter, jumped, picker, table};
+use crate::filter::{Expr, MAX_MATCHES, Scan, scan};
 use crate::index::children::Child;
 use crate::pulse::Pulse;
 use crate::schema::{Collected, collect, render};
@@ -22,7 +23,7 @@ use crate::view::resolve::{Label, RootItem, RowKind, chain};
 use crate::view::table::{SortDir, sort_order};
 
 /// What a job computes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Work {
     Find(Direction),
     Count,
@@ -30,6 +31,15 @@ pub enum Work {
     Schema,
     /// Order a table's rows by a column (TB-5).
     Sort(SortSpec),
+    /// Find the children of a container that match a filter (FI-3).
+    Filter(FilterSpec),
+}
+
+/// A filter scan: the container and the expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterSpec {
+    pub node: NodeRef,
+    pub expr: Expr,
 }
 
 /// A table sort: the container's children by one key.
@@ -69,6 +79,12 @@ pub enum JobResult {
         done: u64,
         total: u64,
     },
+    /// Filter matches: a batch while scanning, then the rest when `done`.
+    Matched {
+        scan: Scan,
+        done: bool,
+    },
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +112,14 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
         }
         (Work::Sort(spec), _) => sort_order(tree, spec.node, &spec.key, spec.dir, pulse)
             .map(JobResult::Sorted)
+            .map_err(SearchError::from),
+        (Work::Filter(spec), _) => scan(tree, spec.node, &spec.expr, MAX_MATCHES, pulse)
+            .map(|scan| {
+                scan.map_or(JobResult::Cancelled, |scan| JobResult::Matched {
+                    scan,
+                    done: true,
+                })
+            })
             .map_err(SearchError::from),
         (Work::Count, Some(m)) => count(tree, &job.root, m, pulse).map(JobResult::Counted),
         (Work::Schema, _) => collect(tree, &job.root, pulse)
@@ -150,6 +174,17 @@ impl Pulse for WorkerPulse<'_> {
 
     fn sorting(&self, done: u64, total: u64) {
         self.interim(JobResult::Sorting { done, total });
+    }
+
+    fn matched(&self, found: &[u64], scanned: u64, total: u64) -> bool {
+        let scan = Scan {
+            found: found.to_vec(),
+            scanned,
+            total,
+            capped: false,
+        };
+        self.interim(JobResult::Matched { scan, done: false });
+        !self.cancelled()
     }
 }
 
@@ -351,8 +386,12 @@ pub(crate) fn submit_job<T: TreeIndex>(
         matcher,
         root,
         from,
+        // A filter scan reads the whole container, not the current view.
+        filter: model
+            .filter
+            .clone()
+            .filter(|_| !matches!(work, Work::Filter(_))),
         work,
-        filter: model.filter.clone(),
     };
     let unsent = match &model.jobs {
         Some(jobs) => jobs.send(job).err().map(|err| err.0),
@@ -383,7 +422,11 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         }
         JobResult::Found(None) => note(model, "no match".to_owned()),
         JobResult::Counted(Some(n)) => note(model, format!("{} matches", grouped(n))),
-        JobResult::Counted(None) | JobResult::Schema(None) | JobResult::Sorted(None) => {}
+        JobResult::Counted(None)
+        | JobResult::Schema(None)
+        | JobResult::Sorted(None)
+        | JobResult::Cancelled => {}
+        JobResult::Matched { scan, done } => filter::receive(model, scan, done),
         JobResult::Schema(Some(entries)) => picker::receive(model, entries),
         JobResult::Failed(message) => note(model, message),
         JobResult::Scanning(scanned) => note(model, scanning(scanned)),

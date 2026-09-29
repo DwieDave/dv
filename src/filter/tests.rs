@@ -176,3 +176,52 @@ fn comparisons_are_type_strict_and_missing_paths_never_compare() {
     assert!(eval(r#".s ~ "^1$""#) && !eval(r#".n ~ "1""#));
     assert!(!eval(".t < true"), "booleans only compare for equality");
 }
+
+/// Records every batch of matches the scan reports.
+struct Recorder(std::cell::RefCell<Vec<(Vec<u64>, u64)>>);
+
+impl crate::pulse::Pulse for Recorder {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn matched(&self, found: &[u64], scanned: u64, _total: u64) -> bool {
+        self.0.borrow_mut().push((found.to_vec(), scanned));
+        true
+    }
+}
+
+#[test]
+fn scans_report_matches_in_batches_and_stop_at_the_cap() {
+    let records: Vec<String> = (0..FILTER_BATCH * 2 + 10)
+        .map(|i| format!("{{\"n\":{}}}", i % 3))
+        .collect();
+    let tree = MemTree::parse_lines(MemSource::new(records.join("\n").into_bytes())).unwrap();
+    let root = tree.root().unwrap();
+    let expr = parse(".n == 0").unwrap();
+    let pulse = Recorder(std::cell::RefCell::new(Vec::new()));
+    let scan = scan(&tree, root, &expr, usize::MAX, &pulse)
+        .unwrap()
+        .unwrap();
+    let batches = pulse.0.into_inner();
+    assert_eq!(batches.len(), 3);
+    assert_eq!(batches[0].1, FILTER_BATCH);
+    let all: Vec<u64> = batches
+        .into_iter()
+        .flat_map(|(found, _)| found)
+        .chain(scan.found)
+        .collect();
+    assert_eq!(
+        all,
+        (0..FILTER_BATCH * 2 + 10)
+            .filter(|i| i % 3 == 0)
+            .collect::<Vec<_>>()
+    );
+    let capped = scan_all(&tree, root, &expr, 3);
+    assert_eq!((capped.found, capped.capped), (vec![0, 3, 6], true));
+}
+
+/// A scan without progress reports: everything comes in the result.
+fn scan_all(tree: &MemTree, node: crate::tree::NodeRef, expr: &Expr, max: usize) -> Scan {
+    scan(tree, node, expr, max, &|| false).unwrap().unwrap()
+}

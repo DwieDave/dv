@@ -1,5 +1,6 @@
 //! The Elm-style application core: model, messages, update and view (D-8).
 
+pub mod filter;
 pub mod keymap;
 pub mod picker;
 pub mod prompt;
@@ -73,6 +74,8 @@ pub struct Model<T> {
     pub table: Option<TableState>,
     /// The active filter's matches (FI-4); everything reads the tree through it.
     pub filter: Option<Arc<FilterView>>,
+    /// The active filter's expression and progress.
+    pub filtering: Option<filter::FilterState>,
     /// Schema paths, collected the first time the picker opens.
     pub schema: Option<Catalog>,
     /// What `n`/`N` repeat.
@@ -121,6 +124,7 @@ impl<T: TreeIndex> Model<T> {
             picker: None,
             table: None,
             filter: None,
+            filtering: None,
             schema: None,
             last_find: LastFind::None,
             note: None,
@@ -186,10 +190,14 @@ fn context<T>(model: &Model<T>) -> Context {
         return Context::Help;
     }
     match (&model.prompt, &model.picker, &model.table) {
-        (Some(prompt), _, _) if prompt.kind == PromptKind::Search => Context::Search,
-        (Some(_), _, _) => Context::Query,
+        (Some(prompt), _, _) => match prompt.kind {
+            PromptKind::Search => Context::Search,
+            PromptKind::Query => Context::Query,
+            PromptKind::Filter => Context::Filter,
+        },
         (None, Some(_), _) => Context::Picker,
         (None, None, Some(_)) => Context::Table,
+        (None, None, None) if model.filtering.is_some() => Context::Filtered,
         (None, None, None) => Context::Browse,
     }
 }
@@ -204,7 +212,7 @@ fn render_footer<T>(model: &Model<T>, frame: &mut Frame, rule: Rect, keys: Rect)
         hints(ctx),
         usize::from(keys.width),
         theme,
-        ctx == Context::Browse,
+        matches!(ctx, Context::Browse | Context::Filtered),
     );
     frame.render_widget(hints, keys);
 }
@@ -239,6 +247,10 @@ pub enum Msg {
     ToggleFollow,
     /// `t`: the table view of the array at the cursor (TB-1).
     OpenTable,
+    /// `o`: leave the filter at the match under the cursor (FI-4).
+    FilterOpen,
+    /// `Esc`: leave the filter.
+    FilterClear,
     /// Back or forward through the jump list.
     History(Step),
     /// `m{a-z}`: remember the cursor.
@@ -437,6 +449,9 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Mouse(_) if model.table.is_some() => {}
         Msg::Mouse(mouse) => on_mouse(model, mouse),
         Msg::OpenPrompt(PromptKind::Search) => search::open(model),
+        Msg::OpenPrompt(PromptKind::Filter) => filter::open(model),
+        Msg::FilterOpen => filter::open_match(model),
+        Msg::FilterClear => filter::clear(model, false),
         Msg::OpenPrompt(kind) => model.prompt = Some(Prompt::new(kind)),
         Msg::SearchStep(direction) => search::step(model, direction),
         Msg::SearchOutcome(outcome) => search::apply(model, outcome),
@@ -461,6 +476,14 @@ fn prompt_key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
     let action = model.prompt.as_mut().and_then(|prompt| prompt.key(key));
     match action {
         Some(PromptAction::Cancel) => model.prompt = None,
+        Some(PromptAction::Submit(text))
+            if model
+                .prompt
+                .as_ref()
+                .is_some_and(|p| p.kind == PromptKind::Filter) =>
+        {
+            filter::submit(model, &text);
+        }
         Some(PromptAction::Submit(text)) => submit(model, &text),
         Some(PromptAction::Edited) | None => {}
     }
@@ -684,7 +707,8 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
                 prompt_line(prompt, flags.as_deref(), &model.theme),
                 status_area,
             );
-            let column = u16::try_from(prompt.text.chars().count() + 1).unwrap_or(u16::MAX);
+            let column = prompt.kind.label().chars().count() + prompt.text.chars().count();
+            let column = u16::try_from(column).unwrap_or(u16::MAX);
             frame.set_cursor_position((status_area.x.saturating_add(column), status_area.y));
         }
         None => frame.render_widget(status(model, status_area.width.into()), status_area),
@@ -789,11 +813,7 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
 }
 
 fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![Span::raw(format!(
-        "{}{}",
-        prompt.kind.symbol(),
-        prompt.text
-    ))];
+    let mut spans = vec![Span::raw(format!("{}{}", prompt.kind.label(), prompt.text))];
     if let Some(flags) = flags.filter(|f| !f.is_empty()) {
         spans.push(Span::styled(format!("  {flags}"), theme.badge));
     }
@@ -804,6 +824,7 @@ fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'sta
 }
 
 fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
+    let summary = filter::summary(model);
     let (path, kind) = cursor_facts(model).unwrap_or_else(|err| (String::new(), err.to_string()));
     let status = Status {
         path: &path,
@@ -815,7 +836,8 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
         note: model
             .note
             .as_deref()
-            .or_else(|| model.search.as_ref().and_then(|s| s.note.as_deref())),
+            .or_else(|| model.search.as_ref().and_then(|s| s.note.as_deref()))
+            .or(summary.as_deref()),
     };
     status_line(&status, width, &model.theme)
 }

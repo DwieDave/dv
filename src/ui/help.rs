@@ -42,6 +42,13 @@ const FINDING: &[Row] = &[
     row("^r ^e", "in search: regex / case sensitivity", &[]),
     row("n N", "next / previous match", &["n", "N"]),
     row(":", "jump to a path, e.g. .items[-1].id", &[":"]),
+    row(
+        "f",
+        "filter the array, e.g. .age > 30 and has(.email)",
+        &["f"],
+    ),
+    row("o", "in a filter: open the match in the full tree", &["o"]),
+    row("esc", "in a filter: clear it", &["Esc"]),
     row("^p", "fuzzy picker over key paths", &["C-p"]),
     row("^o  tab", "back / forward through jumps", &["C-o", "Tab"]),
     row(
