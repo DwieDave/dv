@@ -263,9 +263,11 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "dhat",
+ "memchr",
  "proptest",
  "saphyr",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
