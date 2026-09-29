@@ -16,6 +16,8 @@ expect_used = "deny"
 panic = "deny"
 
 [dev-dependencies]
+criterion = "0.8.2"
+dhat = "0.3.3"
 proptest = "1.11.0"
 saphyr = "0.1.0"
 serde_json = "1.0.151"
@@ -23,3 +25,7 @@ serde_json = "1.0.151"
 [[example]]
 name = "gen"
 test = true
+
+[[bench]]
+name = "load"
+harness = false
