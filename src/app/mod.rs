@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender;
 
-use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -29,6 +29,7 @@ use crate::path::{parse, render};
 use crate::search::{Direction, Query, Scope};
 use crate::tree::TreeIndex;
 use crate::ui::footer::{Context, hint_line, hints};
+use crate::ui::help::help_lines;
 use crate::ui::preview::PreviewWidget;
 use crate::ui::status::{Status, status_line};
 use crate::ui::theme::Theme;
@@ -72,6 +73,8 @@ pub struct Model<T> {
     pub banner: Option<String>,
     /// Show the rule and key-hint rows under the tree (KF-1, `[ui] footer`).
     pub footer: bool,
+    /// The help overlay's scroll offset, while it is open.
+    pub help: Option<u16>,
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -105,6 +108,7 @@ impl<T: TreeIndex> Model<T> {
             note: None,
             banner: None,
             footer: true,
+            help: None,
             effects: Vec::new(),
             jobs: None,
             generation: Arc::new(AtomicU64::new(0)),
@@ -123,8 +127,43 @@ fn footer_rows<T>(model: &Model<T>) -> u16 {
     u16::from(model.footer)
 }
 
+/// Keys while the help overlay is open: scroll, or close with `?`, `Esc` or `q`.
+fn help_key<T>(model: &mut Model<T>, key: KeyEvent) {
+    let Some(scroll) = model.help else {
+        return;
+    };
+    let last = u16::try_from(help_lines(&model.theme).len().saturating_sub(1)).unwrap_or(u16::MAX);
+    model.help = match key.code {
+        KeyCode::Char('?' | 'q') | KeyCode::Esc => None,
+        KeyCode::Char('j') | KeyCode::Down => Some(scroll.saturating_add(1).min(last)),
+        KeyCode::Char('k') | KeyCode::Up => Some(scroll.saturating_sub(1)),
+        _ => Some(scroll),
+    };
+}
+
+/// The help overlay: a centered bordered popup, scrolled by `scroll` lines.
+fn render_help(scroll: u16, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let lines = help_lines(theme);
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let [popup] = Layout::horizontal([Constraint::Length(58)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(popup);
+    let block = Block::bordered().title(" keys ").border_style(theme.badge);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        popup,
+    );
+}
+
 /// What the keys do right now, for the hint row.
 fn context<T>(model: &Model<T>) -> Context {
+    if model.help.is_some() {
+        return Context::Help;
+    }
     match (&model.prompt, &model.picker) {
         (Some(prompt), _) if prompt.kind == PromptKind::Search => Context::Search,
         (Some(_), _) => Context::Query,
@@ -172,6 +211,8 @@ pub enum Msg {
     Preview(PreviewCmd),
     Copy(CopyWhat),
     OpenPicker,
+    /// The `?` overlay listing every key.
+    OpenHelp,
     /// Child counts may have grown (streaming progress).
     Refresh,
 }
@@ -262,6 +303,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         {
             search::prompt_key(model, key);
         }
+        Msg::Key(key) if model.help.is_some() => help_key(model, key),
         Msg::Key(key) if model.prompt.is_some() => prompt_key(model, key),
         Msg::Key(key) if model.picker.is_some() => picker::key(model, key),
         Msg::Key(key) => {
@@ -285,6 +327,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Preview(cmd) => preview_cmd(&mut model.preview, cmd, 1),
         Msg::Copy(what) => copy(model, what),
         Msg::OpenPicker => picker::open(model),
+        Msg::OpenHelp => model.help = Some(0),
         Msg::Refresh => {
             if let Err(err) = model.state.refresh(&*model.tree) {
                 model.status = Some(err.to_string());
@@ -441,6 +484,9 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
     }
     if let Some(picker) = &model.picker {
         render_picker(picker, frame, main_area, &model.theme);
+    }
+    if let Some(scroll) = model.help {
+        render_help(scroll, frame, main_area, &model.theme);
     }
     match &model.prompt {
         Some(prompt) => {
@@ -638,6 +684,38 @@ mod tests {
         update(&mut model, Msg::Key(KeyCode::Esc.into()));
         update(&mut model, Msg::OpenPicker);
         assert!(rows(&model, 40, 12)[11].starts_with(" ↑↓ select  ⏎ jump"));
+    }
+
+    #[test]
+    fn question_mark_opens_a_scrollable_help_overlay() {
+        let mut model = model();
+        update(&mut model, Msg::Resize(60, 14));
+        update(&mut model, Msg::Key(KeyCode::Char('?').into()));
+        assert_eq!(model.help, Some(0));
+        let shown = rows(&model, 60, 14);
+        assert!(
+            shown.iter().any(|r| r.contains(" keys "))
+                && shown.iter().any(|r| r.contains("Navigation")),
+            "{shown:#?}"
+        );
+        assert!(
+            shown[13].starts_with(" j/k scroll  esc close"),
+            "{shown:#?}"
+        );
+        update(&mut model, Msg::Key(KeyCode::Char('j').into()));
+        assert_eq!(model.help, Some(1));
+        assert_ne!(rows(&model, 60, 14), shown, "scrolling moves the list");
+        update(&mut model, Msg::Key(KeyCode::Char('k').into()));
+        update(&mut model, Msg::Key(KeyCode::Char('k').into()));
+        assert_eq!(model.help, Some(0));
+        update(&mut model, Msg::Key(KeyCode::Char('x').into()));
+        assert_eq!(model.help, Some(0), "other keys are ignored");
+        update(&mut model, Msg::Key(KeyCode::Char('q').into()));
+        assert_eq!(model.help, None);
+        assert!(!model.quit, "q closes the help, not the app");
+        update(&mut model, Msg::Key(KeyCode::Char('?').into()));
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        assert_eq!(model.help, None);
     }
 
     #[test]
