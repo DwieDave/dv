@@ -191,3 +191,18 @@ fn nested_complex_keys_stop_at_the_budget() {
         result.map(|t| t.json.len())
     );
 }
+
+#[test]
+fn offsets_beyond_u32_are_a_budget_error() {
+    assert_eq!(checked_offset(7, 0), Ok(7));
+    let huge = usize::try_from(u32::MAX).unwrap() + 1;
+    assert_eq!(
+        checked_offset(huge, 5),
+        Err(TranscodeError::Budget { offset: 5 })
+    );
+    assert_eq!(
+        checked_offset(usize::try_from(u32::MAX).unwrap(), 5),
+        Err(TranscodeError::Budget { offset: 5 }),
+        "room is needed for the root array shift"
+    );
+}

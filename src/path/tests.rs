@@ -124,3 +124,12 @@ fn reports_errors_with_positions() {
         assert_eq!(err.at, at, "{input}: {err}");
     }
 }
+
+#[test]
+fn error_offsets_count_chars_not_bytes() {
+    let table = [(r#"."é"."#, 5), (r#"."é" x"#, 5), (r#"."é"é"#, 4), ("é", 0)];
+    for (input, at) in table {
+        let err = parse(input).unwrap_err();
+        assert_eq!(err.at, at, "{input}: {err}");
+    }
+}

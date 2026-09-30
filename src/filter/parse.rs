@@ -4,6 +4,9 @@ use super::{Expr, FilterError, Literal, Op, Path, Pattern, Step};
 use crate::json::lex::hex4;
 use crate::json::text::unescape;
 
+/// The deepest an expression may nest, so evaluating, printing and dropping it stay on the stack.
+pub const MAX_NESTING: usize = 256;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Dot,
@@ -28,6 +31,7 @@ pub fn parse(text: &str) -> Result<Expr, FilterError> {
     let mut parser = Parser {
         tokens: lex(text)?,
         at: 0,
+        depth: 0,
         text,
     };
     let expr = parser.or()?;
@@ -146,6 +150,8 @@ enum Next {
 struct Parser<'a> {
     tokens: Vec<Lexed>,
     at: usize,
+    /// How many `not`s and parentheses enclose the expression being parsed.
+    depth: usize,
     text: &'a str,
 }
 
@@ -190,7 +196,10 @@ impl Parser<'_> {
 
     fn or(&mut self) -> Result<Expr, FilterError> {
         let mut left = self.and()?;
+        let mut chained = 0;
         while self.keyword("or") {
+            chained += 1;
+            self.check_depth(chained)?;
             left = Expr::Or(Box::new(left), Box::new(self.and()?));
         }
         Ok(left)
@@ -198,7 +207,10 @@ impl Parser<'_> {
 
     fn and(&mut self) -> Result<Expr, FilterError> {
         let mut left = self.unary()?;
+        let mut chained = 0;
         while self.keyword("and") {
+            chained += 1;
+            self.check_depth(chained)?;
             left = Expr::And(Box::new(left), Box::new(self.unary()?));
         }
         Ok(left)
@@ -206,14 +218,34 @@ impl Parser<'_> {
 
     fn unary(&mut self) -> Result<Expr, FilterError> {
         if self.keyword("not") {
-            return Ok(Expr::Not(Box::new(self.unary()?)));
+            return Ok(Expr::Not(Box::new(self.nested(Self::unary)?)));
         }
         if self.eat(&Token::Open) {
-            let expr = self.or()?;
+            let expr = self.nested(Self::or)?;
             self.expect(&Token::Close, "expected `)`")?;
             return Ok(expr);
         }
         self.atom()
+    }
+
+    /// Runs `parse` one level deeper.
+    fn nested(
+        &mut self,
+        parse: fn(&mut Self) -> Result<Expr, FilterError>,
+    ) -> Result<Expr, FilterError> {
+        self.check_depth(1)?;
+        self.depth += 1;
+        let expr = parse(self);
+        self.depth -= 1;
+        expr
+    }
+
+    /// Fails when `extra` more levels on top of the current ones pass the limit.
+    fn check_depth(&self, extra: usize) -> Result<(), FilterError> {
+        if self.depth + extra > MAX_NESTING {
+            return self.fail("expression nested too deeply");
+        }
+        Ok(())
     }
 
     fn atom(&mut self) -> Result<Expr, FilterError> {
@@ -281,7 +313,9 @@ impl Parser<'_> {
 
     fn literal(&mut self) -> Result<Literal, FilterError> {
         let literal = match self.peek() {
-            Some(Token::Num(n, _)) => Literal::Number(*n),
+            Some(Token::Num(n, source)) => source
+                .parse::<i64>()
+                .map_or(Literal::Number(*n), Literal::Integer),
             Some(Token::Str(s)) => Literal::String(s.clone()),
             Some(Token::Word(w)) if w == "true" => Literal::Bool(true),
             Some(Token::Word(w)) if w == "false" => Literal::Bool(false),

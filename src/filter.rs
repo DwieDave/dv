@@ -15,7 +15,7 @@ use crate::tree::{NodeRef, TreeIndex};
 
 mod parse;
 
-pub use parse::parse;
+pub use parse::{MAX_NESTING, parse};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -49,6 +49,8 @@ pub enum Op {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
+    /// An integer that fits `i64`, compared exactly against integer values.
+    Integer(i64),
     Number(f64),
     String(String),
     Bool(bool),
@@ -186,6 +188,7 @@ impl fmt::Display for Op {
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Integer(n) => write!(f, "{n}"),
             Self::Number(n) => write!(f, "{n}"),
             Self::String(s) => f.write_str(&quoted(s)),
             Self::Bool(b) => write!(f, "{b}"),
@@ -287,6 +290,18 @@ fn member<T: TreeIndex + ?Sized>(
     Ok(None)
 }
 
+/// Integers compare exactly; a fractional or huge value falls back to `f64`.
+fn compare_integer(raw: &[u8], literal: i64) -> Option<Ordering> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if let Ok(n) = text.parse::<i64>() {
+        return Some(n.cmp(&literal));
+    }
+    // Only reached for values that are not `i64`, where the rounding is immaterial.
+    #[allow(clippy::cast_precision_loss)]
+    let literal = literal as f64;
+    text.parse::<f64>().ok()?.partial_cmp(&literal)
+}
+
 /// A type-strict comparison; booleans and null only compare for (in)equality.
 fn compare<T: TreeIndex + ?Sized>(
     tree: &T,
@@ -297,6 +312,7 @@ fn compare<T: TreeIndex + ?Sized>(
     let raw = || tree.bytes(value.value..value.end);
     let equality = matches!(op, Op::Eq | Op::Ne);
     let order = match (value.kind, literal) {
+        (Kind::Number, Literal::Integer(l)) => compare_integer(&raw()?, *l),
         (Kind::Number, Literal::Number(l)) => std::str::from_utf8(&raw()?)
             .ok()
             .and_then(|t| t.parse::<f64>().ok())
