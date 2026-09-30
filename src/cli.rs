@@ -157,9 +157,7 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
 
 /// Saves the cursor for next time (HI-3); failing to is only worth a warning.
 fn remember(state: &Path, key: FileKey, cursor: Vec<u64>) {
-    let mut positions = Positions::load(state);
-    positions.put(key, cursor);
-    if let Err(err) = positions.save(state) {
+    if let Err(err) = Positions::update(state, key, cursor) {
         eprintln!("dv: could not remember the position: {err}");
     }
 }
