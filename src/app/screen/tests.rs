@@ -128,7 +128,7 @@ fn a_live_document_is_browsable_and_swapped_when_finished() {
     use crate::load::{StreamBudget, load_stream};
 
     let items: Vec<String> = (0..20_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
-    let mut file = tempfile::tempfile().unwrap();
+    let mut file = crate::temp::file().unwrap();
     file.write_all(format!("[{}]", items.join(",")).as_bytes())
         .unwrap();
     let mut events = Vec::new();

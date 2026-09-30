@@ -26,28 +26,29 @@ const FIXTURES: [&str; 8] = [
     "yaml-15M.yaml",
 ];
 
-fn fixture(name: &str) -> Option<PathBuf> {
+/// A missing fixture would silently skip a benchmark, so it aborts the run instead.
+fn missing(name: &str) -> ! {
+    eprintln!("missing fixture {name}: run `just data`");
+    std::process::exit(1)
+}
+
+fn fixture(name: &str) -> PathBuf {
     let path = PathBuf::from("target/bench-data").join(name);
-    path.exists().then_some(path)
+    if path.exists() { path } else { missing(name) }
 }
 
 fn loaded(names: &[&'static str]) -> Vec<(&'static str, Vec<u8>)> {
     let load = |name: &'static str| {
-        let bytes = fixture(name).and_then(|path| fs::read(path).ok());
-        if bytes.is_none() {
-            eprintln!("missing fixture {name}: run `just data`");
-        }
-        bytes.map(|bytes| (name, bytes))
+        let bytes = fs::read(fixture(name)).unwrap_or_else(|_| missing(name));
+        (name, bytes)
     };
-    names.iter().filter_map(|&name| load(name)).collect()
+    names.iter().map(|&name| load(name)).collect()
 }
 
 fn read_baseline(c: &mut Criterion) {
     let mut group = c.benchmark_group("read");
     for name in FIXTURES {
-        let Some(path) = fixture(name) else {
-            continue;
-        };
+        let path = fixture(name);
         let len = fs::metadata(&path).map_or(0, |m| m.len());
         group.throughput(Throughput::Bytes(len));
         group.bench_function(name, |b| b.iter(|| fs::read(black_box(&path))));
@@ -69,7 +70,7 @@ fn load_formats(c: &mut Criterion) {
     group.sample_size(10);
     for (name, bytes) in loaded(&FIXTURES[6..]) {
         let request = Request {
-            path: fixture(name),
+            path: Some(fixture(name)),
             max_len: u64::MAX,
             ..Request::default()
         };
@@ -105,9 +106,7 @@ fn stream_once(path: &std::path::Path) -> Option<SpillStore> {
 }
 
 fn stream_index(c: &mut Criterion) {
-    let Some(path) = fixture("api-100M.json") else {
-        return;
-    };
+    let path = fixture("api-100M.json");
     let len = fs::metadata(&path).map_or(0, |m| m.len());
     let mut group = c.benchmark_group("stream");
     group.sample_size(10).throughput(Throughput::Bytes(len));

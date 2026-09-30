@@ -9,6 +9,7 @@ use std::path::Path;
 ///
 /// # Errors
 /// When the file cannot be created.
+#[allow(clippy::disallowed_methods)] // the one place allowed to create anonymous temp files
 pub fn file() -> io::Result<File> {
     tempfile::tempfile()
 }

@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn index_only_refuses_streamed_yaml() {
-        let file = tempfile::tempfile().unwrap();
+        let file = crate::temp::file().unwrap();
         let err = index_only_stream(file, "x.yaml", Format::Yaml, StreamBudget::testing());
         assert!(matches!(err, Err(CliError::Mode(ModeError::YamlTooLarge))));
     }

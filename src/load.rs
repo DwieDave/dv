@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn streaming_yaml_is_refused_not_parsed_as_json() {
         use std::io::Write;
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(b"{\"a\": 1}\n").unwrap();
         let mut seen = Vec::new();
         load_stream(
@@ -773,7 +773,7 @@ mod tests {
         use std::io::Write;
         let items: Vec<String> = (0..40_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
         let text = format!("[{}]", items.join(","));
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(text.as_bytes()).unwrap();
         let mut seen = Vec::new();
         load_stream(
@@ -813,7 +813,7 @@ mod tests {
             })
             .collect();
         let text = lines.join("\n");
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(text.as_bytes()).unwrap();
         let (mut live, mut checks, mut last) = (None, 0, None);
         let mut sink = |e| match e {
@@ -1123,7 +1123,7 @@ mod tests {
         use std::io::Write;
         let items: Vec<String> = (0..20_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
         let text = format!("[{}, {{\"bad\" 1}}]", items.join(","));
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(text.as_bytes()).unwrap();
         let mut seen = Vec::new();
         load_stream(

@@ -250,7 +250,7 @@ mod tests {
     use super::*;
 
     fn file_with(bytes: &[u8]) -> File {
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(bytes).unwrap();
         file
     }

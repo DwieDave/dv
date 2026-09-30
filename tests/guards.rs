@@ -1,19 +1,16 @@
-//! Repository guards that keep the no-unsafe rule enforced at the source level.
+//! Repository guards that keep the no-unsafe rule enforced in the fuzz crate, which is outside
+//! the workspace lints. Temp-file creation is guarded by clippy's `disallowed-methods`.
 
 use std::fs;
 
-const CRATE_ROOTS: [&str; 2] = ["src/lib.rs", "src/main.rs"];
 const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]";
 
 #[test]
-fn every_crate_root_forbids_unsafe() {
+fn every_fuzz_target_forbids_unsafe() {
     let fuzz_targets = sources("fuzz/fuzz_targets");
     assert!(!fuzz_targets.is_empty(), "fuzz targets not found");
-    let roots = CRATE_ROOTS
-        .iter()
-        .map(std::path::PathBuf::from)
-        .chain(fuzz_targets);
-    let missing: Vec<std::path::PathBuf> = roots
+    let missing: Vec<std::path::PathBuf> = fuzz_targets
+        .into_iter()
         .filter(|path| {
             !fs::read_to_string(path)
                 .unwrap_or_default()
@@ -40,27 +37,6 @@ fn sources(dir: &str) -> Vec<std::path::PathBuf> {
         }
     }
     out
-}
-
-/// Production code creates temp files only through `temp::file` (tests may unwrap).
-#[test]
-fn temp_files_come_from_one_place() {
-    let offenders: Vec<String> = sources("src")
-        .into_iter()
-        .filter(|path| !path.ends_with("temp.rs"))
-        .filter(|path| {
-            let text = fs::read_to_string(path).unwrap_or_default();
-            text.contains("use tempfile")
-                || text
-                    .match_indices("tempfile::tempfile()")
-                    .any(|(at, m)| !text[at + m.len()..].starts_with(".unwrap()"))
-        })
-        .map(|path| path.display().to_string())
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "create temp files with temp::file(): {offenders:?}"
-    );
 }
 
 /// Planning IDs: a short capital prefix, a dash and a number, or a dotted task number.

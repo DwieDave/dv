@@ -75,25 +75,25 @@ fn ratio(peak: usize, len: usize) -> f64 {
     peak as f64 / len as f64
 }
 
-#[test]
-fn peak_heap_is_bounded_for_every_shape() {
+fn assert_shapes_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
     let mut report = String::new();
     let mut failures = Vec::new();
     for (name, text, limit) in shapes() {
         let len = text.len();
-        let (tree, peak) = peak_heap(|| {
-            let source = MemSource::load(text.as_bytes(), u64::MAX, Some(len as u64)).unwrap();
-            MemTree::parse(source).unwrap()
+        let (tree, peak) = peak_heap(|| -> Result<_, Box<dyn std::error::Error>> {
+            let source = MemSource::load(text.as_bytes(), u64::MAX, Some(len as u64))?;
+            Ok(MemTree::parse(source)?)
         });
-        drop(tree);
+        drop(tree?);
         let r = ratio(peak, len);
-        writeln!(report, "{name}: {r:.2}x of {len} bytes").unwrap();
+        writeln!(report, "{name}: {r:.2}x of {len} bytes")?;
         if r > limit {
             failures.push(format!("{name} {r:.2}x > {limit}x"));
         }
     }
     println!("{report}");
     assert!(failures.is_empty(), "{failures:?}\n{report}");
+    Ok(())
 }
 
 fn api_yaml(i: usize) -> String {
@@ -125,8 +125,7 @@ fn loaded_peak(text: &str, path: &str) -> usize {
     peak
 }
 
-#[test]
-fn ndjson_and_yaml_loads_are_bounded() {
+fn assert_ndjson_and_yaml_loads_are_bounded() {
     let ndjson = repeat_until("", api, "\n", "\n");
     let yaml = repeat_until("", api_yaml, "", "");
     for (name, text) in [("x.ndjson", ndjson), ("x.yaml", yaml)] {
@@ -134,4 +133,13 @@ fn ndjson_and_yaml_loads_are_bounded() {
         println!("{name}: {r:.2}x");
         assert!(r <= 3.0, "{name}: {r:.2}x");
     }
+}
+
+/// One test: dhat allows a single profiler at a time, so parallel tests would collide under
+/// plain `cargo test`.
+#[test]
+fn peak_heap_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    assert_shapes_are_bounded()?;
+    assert_ndjson_and_yaml_loads_are_bounded();
+    Ok(())
 }

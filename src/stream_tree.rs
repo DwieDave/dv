@@ -332,7 +332,7 @@ mod tests {
 
     fn file_tree(text: &str) -> StreamTree<crate::source::file::FileSource, SpillStore> {
         use std::io::Write;
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(text.as_bytes()).unwrap();
         let source =
             crate::source::file::FileSource::new(file, 2 * crate::source::file::CHUNK).unwrap();

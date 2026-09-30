@@ -1,3 +1,7 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+disallowed-methods = [
+    { path = "tempfile::tempfile", reason = "use crate::temp::file" },
+    { path = "tempfile::tempfile_in", reason = "use crate::temp::file" },
+]
