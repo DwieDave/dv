@@ -1,6 +1,7 @@
 //! The status bar: cursor path and type on the left, document facts on the right (FR-20).
 
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::format::Format;
 use crate::tree::Stats;
@@ -59,12 +60,10 @@ pub fn status_line(status: &Status<'_>, width: usize, theme: &Theme) -> Line<'st
         (None, Some(note)) => (note.to_owned(), theme.key),
         (None, None) => (facts(status), theme.badge),
     };
-    let room = width
-        .saturating_sub(right.chars().count() + 2)
-        .max(width / 2);
+    let room = width.saturating_sub(right.width() + 2).max(width / 2);
     let left = cut_left(&format!("{}  {}", status.path, status.kind), room);
-    let right = cut_left(&right, width.saturating_sub(left.chars().count() + 1));
-    let pad = width.saturating_sub(left.chars().count() + right.chars().count());
+    let right = cut_left(&right, width.saturating_sub(left.width() + 1));
+    let pad = width.saturating_sub(left.width() + right.width());
     Line::from(vec![
         Span::styled(left, theme.key),
         Span::raw(" ".repeat(pad)),
@@ -82,14 +81,23 @@ fn facts(status: &Status<'_>) -> String {
     )
 }
 
-/// Keeps the tail of `text` within `room` chars, marking the cut with `…`.
+/// Keeps the tail of `text` within `room` display columns, marking the cut with `…`.
 fn cut_left(text: &str, room: usize) -> String {
-    let len = text.chars().count();
-    if len <= room {
+    if text.width() <= room {
         return text.to_owned();
     }
-    let tail: String = text.chars().skip(len + 1 - room.max(1)).collect();
-    format!("…{tail}")
+    let mut left = room.max(1) - 1;
+    let mut tail: Vec<char> = Vec::new();
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if w > left {
+            break;
+        }
+        left -= w;
+        tail.push(c);
+    }
+    tail.push('…');
+    tail.iter().rev().collect()
 }
 
 #[cfg(test)]
@@ -187,6 +195,18 @@ mod tests {
             shown.ends_with("values") && shown.chars().count() <= 30,
             "{shown}"
         );
+    }
+
+    #[test]
+    fn wide_paths_are_cut_by_display_width() {
+        let wide = Status {
+            path: ".users.名前名前名前名前名前名前名前名前",
+            ..status(None)
+        };
+        let shown = text(&status_line(&wide, 40, &Theme::default()));
+        assert!(shown.starts_with("…"), "{shown}");
+        assert!(shown.width() <= 40, "{shown}");
+        assert_eq!(cut_left("名前名前", 4), "…前");
     }
 
     #[test]
