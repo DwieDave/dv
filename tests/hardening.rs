@@ -95,7 +95,7 @@ proptest! {
         let source = MemSource::new(bytes.clone());
         let spill = LineSpill::new(4).unwrap();
         let streamed = parse_lines_stream(&source, VecStoreBuilder::default(), spill, limits, go, |_, _, _, _| {}).unwrap();
-        prop_assert_eq!((dv::index::lines::Lines::count(&streamed.lines), streamed.values), (memory.lines.count(), memory.values));
+        prop_assert_eq!((dv::index::lines::Lines::count(&streamed.lines), streamed.values), (dv::index::lines::Lines::count(&memory.lines), memory.values));
         previewed(&MemTree::parse_lines(MemSource::new(bytes)).unwrap())?;
     }
 

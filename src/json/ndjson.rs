@@ -5,62 +5,56 @@ use std::ops::ControlFlow;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::IndexError;
 use crate::index::children::{Child, skip_value};
+use crate::index::lines::{BadLine, Lines};
 use crate::index::store::{Builder, CHECKPOINT_EVERY, NodeStore, VecStore};
 use crate::index::{to_u32, to_usize};
 use crate::json::lex::{Kind, fail, skip_ws};
 use crate::json::parse::{Parser, ensure_addressable};
-
-/// A record that failed to parse; enumeration skips from `start` to `resume`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BadRecord {
-    pub start: u32,
-    pub resume: u32,
-    pub kind: ParseErrorKind,
-}
+use crate::source::SourceError;
 
 /// Record starts (every 16th), the record count and the bad records.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LineIndex {
     checkpoints: Vec<u32>,
     count: u64,
-    bad: Vec<BadRecord>,
+    bad: Vec<BadLine>,
 }
 
 impl LineIndex {
-    #[must_use]
-    pub fn count(&self) -> u64 {
-        self.count
-    }
-
-    /// Start of record `k * CHECKPOINT_EVERY`.
-    #[must_use]
-    pub fn checkpoint(&self, k: u64) -> Option<u64> {
-        usize::try_from(k)
-            .ok()
-            .and_then(|k| self.checkpoints.get(k))
-            .map(|&c| u64::from(c))
-    }
-
-    #[must_use]
-    pub fn checkpoints(&self) -> u64 {
-        self.checkpoints.len() as u64
-    }
-
-    /// The bad record starting at `start`, if any.
-    #[must_use]
-    pub fn bad_at(&self, start: u64) -> Option<&BadRecord> {
-        let idx = self
-            .bad
-            .binary_search_by_key(&start, |b| u64::from(b.start))
-            .ok()?;
-        self.bad.get(idx)
-    }
-
     fn record_start(&mut self, start: usize) {
         if self.count.is_multiple_of(CHECKPOINT_EVERY) {
             self.checkpoints.push(to_u32(start));
         }
         self.count += 1;
+    }
+}
+
+impl Lines for LineIndex {
+    fn count(&self) -> u64 {
+        self.count
+    }
+
+    fn bad_count(&self) -> u64 {
+        self.bad.len() as u64
+    }
+
+    fn checkpoint_value(&self, i: u64) -> Result<u64, SourceError> {
+        let at = usize::try_from(i)
+            .ok()
+            .and_then(|i| self.checkpoints.get(i));
+        Ok(at.map_or(0, |&c| u64::from(c)))
+    }
+
+    fn bad_fields(&self, i: u64) -> Result<[u64; 3], SourceError> {
+        let line = usize::try_from(i).ok().and_then(|i| self.bad.get(i));
+        Ok(line.map_or([0, 0, u64::MAX], |b| [b.start, b.resume, b.kind.code()]))
+    }
+
+    fn bad_line(&self, i: u64) -> Result<Option<BadLine>, SourceError> {
+        Ok(usize::try_from(i)
+            .ok()
+            .and_then(|i| self.bad.get(i))
+            .copied())
     }
 }
 
@@ -96,8 +90,8 @@ impl<S: NodeStore> Iterator for Records<'_, S> {
 impl<S: NodeStore> Records<'_, S> {
     fn record(&mut self) -> Result<Child, IndexError> {
         let value = self.pos as u64;
-        let (kind, end) = match self.lines.bad_at(value) {
-            Some(bad) => (Kind::Invalid, u64::from(bad.resume)),
+        let (kind, end) = match self.lines.bad_at(value)? {
+            Some(bad) => (Kind::Invalid, bad.resume),
             None => skip_value(self.bytes, self.store, self.pos)?,
         };
         self.pos = to_usize(end);
@@ -121,15 +115,12 @@ pub fn records<'a, S: NodeStore>(
     lines: &'a LineIndex,
     k: u64,
 ) -> Result<Records<'a, S>, IndexError> {
-    let cp = (k / CHECKPOINT_EVERY).min(lines.checkpoints().saturating_sub(1));
-    let (index, pos) = lines
-        .checkpoint(cp)
-        .map_or((0, 0), |offset| (cp * CHECKPOINT_EVERY, to_usize(offset)));
+    let (index, pos) = lines.seek(k)?;
     let mut it = Records {
         bytes,
         store,
         lines,
-        pos,
+        pos: to_usize(pos),
         index,
         done: false,
     };
@@ -185,10 +176,9 @@ impl LineSink for LineIndex {
     }
 
     fn bad(&mut self, start: usize, resume: usize, kind: ParseErrorKind) {
-        let (start, resume) = (to_u32(start), to_u32(resume));
-        self.bad.push(BadRecord {
-            start,
-            resume,
+        self.bad.push(BadLine {
+            start: start as u64,
+            resume: resume as u64,
             kind,
         });
     }
@@ -281,7 +271,7 @@ mod tests {
         parse_lines(bytes, |_| ControlFlow::Continue(())).unwrap()
     }
 
-    fn bad(lines: &LineIndex) -> Vec<(u32, u32, ParseErrorKind)> {
+    fn bad(lines: &LineIndex) -> Vec<(u64, u64, ParseErrorKind)> {
         lines
             .bad
             .iter()
@@ -293,7 +283,7 @@ mod tests {
     fn counts_records_and_skips_blank_lines() {
         let parsed = parse(b"1\n\n{\"a\":2}\r\n[3]\n");
         assert_eq!((parsed.lines.count(), parsed.values), (3, 6));
-        assert_eq!(parsed.lines.checkpoint(0), Some(0));
+        assert_eq!(parsed.lines.checkpoint(0).unwrap(), Some(0));
         assert!(bad(&parsed.lines).is_empty());
     }
 
@@ -309,10 +299,10 @@ mod tests {
         ];
         assert_eq!(bad(&parsed.lines), expected);
         assert_eq!(
-            parsed.lines.bad_at(13).map(|b| b.kind),
+            parsed.lines.bad_at(13).unwrap().map(|b| b.kind),
             Some(ParseErrorKind::TrailingData)
         );
-        assert_eq!(parsed.lines.bad_at(0), None);
+        assert_eq!(parsed.lines.bad_at(0).unwrap(), None);
     }
 
     #[test]
@@ -329,7 +319,7 @@ mod tests {
     fn checkpoints_every_sixteen_records() {
         let parsed = parse("1\n".repeat(40).as_bytes());
         let cps: Vec<u64> = (0..parsed.lines.checkpoints())
-            .filter_map(|k| parsed.lines.checkpoint(k))
+            .filter_map(|k| parsed.lines.checkpoint(k).unwrap())
             .collect();
         assert_eq!((parsed.lines.count(), cps), (40, vec![0, 32, 64]));
     }
