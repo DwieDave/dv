@@ -1,21 +1,17 @@
 //! The document tree in streaming mode: a spilled index over a file read on demand.
 
 use std::borrow::Cow;
-use std::ops::{ControlFlow, Range};
+use std::ops::Range;
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::Format;
-use crate::index::background::BackgroundSpill;
+use crate::index::IndexError;
 use crate::index::children::Child;
-use crate::index::lines::{Kids, LineSpill, LineStore, Lines, checkpoint_index, kids};
-use crate::index::spill::{SpillLimits, SpillStore};
+use crate::index::lines::{Kids, LineStore, Lines, checkpoint_index, kids};
 use crate::index::store::{Fanout, NodeStore};
 use crate::index::window::value_end;
-use crate::index::{IndexError, to_usize};
-use crate::json::lex::{Kind, kind_of};
-use crate::json::lines_stream::parse_lines_stream;
-use crate::json::stream::{StreamLimits, parse_stream};
 use crate::source::Source;
+use crate::stream_core::{DEFAULT_WINDOW, StreamCore, children, is_container};
 use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 
 /// A document indexed without being held in memory.
@@ -23,71 +19,82 @@ use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 pub struct StreamTree<R, S> {
     source: R,
     store: S,
-    root: u64,
     values: u64,
-    /// Initial window size for lexing reads.
-    window: usize,
-    /// The line index of an NDJSON document, whose root is [`LINES_ROOT`].
-    lines: Option<Box<LineStore>>,
+    core: StreamCore<LineStore>,
 }
 
 impl<R: Source, S: NodeStore> StreamTree<R, S> {
     #[must_use]
     pub fn new(source: R, store: S, root: u64, values: u64, window: usize) -> Self {
+        let mut core = StreamCore::new(root);
+        core.window = window;
         Self {
             source,
             store,
-            root,
             values,
-            window,
-            lines: None,
+            core,
         }
     }
 }
 
-impl<R: Source + Sync> StreamTree<R, SpillStore> {
-    /// Streams `source` into a spilled index.
-    ///
-    /// # Errors
-    /// Parse, read or spill failures, or `Cancelled` from `hook`.
-    pub fn index(
-        source: R,
-        limits: StreamLimits,
-        spill: SpillLimits,
-        hook: impl FnMut(u64) -> ControlFlow<()>,
-    ) -> Result<Self, IndexError> {
-        let parsed = parse_stream(
-            &source,
-            BackgroundSpill::new(spill)?,
-            limits,
-            hook,
-            |_, _, _| {},
-        )?;
-        let store = parsed.builder.finish()?;
-        Ok(Self::new(
-            source,
-            store,
-            parsed.root,
-            parsed.values,
-            64 << 10,
-        ))
-    }
+/// Indexing a whole source in one call, for tests.
+#[cfg(test)]
+mod indexing {
+    use std::ops::ControlFlow;
 
-    /// Streams NDJSON `source` into a spilled index and line index.
-    ///
-    /// # Errors
-    /// Read or spill failures, or `Cancelled` from `hook`.
-    pub fn index_lines(
-        source: R,
-        limits: StreamLimits,
-        spill: SpillLimits,
-        hook: impl FnMut(u64) -> ControlFlow<()>,
-    ) -> Result<Self, IndexError> {
-        let builder = BackgroundSpill::new(spill)?;
-        let lines = LineSpill::new(spill.stack)?;
-        let parsed = parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _, _| {})?;
-        let store = parsed.builder.finish()?;
-        Ok(Self::from_lines(source, store, parsed.lines, parsed.values))
+    use super::{DEFAULT_WINDOW, Source, StreamTree};
+    use crate::index::IndexError;
+    use crate::index::background::BackgroundSpill;
+    use crate::index::lines::LineSpill;
+    use crate::index::spill::{SpillLimits, SpillStore};
+    use crate::json::lines_stream::parse_lines_stream;
+    use crate::json::stream::{StreamLimits, parse_stream};
+
+    impl<R: Source + Sync> StreamTree<R, SpillStore> {
+        /// Streams `source` into a spilled index.
+        ///
+        /// # Errors
+        /// Parse, read or spill failures, or `Cancelled` from `hook`.
+        pub fn index(
+            source: R,
+            limits: StreamLimits,
+            spill: SpillLimits,
+            hook: impl FnMut(u64) -> ControlFlow<()>,
+        ) -> Result<Self, IndexError> {
+            let parsed = parse_stream(
+                &source,
+                BackgroundSpill::new(spill)?,
+                limits,
+                hook,
+                |_, _, _| {},
+            )?;
+            let store = parsed.builder.finish()?;
+            Ok(Self::new(
+                source,
+                store,
+                parsed.root,
+                parsed.values,
+                DEFAULT_WINDOW,
+            ))
+        }
+
+        /// Streams NDJSON `source` into a spilled index and line index.
+        ///
+        /// # Errors
+        /// Read or spill failures, or `Cancelled` from `hook`.
+        pub fn index_lines(
+            source: R,
+            limits: StreamLimits,
+            spill: SpillLimits,
+            hook: impl FnMut(u64) -> ControlFlow<()>,
+        ) -> Result<Self, IndexError> {
+            let builder = BackgroundSpill::new(spill)?;
+            let lines = LineSpill::new(spill.stack)?;
+            let parsed =
+                parse_lines_stream(&source, builder, lines, limits, hook, |_, _, _, _| {})?;
+            let store = parsed.builder.finish()?;
+            Ok(Self::from_lines(source, store, parsed.lines, parsed.values))
+        }
     }
 }
 
@@ -96,35 +103,16 @@ impl<R: Source, S: NodeStore> StreamTree<R, S> {
     #[must_use]
     pub fn from_lines(source: R, store: S, lines: LineStore, values: u64) -> Self {
         Self {
-            lines: Some(Box::new(lines)),
-            ..Self::new(source, store, LINES_ROOT, values, 64 << 10)
+            core: StreamCore::with_lines(lines),
+            ..Self::new(source, store, LINES_ROOT, values, DEFAULT_WINDOW)
         }
     }
 }
 
 impl<R: Source, S: NodeStore> StreamTree<R, S> {
     fn kids(&self, node: NodeRef, k: u64) -> Result<Kids<'_, S, R, LineStore>, IndexError> {
-        let lines = self.lines_of(node);
-        kids(&self.source, &self.store, lines, node, k, self.window)
-    }
-
-    /// The line index, when `node` is the NDJSON root.
-    fn lines_of(&self, node: NodeRef) -> Option<&LineStore> {
-        self.lines.as_deref().filter(|_| node.offset == LINES_ROOT)
-    }
-
-    /// The bad NDJSON record starting at `offset`, if any.
-    fn bad_at(&self, offset: u64) -> Result<Option<crate::index::lines::BadLine>, IndexError> {
-        match &self.lines {
-            Some(lines) => Ok(lines.bad_at(offset)?),
-            None => Ok(None),
-        }
-    }
-
-    /// The value's kind, from its first byte.
-    fn kind_at(&self, offset: u64) -> Result<Kind, IndexError> {
-        let head = self.source.read(offset..offset + 1)?;
-        Ok(head.first().and_then(|&b| kind_of(b)).unwrap_or(Kind::Null))
+        let lines = self.core.lines_of(node);
+        kids(&self.source, &self.store, lines, node, k, self.core.window)
     }
 
     fn fanout(&self, node: NodeRef) -> Result<Option<Fanout>, IndexError> {
@@ -132,29 +120,16 @@ impl<R: Source, S: NodeStore> StreamTree<R, S> {
     }
 }
 
-fn is_container(node: NodeRef) -> bool {
-    matches!(node.kind, Kind::Object | Kind::Array)
-}
-
 impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     fn root(&self) -> Result<NodeRef, IndexError> {
-        if self.lines.is_some() {
-            return Ok(NodeRef {
-                offset: LINES_ROOT,
-                kind: Kind::Array,
-            });
-        }
-        Ok(NodeRef {
-            offset: self.root,
-            kind: self.kind_at(self.root)?,
-        })
+        self.core.root(&self.source)
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
         if !is_container(node) {
             return Ok(Count::Known(0));
         }
-        if let Some(lines) = self.lines_of(node) {
+        if let Some(lines) = self.core.lines_of(node) {
             return Ok(Count::Known(lines.count()));
         }
         if let Some(fanout) = self.fanout(node)? {
@@ -166,19 +141,14 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     }
 
     fn children(&self, node: NodeRef, range: Range<u64>) -> Result<Vec<Child>, IndexError> {
-        if !is_container(node) || range.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.kids(node, range.start)?
-            .take(to_usize(range.end - range.start))
-            .collect()
+        children(node, range, |k| self.kids(node, k))
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
         if !is_container(node) {
             return Ok(None);
         }
-        let first = checkpoint_index(&self.store, self.lines_of(node), node, offset)?;
+        let first = checkpoint_index(&self.store, self.core.lines_of(node), node, offset)?;
         containing(self.kids(node, first)?, offset)
     }
 
@@ -187,32 +157,27 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     }
 
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
-        if self.lines_of(node).is_some() {
+        if self.core.lines_of(node).is_some() {
             return Ok(self.source.len());
         }
-        if let Some(bad) = self.bad_at(node.offset)? {
+        if let Some(bad) = self.core.bad_at(node.offset)? {
             return Ok(bad.resume);
         }
         match self.store.node_at(node.offset)? {
             Some(big) => Ok(big.end),
-            None => {
-                value_end(&self.source, &self.store, node.offset, self.window)?.ok_or_else(|| {
+            None => value_end(&self.source, &self.store, node.offset, self.core.window)?
+                .ok_or_else(|| {
                     ParseError {
                         kind: ParseErrorKind::UnexpectedEof,
                         offset: node.offset,
                     }
                     .into()
-                })
-            }
+                }),
         }
     }
 
     fn format(&self) -> Format {
-        if self.lines.is_some() {
-            Format::Ndjson
-        } else {
-            Format::Json
-        }
+        self.core.format()
     }
 
     fn stats(&self) -> Stats {
@@ -223,8 +188,7 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     }
 
     fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {
-        let bad = self.bad_at(node.offset).ok().flatten()?;
-        (node.kind == Kind::Invalid).then_some(bad.kind)
+        self.core.problem(node)
     }
     fn streamed(&self) -> bool {
         true
@@ -235,7 +199,12 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
 mod tests {
     use proptest::prelude::*;
 
+    use std::ops::ControlFlow;
+
     use super::*;
+    use crate::index::spill::{SpillLimits, SpillStore};
+    use crate::json::lex::Kind;
+    use crate::json::stream::StreamLimits;
     use crate::source::MemSource;
     use crate::test_support::{json_value, layout, ndjson, to_value};
     use crate::tree::MemTree;
@@ -258,7 +227,7 @@ mod tests {
             |_| ControlFlow::Continue(()),
         )
         .unwrap();
-        stream.window = window;
+        stream.core.window = window;
         (mem, stream)
     }
 
@@ -297,7 +266,7 @@ mod tests {
         let source = MemSource::new(bytes.to_vec());
         let mut stream =
             StreamTree::index_lines(source, limits, spill, |_| ControlFlow::Continue(())).unwrap();
-        stream.window = window;
+        stream.core.window = window;
         (mem, stream)
     }
 

@@ -2,7 +2,6 @@
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
-use std::ops::ControlFlow;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,9 +20,7 @@ use crate::document::Document;
 use crate::format::{Format, SNIFF_LEN, detect};
 use crate::load::{LoadEvent, Request, StreamBudget, load_follow, load_spooled, load_stream};
 use crate::mode::{ModeError, Storage, choose, system_ram, threshold};
-use crate::source::file::FileSource;
 use crate::state_file::{self, FileKey, Positions};
-use crate::stream_tree::StreamTree;
 use crate::tree::TreeIndex;
 
 /// Input format override.
@@ -207,7 +204,7 @@ fn index_only_input(input: Input, budget: StreamBudget) -> Result<String, CliErr
             label,
             format,
             ..
-        } => index_only_stream(file, &label, format, budget),
+        } => index_only_stream(&file, &label, format, budget),
     }
 }
 
@@ -316,14 +313,23 @@ fn index_only(
     spool_at: u64,
     budget: StreamBudget,
 ) -> Result<String, CliError> {
+    index_summary(path, |mut sink, cancel| {
+        load_spooled(file, request, spool_at, &mut sink, cancel, budget);
+    })
+}
+
+/// Runs `load` to its final event and summarizes the outcome.
+fn index_summary(
+    path: &str,
+    load: impl FnOnce(&mut dyn FnMut(LoadEvent<Document>), &AtomicBool),
+) -> Result<String, CliError> {
     let mut outcome = None;
-    let sink = &mut |event| {
+    let mut sink = |event| {
         if let LoadEvent::Loaded(result) = event {
             outcome = Some(result);
         }
     };
-    let cancel = AtomicBool::new(false);
-    load_spooled(file, request, spool_at, sink, &cancel, budget);
+    load(&mut sink, &AtomicBool::new(false));
     match outcome {
         Some(Ok(tree)) => Ok(format!("indexed {} bytes", tree.stats().bytes)),
         Some(Err(failure)) => Err(CliError::Parse(format!("{path}: {}", failure.message))),
@@ -433,21 +439,17 @@ fn following(
 
 /// Streams and indexes a file without starting the UI (benchmarks).
 fn index_only_stream(
-    file: File,
+    file: &File,
     path: &str,
     format: Format,
     budget: StreamBudget,
 ) -> Result<String, CliError> {
-    let fail = |err: &dyn std::fmt::Display| CliError::Parse(format!("{path}: {err}"));
-    let source = FileSource::new(file, budget.parse_cache).map_err(|e| fail(&e))?;
-    let (limits, spill, go_on) = (budget.stream, budget.spill, |_| ControlFlow::Continue(()));
-    let tree = match format {
-        Format::Ndjson => StreamTree::index_lines(source, limits, spill, go_on),
-        Format::Json => StreamTree::index(source, limits, spill, go_on),
-        Format::Yaml => return Err(ModeError::YamlTooLarge.into()),
+    if format == Format::Yaml {
+        return Err(ModeError::YamlTooLarge.into());
     }
-    .map_err(|e| fail(&e))?;
-    Ok(format!("indexed {} bytes", tree.stats().bytes))
+    index_summary(path, |mut sink, cancel| {
+        load_stream(file, format, &mut sink, cancel, budget);
+    })
 }
 
 /// Blocks on terminal input and forwards it until the UI stops listening.
@@ -489,7 +491,7 @@ mod tests {
     #[test]
     fn index_only_refuses_streamed_yaml() {
         let file = crate::temp::file().unwrap();
-        let err = index_only_stream(file, "x.yaml", Format::Yaml, StreamBudget::testing());
+        let err = index_only_stream(&file, "x.yaml", Format::Yaml, StreamBudget::testing());
         assert!(matches!(err, Err(CliError::Mode(ModeError::YamlTooLarge))));
     }
 
