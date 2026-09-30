@@ -173,6 +173,7 @@ impl Reader {
             match source.refresh()? {
                 Growth::Grew => return Ok(true),
                 Growth::Shrank => return Err(SourceError::Truncated),
+                Growth::Rotated => return Err(SourceError::Rotated),
                 Growth::Same => std::thread::sleep(POLL),
             }
         }

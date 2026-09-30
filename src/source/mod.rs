@@ -16,6 +16,8 @@ pub enum SourceError {
     TooLarge { max_len: u64 },
     #[error("the file was truncated; stopped following")]
     Truncated,
+    #[error("the file was replaced; stopped following")]
+    Rotated,
 }
 
 /// How a source's length changed since it was last looked at.
@@ -24,6 +26,8 @@ pub enum Growth {
     Same,
     Grew,
     Shrank,
+    /// The path now names a different file.
+    Rotated,
 }
 
 /// Random access to the bytes of a document.

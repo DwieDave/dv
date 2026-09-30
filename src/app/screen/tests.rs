@@ -392,6 +392,7 @@ fn following_keeps_the_cursor_on_the_newest_record() {
     use crate::load::{StreamBudget, load_follow};
 
     let mut file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_owned();
     file.write_all(b"1\n2\n3\n").unwrap();
     let reader = file.reopen().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -400,7 +401,14 @@ fn following_keeps_the_cursor_on_the_newest_record() {
     std::thread::spawn(move || {
         let mut sink = |e| drop(tx.send(e));
         let cancel = AtomicBool::new(false);
-        load_follow(&reader, &mut sink, &cancel, StreamBudget::testing(), halt);
+        load_follow(
+            &reader,
+            &path,
+            &mut sink,
+            &cancel,
+            StreamBudget::testing(),
+            halt,
+        );
     });
     let mut app: App<Document> =
         App::new(Arc::new(AtomicBool::new(false))).with_follow(Follow::On(Arc::clone(&stop)));
