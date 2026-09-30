@@ -121,10 +121,6 @@ impl<R: Source> LiveTree<R> {
     }
 }
 
-fn is_container(node: NodeRef) -> bool {
-    matches!(node.kind, Kind::Object | Kind::Array)
-}
-
 impl<R: Source> TreeIndex for LiveTree<R> {
     fn root(&self) -> Result<NodeRef, IndexError> {
         if self.lines.is_some() {
@@ -142,7 +138,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(Count::Known(0));
         }
         if let Some(lines) = self.lines_of(node) {
@@ -170,7 +166,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn children(&self, node: NodeRef, range: Range<u64>) -> Result<Vec<Child>, IndexError> {
-        if !is_container(node) || range.is_empty() {
+        if !node.kind.is_container() || range.is_empty() {
             return Ok(Vec::new());
         }
         let source = self.capped();
@@ -180,7 +176,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(None);
         }
         let first = checkpoint_index(&self.store, self.lines_of(node), node, offset)?;

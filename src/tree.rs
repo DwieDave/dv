@@ -250,10 +250,6 @@ impl Iterator for Kids<'_> {
 }
 
 impl MemTree {
-    fn is_container(node: NodeRef) -> bool {
-        matches!(node.kind, Kind::Object | Kind::Array)
-    }
-
     /// The line index, when `node` is the NDJSON root.
     fn lines_of(&self, node: NodeRef) -> Option<&LineIndex> {
         self.lines.as_ref().filter(|_| node.offset == LINES_ROOT)
@@ -338,7 +334,7 @@ impl TreeIndex for MemTree {
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
-        if !Self::is_container(node) {
+        if !node.kind.is_container() {
             return Ok(Count::Known(0));
         }
         if let Some(lines) = self.lines_of(node) {
@@ -352,7 +348,7 @@ impl TreeIndex for MemTree {
     }
 
     fn children(&self, node: NodeRef, range: Range<u64>) -> Result<Vec<Child>, IndexError> {
-        if !Self::is_container(node) || range.is_empty() {
+        if !node.kind.is_container() || range.is_empty() {
             return Ok(Vec::new());
         }
         let window = to_usize(range.end - range.start);
@@ -360,7 +356,7 @@ impl TreeIndex for MemTree {
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
-        if !Self::is_container(node) {
+        if !node.kind.is_container() {
             return Ok(None);
         }
         let first = self.checkpoint_index(node, offset)?;

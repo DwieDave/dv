@@ -289,7 +289,7 @@ fn write_scalar(out: &mut Vec<u8>, value: &str, style: ScalarStyle, tag: Option<
 
 fn scan_error(text: &str, err: &ScanError) -> TranscodeError {
     let marker = err.marker();
-    let offset = byte_offset(text, marker.index());
+    let offset = CharToByte::new(text).offset(marker.index());
     TranscodeError::Scan {
         info: err.info().to_owned(),
         line: marker.line(),
@@ -330,13 +330,6 @@ impl<'t> CharToByte<'t> {
         self.chars = char_index;
         self.bytes
     }
-}
-
-/// saphyr's `Marker::index()` counts chars, not bytes.
-fn byte_offset(text: &str, char_index: usize) -> usize {
-    text.char_indices()
-        .nth(char_index)
-        .map_or(text.len(), |(byte, _)| byte)
 }
 
 /// `pos` as a `u32` with room for the one-byte shift of a multi-document root array.

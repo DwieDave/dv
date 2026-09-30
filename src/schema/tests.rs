@@ -2,7 +2,7 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::path::render as render_path;
+use crate::path::render;
 use crate::source::MemSource;
 use crate::test_support::json_value;
 use crate::tree::MemTree;
@@ -15,10 +15,13 @@ fn doc(value: &Value) -> (MemTree, RootItem) {
     (tree, root)
 }
 
-fn naive(value: &Value, prefix: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
-    let kids: Vec<(Seg, &Value)> = match value {
-        Value::Array(items) => items.iter().map(|v| (Seg::Items, v)).collect(),
-        Value::Object(map) => map.iter().map(|(k, v)| (Seg::Key(k.clone()), v)).collect(),
+fn naive(value: &Value, prefix: &mut Vec<Segment>, out: &mut Vec<Vec<Segment>>) {
+    let kids: Vec<(Segment, &Value)> = match value {
+        Value::Array(items) => items.iter().map(|v| (Segment::Items, v)).collect(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (Segment::Key(k.clone()), v))
+            .collect(),
         _ => Vec::new(),
     };
     for (seg, child) in kids {
@@ -44,11 +47,11 @@ proptest! {
 
 #[test]
 fn renders_schema_paths() {
-    let key = |k: &str| Seg::Key(k.to_owned());
+    let key = |k: &str| Segment::Key(k.to_owned());
     assert_eq!(render(&[]), ".");
-    assert_eq!(render(&[Seg::Items, key("a")]), ".[].a");
+    assert_eq!(render(&[Segment::Items, key("a")]), ".[].a");
     assert_eq!(
-        render(&[key("users"), Seg::Items, key("first name")]),
+        render(&[key("users"), Segment::Items, key("first name")]),
         r#".users[]."first name""#
     );
 }
@@ -56,7 +59,7 @@ fn renders_schema_paths() {
 #[test]
 fn collection_stops_at_the_caps_and_says_so() {
     let (tree, root) = doc(&json!({"a": 1, "b": 2, "c": 3, "d": 4}));
-    let key = |k: &str| vec![Seg::Key(k.to_owned())];
+    let key = |k: &str| vec![Segment::Key(k.to_owned())];
     let within = |visits, entries| {
         let caps = Caps {
             visits,
@@ -136,7 +139,7 @@ fn deep_documents_stop_at_the_depth_cap() {
 }
 
 fn found_path(tree: &MemTree, root: &RootItem, rows: &[u64]) -> String {
-    render_path(&segments(tree, &chain(tree, root, rows).unwrap()).unwrap())
+    render(&segments(tree, &chain(tree, root, rows).unwrap()).unwrap())
 }
 
 #[test]
@@ -144,9 +147,9 @@ fn find_steps_through_occurrences_with_wraparound() {
     let value = json!({"users": [{"name": "a"}, {"x": 1}, {"name": "b"}], "name": 0});
     let (tree, root) = doc(&value);
     let segs = [
-        Seg::Key("users".into()),
-        Seg::Items,
-        Seg::Key("name".into()),
+        Segment::Key("users".into()),
+        Segment::Items,
+        Segment::Key("name".into()),
     ];
     let first = find(&tree, &root, &segs, None, Direction::Forward)
         .unwrap()
@@ -171,7 +174,7 @@ fn find_steps_through_occurrences_with_wraparound() {
         find(
             &tree,
             &root,
-            &[Seg::Key("zzz".into())],
+            &[Segment::Key("zzz".into())],
             None,
             Direction::Forward
         )

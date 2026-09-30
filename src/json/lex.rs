@@ -16,6 +16,14 @@ pub enum Kind {
     Invalid,
 }
 
+impl Kind {
+    /// Whether values of this kind hold children.
+    #[must_use]
+    pub fn is_container(self) -> bool {
+        matches!(self, Self::Object | Self::Array)
+    }
+}
+
 pub(crate) fn fail(kind: ParseErrorKind, pos: usize) -> ParseError {
     ParseError {
         kind,

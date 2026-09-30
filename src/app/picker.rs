@@ -7,9 +7,8 @@ use neo_frizbee::{Config, Matcher};
 
 use crate::app::search::{Work, offset_of, submit_job};
 use crate::app::{LastFind, Model};
-use crate::json::lex::Kind;
+use crate::path::Segment;
 use crate::path::render as render_path;
-use crate::schema::Seg;
 use crate::search::Direction;
 use crate::tree::TreeIndex;
 use crate::view::filtered::Filtered;
@@ -17,7 +16,7 @@ use crate::view::jump::reveal;
 use crate::view::resolve::{RootItem, RowKind, chain, segments};
 
 /// Rendered schema paths with their segments, shared with the model.
-pub type Entries = Arc<Vec<(String, Vec<Seg>)>>;
+pub type Entries = Arc<Vec<(String, Vec<Segment>)>>;
 
 /// Schema paths for the picker, whether collection stopped at a cap, and whether it is over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +44,7 @@ pub struct Subtree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub scope: Subtree,
-    pub segs: Vec<Seg>,
+    pub segs: Vec<Segment>,
 }
 
 /// Most matches kept and shown.
@@ -56,7 +55,7 @@ pub const MAX_SHOWN: usize = 200;
 pub enum PickerAction {
     Edited,
     Moved,
-    Pick(Vec<Seg>),
+    Pick(Vec<Segment>),
     Close,
 }
 
@@ -137,7 +136,7 @@ impl Picker {
     }
 
     #[must_use]
-    pub fn selected_entry(&self) -> Option<&(String, Vec<Seg>)> {
+    pub fn selected_entry(&self) -> Option<&(String, Vec<Segment>)> {
         let index = *self.matches.get(self.selected)?;
         self.entries.as_ref()?.get(index)
     }
@@ -180,7 +179,8 @@ fn subtree_of<T: TreeIndex>(model: &Model<T>) -> Subtree {
 /// The innermost container on the path to `cursor`, below the document root.
 fn container_at(tree: &impl TreeIndex, root: &RootItem, cursor: &[u64]) -> Option<Subtree> {
     let items = chain(tree, root, cursor).ok()?;
-    let is_container = |kind: &RowKind| matches!(kind, RowKind::Value { node, .. } if matches!(node.kind, Kind::Object | Kind::Array));
+    let is_container =
+        |kind: &RowKind| matches!(kind, RowKind::Value { node, .. } if node.kind.is_container());
     let depth = items.iter().rposition(|item| is_container(&item.kind))?;
     let (node, end) = match &items.get(depth)?.kind {
         RowKind::Value { node, end, .. } if depth > 0 => (*node, *end),
@@ -259,7 +259,7 @@ mod tests {
         Arc::new(
             paths
                 .iter()
-                .map(|p| ((*p).to_owned(), vec![Seg::Key((*p).to_owned())]))
+                .map(|p| ((*p).to_owned(), vec![Segment::Key((*p).to_owned())]))
                 .collect(),
         )
     }
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(p.selected, 2);
         assert_eq!(
             p.key(KeyCode::Enter.into()),
-            Some(PickerAction::Pick(vec![Seg::Key(".c".into())]))
+            Some(PickerAction::Pick(vec![Segment::Key(".c".into())]))
         );
         assert_eq!(p.key(KeyCode::Esc.into()), Some(PickerAction::Close));
     }
@@ -485,7 +485,7 @@ mod flow_tests {
     fn the_popup_scrolls_to_keep_the_selection_visible() {
         let mut model = model();
         open(&mut model);
-        let paths: Vec<(String, Vec<crate::schema::Seg>)> = (0..40)
+        let paths: Vec<(String, Vec<crate::path::Segment>)> = (0..40)
             .map(|i| (format!(".field{i:02}"), Vec::new()))
             .collect();
         let root = model.state.root;
@@ -529,7 +529,7 @@ mod flow_tests {
     #[test]
     fn stepping_to_the_next_occurrence_runs_as_a_job() {
         use crate::app::search::Work;
-        use crate::schema::Seg;
+        use crate::path::Segment;
         let mut model = model();
         let (tx, rx) = std::sync::mpsc::channel();
         model.jobs = Some(tx);
@@ -540,9 +540,9 @@ mod flow_tests {
                 label: String::new(),
             },
             segs: vec![
-                Seg::Key("users".into()),
-                Seg::Items,
-                Seg::Key("name".into()),
+                Segment::Key("users".into()),
+                Segment::Items,
+                Segment::Key("name".into()),
             ],
         };
         model.last_find = crate::app::LastFind::Schema(target);
