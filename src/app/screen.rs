@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::widgets::{Block, Gauge, Paragraph};
@@ -34,6 +34,8 @@ pub enum Screen<T> {
 #[derive(Debug)]
 pub enum AppEvent<T> {
     Input(Event),
+    /// Consecutive wheel events of one kind, merged into one step of this many ticks.
+    Wheel(MouseEvent, u64),
     Load(LoadEvent<T>),
     Search(Outcome),
 }
@@ -171,6 +173,11 @@ fn try_restore<T: TreeIndex>(app: &mut App<T>) {
 fn apply_event<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: AppEvent<T>) {
     match event {
         AppEvent::Input(input) => on_input(app, &input),
+        AppEvent::Wheel(mouse, ticks) => {
+            if let Screen::Ready(model) = &mut app.screen {
+                update(model, Msg::Wheel(mouse, ticks));
+            }
+        }
         AppEvent::Load(LoadEvent::Progress(progress)) => match &mut app.screen {
             Screen::Loading(current) => *current = progress,
             Screen::Ready(model) => refresh(model, &mut app.tail),

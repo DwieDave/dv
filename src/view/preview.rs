@@ -30,10 +30,10 @@ pub fn preview_lines(
     skip: u64,
     take: usize,
 ) -> Result<Preview, IndexError> {
-    let window = Window {
-        skip: skip.min(MAX_PREVIEW_LINES),
-        take,
-    };
+    if skip >= MAX_PREVIEW_LINES {
+        return Ok(Preview::default());
+    }
+    let window = Window { skip, take };
     match &item.kind {
         RowKind::Bucket { container, range } => {
             pretty(tree, &bucket_pieces(tree, *container, range)?, window)
@@ -52,6 +52,76 @@ pub fn preview_lines(
             _ => pretty(tree, &[Piece::Bytes(node.offset..*end)], window),
         },
     }
+}
+
+/// How many lines the preview of an item has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineCount {
+    /// Lines found, at most `MAX_PREVIEW_LINES`.
+    pub lines: u64,
+    /// The value is still being indexed, so more lines may appear.
+    pub growing: bool,
+}
+
+/// Counts the lines of the preview of `item` in one formatter pass, stopping at
+/// `MAX_PREVIEW_LINES`.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn preview_line_count(tree: &impl TreeIndex, item: &RowItem) -> Result<LineCount, IndexError> {
+    let growing = match &item.kind {
+        RowKind::Value { node, .. } if matches!(node.kind, Kind::Object | Kind::Array) => {
+            matches!(tree.child_count(*node)?, Count::Pending(_))
+        }
+        RowKind::Value { .. } => false,
+        RowKind::Bucket { container, .. } => {
+            matches!(tree.child_count(*container)?, Count::Pending(_))
+        }
+    };
+    let lines = match &item.kind {
+        RowKind::Bucket { container, range } => {
+            count_pieces(tree, &bucket_pieces(tree, *container, range)?)?
+        }
+        RowKind::Value { node, .. } if node.offset == LINES_ROOT => 1,
+        RowKind::Value { node, end, .. } => match node.kind {
+            Kind::Invalid => invalid_lines(tree, *node, *end)?.len() as u64,
+            Kind::String => string_lines(tree, *node, *end)?.len() as u64,
+            _ => count_pieces(tree, &[Piece::Bytes(node.offset..*end)])?,
+        },
+    };
+    Ok(LineCount {
+        lines: lines.min(MAX_PREVIEW_LINES),
+        growing,
+    })
+}
+
+/// Lines of `pieces` through the pretty formatter, counted up to `MAX_PREVIEW_LINES`.
+fn count_pieces(tree: &impl TreeIndex, pieces: &[Piece]) -> Result<u64, IndexError> {
+    let mut formatter = Formatter::new(Style::Pretty);
+    let (mut out, mut lines, mut partial) = (Vec::new(), 0u64, false);
+    let mut take = |out: &mut Vec<u8>| {
+        lines += out.split(|&b| b == b'\n').count() as u64 - 1;
+        partial = out.last().map_or(partial, |&b| b != b'\n');
+        out.clear();
+        lines >= MAX_PREVIEW_LINES
+    };
+    for piece in pieces {
+        match piece {
+            Piece::Literal(bytes) => formatter.feed(bytes, &mut out),
+            Piece::Bytes(range) => {
+                for chunk in chunks(range) {
+                    formatter.feed(&tree.bytes(chunk)?, &mut out);
+                    if take(&mut out) {
+                        return Ok(MAX_PREVIEW_LINES);
+                    }
+                }
+            }
+        }
+        if take(&mut out) {
+            return Ok(MAX_PREVIEW_LINES);
+        }
+    }
+    Ok(lines + u64::from(partial))
 }
 
 /// The whole text of `item` in `style`, or `None` when it exceeds `limit` bytes.
@@ -286,11 +356,14 @@ fn string(
     end: u64,
     window: Window,
 ) -> Result<Preview, IndexError> {
-    let raw = tree.bytes(node.offset..end.min(node.offset + MAX_STRING))?;
-    let text = unescape(&raw);
-    let mut preview = window.of(text.split('\n').map(str::to_owned).collect());
+    let mut preview = window.of(string_lines(tree, node, end)?);
     preview.more |= end > node.offset + MAX_STRING;
     Ok(preview)
+}
+
+fn string_lines(tree: &impl TreeIndex, node: NodeRef, end: u64) -> Result<Vec<String>, IndexError> {
+    let raw = tree.bytes(node.offset..end.min(node.offset + MAX_STRING))?;
+    Ok(unescape(&raw).split('\n').map(str::to_owned).collect())
 }
 
 /// A record that failed to parse: the reason, then its raw text.
@@ -300,6 +373,14 @@ fn invalid(
     end: u64,
     window: Window,
 ) -> Result<Preview, IndexError> {
+    Ok(window.of(invalid_lines(tree, node, end)?))
+}
+
+fn invalid_lines(
+    tree: &impl TreeIndex,
+    node: NodeRef,
+    end: u64,
+) -> Result<Vec<String>, IndexError> {
     let reason = tree
         .problem(node)
         .map_or_else(|| "invalid".to_owned(), |kind| kind.to_string());
@@ -307,7 +388,7 @@ fn invalid(
     let text = String::from_utf8_lossy(&raw);
     let lines =
         std::iter::once(format!("✗ {reason}")).chain(text.trim_end().lines().map(str::to_owned));
-    Ok(window.of(lines.collect()))
+    Ok(lines.collect())
 }
 
 #[cfg(test)]
