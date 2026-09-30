@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use crate::error::ParseErrorKind;
 use crate::format::Format;
-use crate::index::IndexError;
 use crate::index::children::Child;
+use crate::index::{IndexError, to_usize};
 use crate::tree::{Count, NodeRef, Stats, TreeIndex};
 
 /// The children of `node` that matched, by original index (ascending).
@@ -28,6 +28,10 @@ pub struct Filtered<'a, T: ?Sized> {
 impl<'a, T: TreeIndex + ?Sized> Filtered<'a, T> {
     #[must_use]
     pub fn new(tree: &'a T, filter: Option<&'a FilterView>) -> Self {
+        debug_assert!(
+            filter.is_none_or(|f| f.matches.is_sorted()),
+            "filter matches must be sorted"
+        );
         Self { tree, filter }
     }
 }
@@ -126,11 +130,11 @@ impl<T: TreeIndex + ?Sized> TreeIndex for Filtered<'_, T> {
 
     fn original_index(&self, node: NodeRef, index: u64) -> u64 {
         match self.target(node) {
-            Some(filter) => filter
-                .matches
-                .get(usize::try_from(index).unwrap_or(usize::MAX))
-                .copied()
-                .unwrap_or(index),
+            Some(filter) => {
+                let original = filter.matches.get(to_usize(index)).copied();
+                debug_assert!(original.is_some(), "view position {index} has no match");
+                original.unwrap_or(index)
+            }
             None => self.tree.original_index(node, index),
         }
     }
