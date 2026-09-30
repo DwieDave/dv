@@ -72,7 +72,18 @@ impl Positions {
         self.entries.push((key, rows));
     }
 
-    /// Writes the newest [`LIMIT`] entries next to `file`, then renames it into place.
+    /// Remembers `rows` for `key` in `file`, merging with whatever another instance saved
+    /// since this one loaded: the file is re-read just before it is replaced.
+    ///
+    /// # Errors
+    /// When the directory or file cannot be written.
+    pub fn update(file: &Path, key: FileKey, rows: Vec<u64>) -> io::Result<()> {
+        let mut latest = Self::load(file);
+        latest.put(key, rows);
+        latest.save(file)
+    }
+
+    /// Writes the newest [`LIMIT`] entries to `file` atomically.
     ///
     /// # Errors
     /// When the directory or file cannot be written.
@@ -85,9 +96,7 @@ impl Positions {
             .iter()
             .map(|(k, rows)| format_line(k, rows))
             .collect();
-        let tmp = file.with_extension("tsv.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, file)
+        crate::temp::replace(file, text.as_bytes())
     }
 }
 
@@ -211,6 +220,25 @@ mod tests {
         assert_eq!(loaded.get(&key("/f20", 1)), None, "among the 20 oldest");
         assert_eq!(loaded.get(&key("/f21", 1)), Some(&vec![21]));
         assert_eq!(loaded.get(&key("/f519", 1)), Some(&vec![519]));
+    }
+
+    #[test]
+    fn two_savers_keep_both_entries_and_leave_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("positions.tsv");
+        // Two instances that both started before either saved.
+        let _first = Positions::load(&file);
+        let _second = Positions::load(&file);
+        Positions::update(&file, key("/a", 1), vec![1]).unwrap();
+        Positions::update(&file, key("/b", 1), vec![2]).unwrap();
+        let loaded = Positions::load(&file);
+        assert!(loaded.get(&key("/a", 1)).is_some());
+        assert!(loaded.get(&key("/b", 1)).is_some());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("positions.tsv")]);
     }
 
     #[test]
