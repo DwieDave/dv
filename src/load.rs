@@ -201,6 +201,10 @@ pub struct StreamBudget {
 /// Streaming mode's default memory budget (NFR-11).
 pub const DEFAULT_BUDGET: u64 = 512 << 20;
 
+/// The smallest budget streaming honours: below it the longest-token buffer (1/4) would reject
+/// ordinary documents.
+pub const MIN_BUDGET: u64 = 64 << 20;
+
 impl Default for StreamBudget {
     fn default() -> Self {
         Self::within(DEFAULT_BUDGET)
@@ -210,8 +214,10 @@ impl Default for StreamBudget {
 impl StreamBudget {
     /// Caches and buffers sized to fit `total` bytes (`mode.memory_budget`, FR-25): the parser's
     /// cache takes 1/16, each view 1/4, the spilled index 1/8, and the longest token 1/4.
+    /// A `total` under [`MIN_BUDGET`] is raised to it.
     #[must_use]
     pub fn within(total: u64) -> Self {
+        let total = total.max(MIN_BUDGET);
         let part = |n: u64| total / n;
         Self {
             parse_cache: part(16),
@@ -835,6 +841,17 @@ mod tests {
             proptest::prop_assert!(used <= total, "{} > {}", used, total);
             proptest::prop_assert!(b.stream.initial <= b.stream.max);
         }
+    }
+
+    #[test]
+    fn tiny_budgets_are_raised_to_the_floor() {
+        let floor = StreamBudget::within(MIN_BUDGET);
+        for total in [0, 1, 4096, MIN_BUDGET - 1] {
+            let b = StreamBudget::within(total);
+            assert_eq!(b.stream.max, floor.stream.max);
+            assert_eq!(b.view_cache, floor.view_cache);
+        }
+        assert!(floor.stream.max >= 1 << 20);
     }
 
     #[test]
