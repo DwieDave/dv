@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc de691d7e75b41fb0ac599e9131c4a1f3178e828498f237351a48d79b349fff4c # shrinks to text = ""
+cc 1212d6e31b918fc0846f16c7899dec50c595738c55349a7baafff4795b641930 # shrinks to expr = And(Compare(Path([]), Eq, Number(0.0)), Has(Path([])))

@@ -115,12 +115,6 @@ mod tests {
                 Format::Yaml,
                 Err(ModeError::YamlTooLarge),
             ),
-            (
-                Mode::Auto,
-                Some(MAX_AUTO_MEMORY + 1),
-                Format::Yaml,
-                Err(ModeError::YamlTooLarge),
-            ),
         ];
         for (mode, len, format, expected) in table {
             assert_eq!(

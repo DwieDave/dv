@@ -77,7 +77,7 @@ pub(crate) fn collect_within(
     pulse: &dyn Pulse,
     caps: Caps,
 ) -> Result<Option<Collected>, IndexError> {
-    let (mut seen, mut visits) = (Trie::default(), 0);
+    let (mut seen, mut visits, mut too_deep) = (Trie::default(), 0, false);
     let mut stack = vec![Frame::new(tree, root.node, 0)?];
     while let Some(frame) = stack.last_mut() {
         if pulse.cancelled() {
@@ -95,11 +95,15 @@ pub(crate) fn collect_within(
         if visits.is_multiple_of(caps.partial_every.max(1)) {
             pulse.schema(seen.collected(false));
         }
-        if is_container(child.node()) && stack.len() < MAX_DEPTH {
-            stack.push(Frame::new(tree, child.node(), id)?);
+        if is_container(child.node()) {
+            if stack.len() < MAX_DEPTH {
+                stack.push(Frame::new(tree, child.node(), id)?);
+            } else {
+                too_deep = true;
+            }
         }
     }
-    Ok(Some(seen.collected(false)))
+    Ok(Some(seen.collected(too_deep)))
 }
 
 /// A container being walked: its children are fetched window by window.

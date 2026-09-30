@@ -233,7 +233,7 @@ impl<H: FnMut(u64) -> ControlFlow<()>> Writer<H> {
             self.stringify_from(start, offset)?;
             self.key_done();
         } else {
-            self.aliases.push(offset32(start));
+            self.aliases.push(checked_offset(start, offset)?);
             self.value_done();
         }
         Ok(())
@@ -339,9 +339,12 @@ fn byte_offset(text: &str, char_index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
-#[allow(clippy::cast_possible_truncation)] // bounded by the in-memory size limit (NFR-8)
-fn offset32(pos: usize) -> u32 {
-    pos as u32
+/// `pos` as a `u32` with room for the one-byte shift of a multi-document root array.
+fn checked_offset(pos: usize, offset: usize) -> Result<u32, TranscodeError> {
+    let shifted = pos.checked_add(1).and_then(|s| u32::try_from(s).ok());
+    shifted
+        .map(|s| s - 1)
+        .ok_or(TranscodeError::Budget { offset })
 }
 
 #[cfg(test)]

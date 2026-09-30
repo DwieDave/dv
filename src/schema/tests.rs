@@ -132,6 +132,7 @@ fn deep_documents_stop_at_the_depth_cap() {
     let (tree, root) = doc(&value);
     let entries = collect(&tree, &root, &|| false).unwrap().unwrap();
     assert_eq!(entries.paths.len(), MAX_DEPTH);
+    assert!(entries.truncated, "cutting off the depth must be reported");
 }
 
 fn found_path(tree: &MemTree, root: &RootItem, rows: &[u64]) -> String {

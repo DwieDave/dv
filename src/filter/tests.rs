@@ -21,7 +21,7 @@ fn path() -> impl Strategy<Value = Path> {
 fn literal() -> impl Strategy<Value = Literal> {
     prop_oneof![
         (-1e6f64..1e6).prop_map(Literal::Number),
-        (-100i32..100).prop_map(|n| Literal::Number(f64::from(n))),
+        (-100i64..100).prop_map(Literal::Integer),
         "\\PC{0,6}".prop_map(Literal::String),
         any::<bool>().prop_map(Literal::Bool),
         Just(Literal::Null),
@@ -113,6 +113,7 @@ fn reference(value: &Value, expr: &Expr) -> bool {
         }
         Expr::Compare(p, op, lit) => {
             let order = match (lookup(value, p), lit) {
+                (Some(Value::Number(n)), Literal::Integer(l)) => n.as_i64().map(|n| n.cmp(l)),
                 (Some(Value::Number(n)), Literal::Number(l)) => n.as_f64().unwrap().partial_cmp(l),
                 (Some(Value::String(s)), Literal::String(l)) => Some(s.as_str().cmp(l)),
                 (Some(Value::Bool(b)), Literal::Bool(l)) if matches!(op, Op::Eq | Op::Ne) => {
@@ -224,4 +225,37 @@ fn scans_report_matches_in_batches_and_stop_at_the_cap() {
 /// A scan without progress reports: everything comes in the result.
 fn scan_all(tree: &MemTree, node: crate::tree::NodeRef, expr: &Expr, max: usize) -> Scan {
     scan(tree, node, expr, max, &|| false).unwrap().unwrap()
+}
+
+#[test]
+fn integers_compare_exactly() {
+    let tree = MemTree::parse(MemSource::new(
+        br#"[{"id": 9007199254740992, "big": 9223372036854775807, "f": 1.5}]"#.to_vec(),
+    ))
+    .unwrap();
+    let child = &tree.children(tree.root().unwrap(), 0..1).unwrap()[0];
+    let eval = |text: &str| matches(&tree, child, &parse(text).unwrap()).unwrap();
+    assert!(eval(".id == 9007199254740992") && !eval(".id == 9007199254740993"));
+    assert!(eval(".id < 9007199254740993") && eval(".id != 9007199254740993"));
+    assert!(eval(".big == 9223372036854775807") && !eval(".big == 9223372036854775806"));
+    assert!(eval(".big > 9223372036854775806"));
+    assert!(eval(".f == 1.5") && eval(".id == 9007199254740992.0"));
+    assert_eq!(
+        parse(".id == 9007199254740993").unwrap().to_string(),
+        ".id == 9007199254740993"
+    );
+}
+
+#[test]
+fn deep_nesting_is_an_error_not_a_stack_overflow() {
+    let nested = |n: usize| format!("{}.a == 1{}", "(".repeat(n), ")".repeat(n));
+    assert!(parse(&nested(MAX_NESTING - 1)).is_ok());
+    let err = parse(&nested(MAX_NESTING + 1)).unwrap_err();
+    assert!(err.message.contains("nested"), "{err}");
+    let nots = format!("{}.a == 1", "not ".repeat(100_000));
+    assert!(parse(&nots).is_err());
+    let ands = vec![".a == 1"; 100_000].join(" and ");
+    assert!(parse(&ands).is_err());
+    let ors = vec![".a == 1"; 100_000].join(" or ");
+    assert!(parse(&ors).is_err());
 }

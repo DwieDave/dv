@@ -207,8 +207,9 @@ impl PathParser<'_> {
     }
 
     fn error(&self, message: &'static str) -> PathError {
+        let head = self.bytes.get(..self.pos).unwrap_or(self.bytes);
         PathError {
-            at: self.pos,
+            at: String::from_utf8_lossy(head).chars().count(),
             message,
         }
     }
