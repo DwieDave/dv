@@ -1,5 +1,5 @@
 {
-  description = "data-viewer: fast Ratatui TUI for large JSON/YAML files";
+  description = "dv: fast Ratatui TUI for large JSON/YAML files";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
