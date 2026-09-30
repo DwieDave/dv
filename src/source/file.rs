@@ -1,4 +1,4 @@
-//! A file read on demand through a bounded chunk cache (FR-25, D-13).
+//! A file read on demand through a bounded chunk cache.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ pub struct CacheStats {
 #[derive(Debug)]
 pub struct FileSource {
     file: File,
-    /// Grows while following a file (FO-2).
+    /// Grows while following a file.
     len: AtomicU64,
     /// The path being followed, to notice the file being replaced there.
     path: Option<PathBuf>,
