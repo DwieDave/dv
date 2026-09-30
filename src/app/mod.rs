@@ -51,7 +51,7 @@ use crate::view::history::JumpList;
 use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
 use crate::view::place::Place;
-use crate::view::preview::{Preview, preview_lines, value_text};
+use crate::view::preview::{Preview, preview_lines_with, value_text};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
 
@@ -301,6 +301,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         model.preview.for_cursor = model.state.cursor().to_vec();
         (model.preview.scroll, model.preview.row) = (0, 0);
         model.preview.count = None;
+        model.preview.rows.clear();
     }
     let same_filter = match (&model.preview.for_filter, &model.filter) {
         (None, None) => true,
@@ -310,6 +311,7 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     if !same_filter {
         model.preview.for_filter.clone_from(&model.filter);
         model.preview.count = None;
+        model.preview.rows.clear();
     }
 }
 
@@ -373,6 +375,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::Refresh => {
             if model.preview.count.is_some_and(|count| count.growing) {
                 model.preview.count = None;
+                model.preview.rows.clear();
             }
             let (view, state) = model.view_state();
             if let Err(err) = state.refresh(&view) {
@@ -540,8 +543,16 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
     let tree = &model.view();
     let preview = resolve(tree, &model.state.root(), model.state.cursor())
         .and_then(|item| {
-            item.map(|item| preview_lines(tree, &item, model.preview.scroll, take))
-                .transpose()
+            item.map(|item| {
+                preview_lines_with(
+                    tree,
+                    &item,
+                    model.preview.scroll,
+                    take,
+                    &model.preview.seeks,
+                )
+            })
+            .transpose()
         })
         .map_or_else(
             |err| Preview {

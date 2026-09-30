@@ -1,5 +1,6 @@
 //! The preview pane: layout, scroll position and commands.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -12,7 +13,9 @@ use crate::ui::tree::marker_column;
 use crate::ui::wrap::wrap;
 use crate::view::filtered::FilterView;
 use crate::view::nav::{self, Nav};
-use crate::view::preview::{LineCount, MAX_PREVIEW_LINES, preview_line_count, preview_lines};
+use crate::view::preview::{
+    LineCount, MAX_PREVIEW_LINES, SeekCache, preview_line_count_with, preview_lines_with,
+};
 use crate::view::resolve::resolve;
 
 /// Narrowest terminal that still shows the preview pane.
@@ -25,6 +28,8 @@ const MIN_TREE_PERCENT: u16 = 20;
 const MAX_TREE_PERCENT: u16 = 80;
 /// Lines one wheel tick scrolls the preview.
 const WHEEL_LINES: u64 = 3;
+/// Wrapped-row counts kept before the cache starts over.
+const MAX_CACHED_ROWS: usize = 4096;
 
 /// Preview pane commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +63,10 @@ pub struct PreviewState {
     pub for_filter: Option<Arc<FilterView>>,
     /// Lines in the value at `for_cursor`, counted on the first scroll.
     pub count: Option<LineCount>,
+    /// Checkpoints into the value at `for_cursor`, so deep lines need no re-reading.
+    pub seeks: SeekCache,
+    /// Rows each line of the value at `for_cursor` wraps into, by line and width.
+    pub rows: HashMap<(u64, usize), u64>,
 }
 
 impl Default for PreviewState {
@@ -71,6 +80,8 @@ impl Default for PreviewState {
             for_cursor: Vec::new(),
             for_filter: None,
             count: None,
+            seeks: SeekCache::default(),
+            rows: HashMap::new(),
         }
     }
 }
@@ -121,7 +132,7 @@ fn max_scroll<T: TreeIndex>(model: &mut Model<T>) -> u64 {
         model.preview.count = item
             .ok()
             .flatten()
-            .and_then(|item| preview_line_count(tree, &item).ok());
+            .and_then(|item| preview_line_count_with(tree, &item, &model.preview.seeks).ok());
     }
     let page = model.height.saturating_sub(3).max(1);
     match model.preview.count {
@@ -157,13 +168,21 @@ fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) -> bool {
 }
 
 /// Rows that preview line `line` wraps into, or `None` past the last line.
-fn wrapped_rows<T: TreeIndex>(model: &Model<T>, line: u64) -> Option<u64> {
+fn wrapped_rows<T: TreeIndex>(model: &mut Model<T>, line: u64) -> Option<u64> {
     let width = preview_text_width(model)?;
+    if let Some(&rows) = model.preview.rows.get(&(line, width)) {
+        return Some(rows);
+    }
     let tree = &model.view();
     let item = resolve(tree, &model.state.root(), model.state.cursor()).ok()??;
-    let preview = preview_lines(tree, &item, line, 1).ok()?;
+    let preview = preview_lines_with(tree, &item, line, 1, &model.preview.seeks).ok()?;
     let text = preview.lines.first()?;
-    Some(wrap(&highlight(text, &model.theme), width).len() as u64)
+    let rows = wrap(&highlight(text, &model.theme), width).len() as u64;
+    if model.preview.rows.len() >= MAX_CACHED_ROWS {
+        model.preview.rows.clear();
+    }
+    model.preview.rows.insert((line, width), rows);
+    Some(rows)
 }
 
 /// Columns inside the preview pane's border, when the pane is shown.
