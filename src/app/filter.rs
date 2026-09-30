@@ -50,6 +50,7 @@ pub fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
 /// Filters the container at the cursor: an empty view at once, matches as they come.
 fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(), String> {
     clear(model, false);
+    model.schema = None;
     let found = target(&*model.tree, &model.state.root, &model.state.cursor);
     let (path, node) = found
         .map_err(|err| err.to_string())?
@@ -104,6 +105,7 @@ pub fn receive<T: TreeIndex>(model: &mut Model<T>, scan: Scan, done: bool) {
         (state.scanned, state.total) = (scan.scanned, scan.total);
         state.capped |= scan.capped;
     }
+    model.schema = None;
     let view = Filtered::new(&*model.tree, model.filter.as_deref());
     if let Err(err) = model.state.refresh(&view) {
         model.status = Some(err.to_string());
@@ -126,6 +128,7 @@ pub fn clear<T: TreeIndex>(model: &mut Model<T>, jump: bool) {
     };
     let rows = full_rows(model, &state.path).unwrap_or_else(|_| state.path.clone());
     model.filter = None;
+    model.schema = None;
     if let Err(err) = rebuild(model, rows, false) {
         model.status = Some(err.to_string());
     }

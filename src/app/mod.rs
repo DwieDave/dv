@@ -752,24 +752,34 @@ fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) 
     let [popup] = Layout::vertical([Constraint::Percentage(70)])
         .flex(Flex::Center)
         .areas(popup);
+    let block = Block::bordered()
+        .title(picker_title(picker))
+        .border_style(theme.badge);
+    // The query line takes one row; the rest show a window ending at the selection.
+    let rows = usize::from(block.inner(popup).height.saturating_sub(1));
+    let first = (picker.selected + 1).saturating_sub(rows);
     let mut lines = vec![Line::raw(format!("> {}", picker.query))];
     match &picker.entries {
         None => lines.push(Line::styled("indexing keys…", theme.badge)),
-        Some(entries) => lines.extend(picker.matches.iter().enumerate().map(|(i, &m)| {
-            let line = Line::styled(entries[m].0.clone(), theme.key);
-            if i == picker.selected {
-                line.patch_style(theme.selection)
-            } else {
-                line
-            }
-        })),
+        Some(entries) => lines.extend(
+            picker
+                .matches
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(rows)
+                .map(|(i, &m)| {
+                    let line = Line::styled(entries[m].0.clone(), theme.key);
+                    if i == picker.selected {
+                        line.patch_style(theme.selection)
+                    } else {
+                        line
+                    }
+                }),
+        ),
     }
-    let title = picker_title(picker);
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title).border_style(theme.badge)),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 /// ` keys in .users · collecting… `: the scope, then the collection state.

@@ -13,7 +13,7 @@ use crate::app::{LastFind, Model, filter, jumped, picker, table};
 use crate::filter::{Expr, MAX_MATCHES, Scan, scan};
 use crate::index::children::Child;
 use crate::pulse::Pulse;
-use crate::schema::{Collected, collect, render};
+use crate::schema::{self, Collected, collect, render};
 use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError, count, find};
 use crate::tree::{LINES_ROOT, NodeRef, TreeIndex};
 use crate::ui::status::{grouped, human_bytes};
@@ -29,6 +29,8 @@ pub enum Work {
     Count,
     /// Collect the document's schema paths for the picker.
     Schema,
+    /// Find the next or previous occurrence of a picked schema path.
+    SchemaStep(picker::Target, Direction),
     /// Order a table's rows by a column (TB-5).
     Sort(SortSpec),
     /// Find the children of a container that match a filter (FI-3).
@@ -69,6 +71,8 @@ pub enum JobResult {
     Counted(Option<u64>),
     /// `None` when cancelled.
     Schema(Option<Catalog>),
+    /// The rows of a schema path's occurrence; `None` when there is none.
+    Stepped(Option<Vec<u64>>),
     Failed(String),
     /// Progress of a long scan; the final result follows.
     Scanning(Scanned),
@@ -125,6 +129,13 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
         (Work::Schema, _) => collect(tree, &job.root, pulse)
             .map(|collected| JobResult::Schema(collected.map(|c| catalog(c, true, job.root))))
             .map_err(SearchError::from),
+        (Work::SchemaStep(target, direction), _) => {
+            schema::find(tree, &job.root, &target.segs, job.from, *direction)
+                .map(|rows| {
+                    JobResult::Stepped(rows.map(|rows| [target.scope.rows.clone(), rows].concat()))
+                })
+                .map_err(SearchError::from)
+        }
         (Work::Find(_) | Work::Count, None) => {
             Ok(JobResult::Failed("no search pattern".to_owned()))
         }
@@ -428,6 +439,7 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         | JobResult::Cancelled => {}
         JobResult::Matched { scan, done } => filter::receive(model, scan, done),
         JobResult::Schema(Some(entries)) => picker::receive(model, entries),
+        JobResult::Stepped(rows) => picker::stepped(model, rows),
         JobResult::Failed(message) => note(model, message),
         JobResult::Scanning(scanned) => note(model, scanning(scanned)),
         JobResult::Sorted(Some(order)) => table::sorted(model, order),
