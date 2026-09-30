@@ -9,7 +9,7 @@ use crate::app::search::{Work, offset_of, submit_job};
 use crate::app::{LastFind, Model};
 use crate::json::lex::Kind;
 use crate::path::render as render_path;
-use crate::schema::{self, Seg};
+use crate::schema::Seg;
 use crate::search::Direction;
 use crate::tree::TreeIndex;
 use crate::view::filtered::Filtered;
@@ -49,7 +49,7 @@ pub struct Target {
 }
 
 /// Most matches kept and shown.
-pub const MAX_MATCHES: usize = 200;
+pub const MAX_SHOWN: usize = 200;
 
 /// Result of a key press in the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,21 +117,21 @@ impl Picker {
         PickerAction::Edited
     }
 
-    /// Scores every entry against the query and keeps the best [`MAX_MATCHES`].
+    /// Scores every entry against the query and keeps the best [`MAX_SHOWN`].
     fn rematch(&mut self) {
         self.selected = 0;
         let Some(entries) = self.entries.clone() else {
             return;
         };
         if self.query.is_empty() {
-            self.matches = (0..entries.len().min(MAX_MATCHES)).collect();
+            self.matches = (0..entries.len().min(MAX_SHOWN)).collect();
             return;
         }
         let paths: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
         let found = Matcher::new(&self.query, &Config::default()).match_list(&paths);
         self.matches = found
             .into_iter()
-            .take(MAX_MATCHES)
+            .take(MAX_SHOWN)
             .map(|m| m.index as usize)
             .collect();
     }
@@ -221,28 +221,34 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
     }
 }
 
-/// Moves to the next or previous occurrence of a schema path within its subtree.
+/// Starts the walk to the next or previous occurrence of a schema path within its subtree.
 pub fn step<T: TreeIndex>(
     model: &mut Model<T>,
     target: &Target,
     direction: Direction,
     from: Option<u64>,
 ) {
-    let (tree, scope) = (
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &target.scope,
+    let root = target.scope.root;
+    submit_job(
+        model,
+        Work::SchemaStep(target.clone(), direction),
+        None,
+        from,
+        root,
     );
-    match schema::find(tree, &scope.root, &target.segs, from, direction) {
-        Ok(Some(rows)) => {
-            let rows = [scope.rows.clone(), rows].concat();
-            let before = model.state.cursor.clone();
-            let result = reveal(tree, &mut model.state, rows, model.height);
-            model.status = result.err().map(|err| err.to_string());
-            crate::app::jumped(model, &before);
-        }
-        Ok(None) => model.note = Some("no occurrence".to_owned()),
-        Err(err) => model.status = Some(err.to_string()),
-    }
+}
+
+/// Moves to an occurrence found by [`step`].
+pub fn stepped<T: TreeIndex>(model: &mut Model<T>, rows: Option<Vec<u64>>) {
+    let Some(rows) = rows else {
+        model.note = Some("no occurrence".to_owned());
+        return;
+    };
+    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
+    let before = model.state.cursor.clone();
+    let result = reveal(tree, &mut model.state, rows, model.height);
+    model.status = result.err().map(|err| err.to_string());
+    crate::app::jumped(model, &before);
 }
 
 #[cfg(test)]
@@ -473,6 +479,78 @@ mod flow_tests {
         assert_eq!(cursor(&model), ".users[2].name");
         update(&mut model, Msg::Key(KeyCode::Char('n').into()));
         assert_eq!(cursor(&model), ".users[0].name");
+    }
+
+    #[test]
+    fn the_popup_scrolls_to_keep_the_selection_visible() {
+        let mut model = model();
+        open(&mut model);
+        let paths: Vec<(String, Vec<crate::schema::Seg>)> = (0..40)
+            .map(|i| (format!(".field{i:02}"), Vec::new()))
+            .collect();
+        let root = model.state.root;
+        super::receive(
+            &mut model,
+            super::Catalog {
+                entries: std::sync::Arc::new(paths),
+                truncated: false,
+                done: true,
+                root,
+            },
+        );
+        for _ in 0..30 {
+            update(&mut model, Msg::Key(KeyCode::Down.into()));
+        }
+        let shown = screen(&model);
+        assert!(shown.contains(".field30"), "{shown}");
+        assert!(!shown.contains(".field00"), "{shown}");
+    }
+
+    #[test]
+    fn a_filter_change_drops_the_cached_schema() {
+        let mut model = model();
+        open(&mut model);
+        assert!(model.schema.is_some());
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        model.state.cursor = vec![1];
+        keys(&mut model, "f.name != null");
+        update(&mut model, Msg::Key(KeyCode::Enter.into()));
+        assert!(model.filter.is_some(), "{:?}", model.prompt);
+        assert_eq!(model.schema, None);
+        open(&mut model);
+        assert!(model.schema.is_some());
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        keys(&mut model, "f");
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        update(&mut model, Msg::Key(KeyCode::Esc.into()));
+        assert_eq!(model.schema, None);
+    }
+
+    #[test]
+    fn stepping_to_the_next_occurrence_runs_as_a_job() {
+        use crate::app::search::Work;
+        use crate::schema::Seg;
+        let mut model = model();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.jobs = Some(tx);
+        let target = super::Target {
+            scope: super::Subtree {
+                rows: Vec::new(),
+                root: model.state.root,
+                label: String::new(),
+            },
+            segs: vec![
+                Seg::Key("users".into()),
+                Seg::Items,
+                Seg::Key("name".into()),
+            ],
+        };
+        model.last_find = crate::app::LastFind::Schema(target);
+        let before = model.state.cursor.clone();
+        keys(&mut model, "n");
+        let job = rx.try_recv().unwrap();
+        assert!(matches!(job.work, Work::SchemaStep(..)));
+        assert_eq!(model.state.cursor, before);
     }
 
     #[test]
