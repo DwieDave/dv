@@ -2,13 +2,12 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::app::Model;
 use crate::app::search::{JobKind, SortSpec, Work, submit_job};
-use crate::app::{Model, jumped};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
 use crate::tree::TreeIndex;
-use crate::view::filtered::Filtered;
-use crate::view::jump::{bucket_rows, reveal};
+use crate::view::jump::bucket_rows;
 use crate::view::place::{Place, rows_of};
 use crate::view::state::TreeState;
 pub use crate::view::table::TableState;
@@ -19,10 +18,7 @@ const HEADER_ROWS: u64 = 2;
 
 /// `t`: opens the table for the container at the cursor.
 pub fn open<T: TreeIndex>(model: &mut Model<T>) {
-    match table_at(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &model.state,
-    ) {
+    match table_at(&model.view(), &model.state) {
         Ok(Some(table)) => model.table = Some(table),
         Ok(None) => model.note = Some("table needs an array of objects".to_owned()),
         Err(err) => model.status = Some(err.to_string()),
@@ -145,7 +141,8 @@ pub fn sorted<T>(model: &mut Model<T>, order: Vec<u64>) {
 /// The rows known so far (a pending array grows).
 fn row_count<T: TreeIndex>(model: &Model<T>) -> u64 {
     model.table.as_ref().map_or(0, |table| {
-        Filtered::new(&*model.tree, model.filter.as_deref())
+        model
+            .view()
             .child_count(table.node)
             .map_or(0, crate::tree::Count::available)
     })
@@ -160,15 +157,12 @@ fn open_in_tree<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
         return;
     }
     let element = table.element(table.row);
-    let before = model.state.cursor.clone();
-    let view = Filtered::new(&*model.tree, model.filter.as_deref());
-    let result =
-        rows_of(&view, &model.state.root, Place(table.node.offset)).and_then(|mut path| {
+    let path =
+        rows_of(&model.view(), &model.state.root, Place(table.node.offset)).map(|mut path| {
             path.extend(bucket_rows(rows, element));
-            reveal(&view, &mut model.state, path, model.height)
+            path
         });
-    model.status = result.err().map(|err| err.to_string());
-    jumped(model, &before);
+    model.reveal_result(path, true);
 }
 
 #[cfg(test)]

@@ -1,9 +1,33 @@
 //! The `?` overlay: every key binding, grouped.
 
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::ui::theme::Theme;
+
+/// Columns the help popup takes.
+const POPUP_WIDTH: u16 = 58;
+
+/// The help overlay: a centered bordered popup, scrolled by `scroll` lines.
+pub fn render_help(scroll: u16, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let lines = help_lines(theme);
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let [popup] = Layout::horizontal([Constraint::Length(POPUP_WIDTH)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(popup);
+    let block = Block::bordered().title(" keys ").border_style(theme.badge);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        popup,
+    );
+}
 
 /// One help line: keys as shown, what they do, and the key sequences it covers (the names the
 /// completeness test gives bound keys: `j`, `C-d`, `Down`, `Space`, `gg`).

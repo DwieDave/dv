@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::app::prompt::{Prompt, PromptKind};
 use crate::app::search::{FilterSpec, Work, submit_job};
 use crate::app::{Model, jumped};
-use crate::filter::{Expr, Scan, parse};
+use crate::filter::{Expr, MAX_MATCHES, Scan, parse};
 use crate::index::IndexError;
 use crate::tree::TreeIndex;
 use crate::ui::status::grouped;
@@ -109,8 +109,8 @@ pub fn receive<T: TreeIndex>(model: &mut Model<T>, scan: Scan, done: bool) {
         state.capped |= scan.capped;
     }
     model.schema = None;
-    let view = Filtered::new(&*model.tree, model.filter.as_deref());
-    if let Err(err) = model.state.refresh(&view) {
+    let (view, state) = model.view_state();
+    if let Err(err) = state.refresh(&view) {
         model.status = Some(err.to_string());
     }
 }
@@ -210,7 +210,10 @@ pub fn summary<T>(model: &Model<T>) -> Option<String> {
     let found = grouped(filter.matches.len() as u64);
     let total = grouped(state.total);
     Some(match (state.capped, filter.done) {
-        (true, _) => format!("{found} of {total} records (showing the first 1M matches)"),
+        (true, _) => {
+            let cap = grouped(MAX_MATCHES as u64);
+            format!("{found} of {total} records (showing the first {cap} matches)")
+        }
         (false, true) => format!("{found} of {total} records"),
         (false, false) => {
             let percent = state.scanned * 100 / state.total.max(1);
