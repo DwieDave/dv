@@ -1,4 +1,4 @@
-//! NFR-2: per-interaction latency on a 256 MB document.
+//! Per-interaction latency on a 256 MB document.
 
 use std::fs;
 use std::hint::black_box;

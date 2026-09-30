@@ -1,4 +1,4 @@
-//! JSON: streaming and in-memory parsing must agree on any input (NFR-6).
+//! JSON: streaming and in-memory parsing must agree on any input.
 #![no_main]
 #![forbid(unsafe_code)]
 

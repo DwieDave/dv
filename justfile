@@ -37,17 +37,17 @@ bench:
 rss +cmd:
     @/usr/bin/time -l {{cmd}} 2>&1 >/dev/null | awk '/maximum resident set size/ {printf "peak RSS: %.1f MB\n", $1 / 1000000}'
 
-# End-to-end load time of `dv --index-only` over the JSON fixtures (NFR-1).
+# End-to-end load time of `dv --index-only` over the JSON fixtures.
 bench-load:
     cargo build --release
     hyperfine --warmup 2 -N -L file api-15M.json,dense-15M.json,small-objects-15M.json,wide-15M.json,escapes-15M.json,deep-100k.json,api-100M.json 'target/release/dv --index-only {{data_dir}}/{file}'
 
-# The 10 GB streaming suite over `file`, with spill files in `dir` (T5.14); needs tmux.
+# The 10 GB streaming suite over `file`, with spill files in `dir`; needs tmux.
 suite dir file:
     cargo build --release
     scripts/suite-10g.sh {{dir}} {{file}}
 
-# Long hardening runs (NFR-6): a million cases per property.
+# Long hardening runs: a million cases per property.
 fuzz-long:
     PROPTEST_CASES=1000000 cargo nextest run --release --test hardening
 

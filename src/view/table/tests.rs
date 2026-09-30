@@ -133,7 +133,7 @@ fn sort_value() -> impl Strategy<Value = Option<serde_json::Value>> {
     prop::option::weighted(0.8, value)
 }
 
-/// The TB-5 order, written independently over `serde_json` values.
+/// The column sort order, written independently over `serde_json` values.
 fn reference(
     a: Option<&serde_json::Value>,
     b: Option<&serde_json::Value>,

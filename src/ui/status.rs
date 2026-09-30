@@ -1,4 +1,4 @@
-//! The status bar: cursor path and type on the left, document facts on the right (FR-20).
+//! The status bar: cursor path and type on the left, document facts on the right.
 
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,7 +15,7 @@ pub struct Status<'a> {
     pub format: Format,
     pub stats: Stats,
     pub error: Option<&'a str>,
-    /// New lines are being indexed as they arrive (FO-6).
+    /// New lines are being indexed as they arrive.
     pub following: bool,
     /// Shown instead of the document facts (e.g. search results).
     pub note: Option<&'a str>,

@@ -1,4 +1,4 @@
-//! Source context around an error offset for the error screen (FR-7).
+//! Source context around an error offset for the error screen.
 
 use crate::index::to_usize;
 use crate::position::Position;

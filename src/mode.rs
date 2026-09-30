@@ -1,4 +1,4 @@
-//! Choosing in-memory or streaming storage for a document (FR-22).
+//! Choosing in-memory or streaming storage for a document.
 
 use std::process::Command;
 

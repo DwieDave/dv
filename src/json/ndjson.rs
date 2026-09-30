@@ -1,4 +1,4 @@
-//! NDJSON: one JSON value per line, with per-line error isolation (FR-5, D-6).
+//! NDJSON: one JSON value per line, with per-line error isolation.
 
 use std::ops::ControlFlow;
 
@@ -272,7 +272,7 @@ fn resume_after(bytes: &[u8], at: usize) -> usize {
     memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |i| at + i + 1)
 }
 
-#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable (NFR-8)
+#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
 fn offset32(pos: usize) -> u32 {
     pos as u32
 }

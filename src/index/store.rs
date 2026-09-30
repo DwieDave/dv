@@ -119,7 +119,7 @@ impl Builder for VecStoreBuilder {
     }
 }
 
-/// In-memory offsets fit in u32 once `ensure_addressable` passed (NFR-8).
+/// In-memory offsets fit in u32 once `ensure_addressable` passed.
 #[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
 fn offset32_u64(offset: u64) -> u32 {
     offset as u32
@@ -220,7 +220,7 @@ impl VecStoreBuilder {
     }
 }
 
-/// Store indices and offsets fit in u32 because inputs do (NFR-8).
+/// Store indices and offsets fit in u32 because inputs do.
 #[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
 fn offset32(n: usize) -> u32 {
     n as u32

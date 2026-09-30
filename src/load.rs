@@ -1,4 +1,4 @@
-//! Loading and indexing on a worker thread, reporting progress (FR-8, D-12).
+//! Loading and indexing on a worker thread, reporting progress.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -109,7 +109,7 @@ pub fn load(
 }
 
 /// Reads piped input: up to `spool_at` bytes it loads in memory like [`load`]; longer input
-/// continues into a private temp file, which is then streamed (FR-2, FR-28).
+/// continues into a private temp file, which is then streamed.
 pub fn load_spooled(
     mut reader: impl Read,
     request: &Request,
@@ -185,7 +185,7 @@ fn spool(
     Ok(None)
 }
 
-/// Memory and pacing for a streaming load (FR-25).
+/// Memory and pacing for a streaming load.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamBudget {
     /// Chunk cache of the parser's reads.
@@ -198,7 +198,7 @@ pub struct StreamBudget {
     pub publish_every: u64,
 }
 
-/// Streaming mode's default memory budget (NFR-11).
+/// Streaming mode's default memory budget.
 pub const DEFAULT_BUDGET: u64 = 512 << 20;
 
 /// The smallest budget streaming honours: below it the longest-token buffer (1/4) would reject
@@ -212,7 +212,7 @@ impl Default for StreamBudget {
 }
 
 impl StreamBudget {
-    /// Caches and buffers sized to fit `total` bytes (`mode.memory_budget`, FR-25): the parser's
+    /// Caches and buffers sized to fit `total` bytes (`mode.memory_budget`): the parser's
     /// cache takes 1/16, each view 1/4, the spilled index 1/8, and the longest token 1/4.
     /// A `total` under [`MIN_BUDGET`] is raised to it.
     #[must_use]
@@ -271,8 +271,8 @@ pub fn load_stream(
 }
 
 /// Streams an NDJSON `file` and keeps following it: appended lines are indexed as they arrive,
-/// until cancelled or the file shrinks or is replaced at `path` (FO-2, FO-5). Setting `stop`
-/// ends following and finishes the index normally (FO-4).
+/// until cancelled or the file shrinks or is replaced at `path`. Setting `stop`
+/// ends following and finishes the index normally.
 pub fn load_follow(
     file: &File,
     path: &Path,
@@ -541,7 +541,7 @@ fn index(
     }
 }
 
-/// Transcodes YAML to JSON, drops the YAML text, then indexes the JSON (D-5).
+/// Transcodes YAML to JSON, drops the YAML text, then indexes the JSON.
 fn yaml_tree(
     bytes: Vec<u8>,
     hook: &mut impl FnMut(u64) -> ControlFlow<()>,

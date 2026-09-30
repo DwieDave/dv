@@ -1,5 +1,4 @@
-//! The table view's model: columns sampled from an array of objects, and their cells
-//! (TB-2, TB-3).
+//! The table view's model: columns sampled from an array of objects, and their cells.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -61,7 +60,7 @@ pub const GAP: usize = 2;
 /// Blank columns before the index: the cursor bar and a space.
 pub const GUTTER: &str = "  ";
 
-/// An open table: the container, its columns, and the cursor (TB-4).
+/// An open table: the container, its columns, and the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableState {
     pub node: NodeRef,
@@ -191,7 +190,7 @@ pub fn index_width(rows: u64) -> usize {
 }
 
 /// The container a table at the cursor shows: the cursor row when it is an array, else its
-/// nearest container (buckets skipped), with that container's row path (TB-1).
+/// nearest container (buckets skipped), with that container's row path.
 ///
 /// # Errors
 /// Storage or lexing failures.
@@ -219,7 +218,7 @@ pub fn target<T: TreeIndex>(
 }
 
 /// The keys of the first [`SAMPLE`] children of `node`, in first-seen order, each as wide
-/// as its widest cell (TB-2).
+/// as its widest cell.
 ///
 /// # Errors
 /// Storage or lexing failures.
@@ -258,7 +257,7 @@ impl Found {
     }
 }
 
-/// The cells of `row` under `columns` (TB-3).
+/// The cells of `row` under `columns`.
 ///
 /// # Errors
 /// Storage or lexing failures.
@@ -334,7 +333,7 @@ fn cell_of<T: TreeIndex + ?Sized>(tree: &T, child: &Child) -> Result<Cell, Index
     })
 }
 
-/// The most rows a sort takes (TB-5).
+/// The most rows a sort takes.
 pub const MAX_SORT: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +342,7 @@ pub enum SortDir {
     Desc,
 }
 
-/// Whether `rows` rows can be sorted (TB-5).
+/// Whether `rows` rows can be sorted.
 ///
 /// # Errors
 /// The note to show when there are too many.
@@ -358,7 +357,7 @@ pub fn sortable(rows: u64) -> Result<(), &'static str> {
 /// Rows read between progress reports and cancellation checks.
 const SORT_BATCH: u64 = 4096;
 
-/// The children of `node` ordered by their `key` member (TB-5): numbers, then strings,
+/// The children of `node` ordered by their `key` member: numbers, then strings,
 /// booleans, null and containers; missing values last in both directions; stable. `None`
 /// when cancelled.
 ///
@@ -386,7 +385,7 @@ pub fn sort_order<T: TreeIndex + ?Sized>(
     Ok(Some(keyed.into_iter().map(|(_, i)| i).collect()))
 }
 
-/// A value as it sorts; the variant order is the TB-5 type order.
+/// A value as it sorts; the variant order is the sort order of types.
 #[derive(Debug, Clone, PartialEq)]
 enum SortKey {
     Number(f64),

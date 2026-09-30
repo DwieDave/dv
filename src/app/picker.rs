@@ -1,4 +1,4 @@
-//! The fuzzy schema-path picker (FR-17).
+//! The fuzzy schema-path picker.
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ pub struct Catalog {
 }
 
 /// Where schema paths are collected: the whole document or, in streaming mode, the
-/// innermost container at the cursor (FR-17).
+/// innermost container at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subtree {
     /// Rows from the document root to the subtree's root.

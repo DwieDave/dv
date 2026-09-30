@@ -1,4 +1,4 @@
-//! Remembered cursor positions per file, under `$XDG_STATE_HOME/dv` (HI-3).
+//! Remembered cursor positions per file, under `$XDG_STATE_HOME/dv`.
 
 use std::io;
 use std::path::{Path, PathBuf};

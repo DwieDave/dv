@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The 10 GB streaming suite (T5.14; NFR-2, NFR-4, NFR-11, NFR-12), driven through tmux.
+# The 10 GB streaming suite, driven through tmux.
 # Usage: [DV_MODE=auto|memory|stream] scripts/suite-10g.sh <dir> <file>   (spill files go to
 # <dir> via TMPDIR; the mode defaults to stream)
 set -euo pipefail

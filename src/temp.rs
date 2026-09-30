@@ -1,4 +1,4 @@
-//! Private temporary files that leave nothing behind (NFR-13).
+//! Private temporary files that leave nothing behind.
 
 use std::fs::File;
 use std::io::{self, Write};

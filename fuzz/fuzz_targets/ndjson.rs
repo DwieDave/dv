@@ -1,4 +1,4 @@
-//! NDJSON: streaming and in-memory line indexes must agree on any input (NFR-6).
+//! NDJSON: streaming and in-memory line indexes must agree on any input.
 #![no_main]
 #![forbid(unsafe_code)]
 

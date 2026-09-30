@@ -1,4 +1,4 @@
-//! The spilled index built on its own thread: the parser only queues events (NFR-12).
+//! The spilled index built on its own thread: the parser only queues events.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};

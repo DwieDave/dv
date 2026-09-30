@@ -1,4 +1,4 @@
-//! Visible rows over expanded items without a flattened list (FR-12).
+//! Visible rows over expanded items without a flattened list.
 //!
 //! A row path lists the row index chosen at each level below the root item;
 //! `[]` is the root item's own row.

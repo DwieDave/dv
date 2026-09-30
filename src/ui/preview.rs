@@ -1,4 +1,4 @@
-//! The preview pane: highlighted pretty-printed lines in a bordered block (FR-19).
+//! The preview pane: highlighted pretty-printed lines in a bordered block.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

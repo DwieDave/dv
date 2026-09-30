@@ -1,4 +1,4 @@
-//! NFR-3: peak heap during load + parse stays within a bounded ratio of the input size.
+//! Peak heap during load + parse stays within a bounded ratio of the input size.
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

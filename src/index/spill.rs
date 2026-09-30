@@ -1,4 +1,4 @@
-//! A node store spilled to temporary files, for documents larger than memory (FR-23, D-14).
+//! A node store spilled to temporary files, for documents larger than memory.
 
 use std::fs::File;
 use std::io;

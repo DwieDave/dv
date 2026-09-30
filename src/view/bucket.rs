@@ -1,4 +1,4 @@
-//! Splits huge child ranges into nested buckets of at most `BUCKET` rows (FR-11).
+//! Splits huge child ranges into nested buckets of at most `BUCKET` rows.
 
 use std::ops::Range;
 

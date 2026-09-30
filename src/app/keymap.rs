@@ -1,4 +1,4 @@
-//! Keys to messages, with vim-style chords (FR-13, FR-14).
+//! Keys to messages, with vim-style chords.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

@@ -1,4 +1,4 @@
-//! The filter language: expressions over each child of a container (FI-1, FI-2).
+//! The filter language: expressions over each child of a container.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -210,7 +210,7 @@ impl Op {
     }
 }
 
-/// Whether `child` matches `expr` (FI-2).
+/// Whether `child` matches `expr`.
 ///
 /// # Errors
 /// Storage or lexing failures.
@@ -325,10 +325,10 @@ fn compare<T: TreeIndex + ?Sized>(
     Ok(order.is_some_and(|order| op.holds(order)))
 }
 
-/// Children scanned between progress reports (FI-3).
+/// Children scanned between progress reports.
 pub const FILTER_BATCH: u64 = 65_536;
 
-/// The most matches a filter keeps (FI-3).
+/// The most matches a filter keeps.
 pub const MAX_MATCHES: usize = 1_000_000;
 
 /// Matches not yet reported, and how far the scan got.

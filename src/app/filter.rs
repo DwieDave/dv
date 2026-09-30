@@ -1,4 +1,4 @@
-//! The filter prompt and the filtered view (FI-3, FI-4, FI-5).
+//! The filter prompt and the filtered view.
 
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-//! YAML: transcoding never panics, and its output is always valid JSON (NFR-6).
+//! YAML: transcoding never panics, and its output is always valid JSON.
 #![no_main]
 #![forbid(unsafe_code)]
 

@@ -1,4 +1,4 @@
-//! The tree while streaming indexing is still running: known parts browsable, the rest pending (FR-26).
+//! The tree while streaming indexing is still running: known parts browsable, the rest pending.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -72,7 +72,7 @@ impl<R: Source> LiveTree<R> {
     fn capped(&self) -> Capped<'_, R> {
         let cap = self.store.view().frontier;
         if cap > self.source.len() {
-            // A followed file grew past what this reader has seen (FO-2). Truncation or
+            // A followed file grew past what this reader has seen. Truncation or
             // rotation is reported by the loader's own source, which ends following.
             let _ = self.source.refresh();
         }

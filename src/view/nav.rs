@@ -1,4 +1,4 @@
-//! Cursor movement and expansion commands over the tree state (FR-10, FR-13).
+//! Cursor movement and expansion commands over the tree state.
 
 use crate::index::IndexError;
 use crate::json::lex::Kind;

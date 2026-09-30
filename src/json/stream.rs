@@ -1,4 +1,4 @@
-//! Parsing a document of any size through a sliding buffer (streaming mode, FR-23).
+//! Parsing a document of any size through a sliding buffer (streaming mode).
 
 use std::ops::ControlFlow;
 use std::thread::{Scope, scope};

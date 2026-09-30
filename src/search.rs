@@ -1,6 +1,6 @@
-//! Byte-level search over the raw document, mapped back to tree rows (FR-15, D-7).
+//! Byte-level search over the raw document, mapped back to tree rows.
 //!
-//! No hit list is kept (NFR-4): `n`/`N` search from the cursor and `count` only counts.
+//! No hit list is kept: `n`/`N` search from the cursor and `count` only counts.
 
 use std::borrow::Cow;
 use std::cell::Cell;

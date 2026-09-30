@@ -1,5 +1,5 @@
 //! Reading ahead on a second thread: while the parser works through one buffer, the next one
-//! is read and UTF-8-checked in parallel (NFR-12).
+//! is read and UTF-8-checked in parallel.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +52,7 @@ impl Prefetch {
 
     /// Like [`Self::spawn`], but each chunk ends after its last newline (the rest opens the
     /// next one), and UTF-8 is left to the caller: blocks of whole NDJSON lines. With
-    /// `follow`, the reader waits at the end for the file to grow instead of ending (FO-2),
+    /// `follow`, the reader waits at the end for the file to grow instead of ending,
     /// until that flag is set.
     pub(crate) fn lines<'scope, 'env, R: Source + Sync>(
         scope: &'scope Scope<'scope, 'env>,

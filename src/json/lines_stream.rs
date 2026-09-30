@@ -1,5 +1,5 @@
 //! Streaming NDJSON: blocks of whole lines parsed on several threads and merged in order, with
-//! bad lines isolated exactly as in [`crate::json::ndjson::parse_lines`] (FR-5, FR-23, NFR-12).
+//! bad lines isolated exactly as in [`crate::json::ndjson::parse_lines`].
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub fn parse_lines_stream<R: Source + Sync, B: Builder>(
 }
 
 /// Like [`parse_lines_stream`], but at the end it waits for the file to grow and indexes
-/// appended lines as they arrive (FO-2). Setting `stop` ends it normally; it also ends when
+/// appended lines as they arrive. Setting `stop` ends it normally; it also ends when
 /// cancelled or the file shrinks.
 ///
 /// # Errors

@@ -69,7 +69,7 @@ pub struct PathError {
     pub message: &'static str,
 }
 
-/// Parses a jq-style path such as `.users[3]."first name"` or `.items[10:20]` (FR-16).
+/// Parses a jq-style path such as `.users[3]."first name"` or `.items[10:20]`.
 ///
 /// # Errors
 /// The first malformed part of `input`.

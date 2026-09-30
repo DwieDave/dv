@@ -1,4 +1,4 @@
-//! YAML → compact JSON transcoding, so YAML is indexed like JSON (FR-6, D-5).
+//! YAML → compact JSON transcoding, so YAML is indexed like JSON.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ pub enum TranscodeError {
     Cancelled,
 }
 
-/// Default expansion budget: the JSON may grow to about twice the YAML (NFR-3).
+/// Default expansion budget: the JSON may grow to about twice the YAML.
 #[must_use]
 pub fn budget(yaml_len: usize) -> usize {
     yaml_len.saturating_mul(2).saturating_add(64)

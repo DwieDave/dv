@@ -1,4 +1,4 @@
-//! The table view over an array of objects: opening it and its keys (TB-1, TB-4).
+//! The table view over an array of objects: opening it and its keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -105,7 +105,7 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
     }
 }
 
-/// `s`: cycles the current column's sort, running it on the worker (TB-5).
+/// `s`: cycles the current column's sort, running it on the worker.
 fn sort<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     if let Err(note) = sortable(rows) {
         model.note = Some(note.to_owned());
@@ -142,7 +142,7 @@ pub fn sorted<T>(model: &mut Model<T>, order: Vec<u64>) {
     model.note = None;
 }
 
-/// The rows known so far (a pending array grows, TB-6).
+/// The rows known so far (a pending array grows).
 fn row_count<T: TreeIndex>(model: &Model<T>) -> u64 {
     model.table.as_ref().map_or(0, |table| {
         Filtered::new(&*model.tree, model.filter.as_deref())

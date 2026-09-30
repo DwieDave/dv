@@ -1,4 +1,4 @@
-//! The `?` overlay: every key binding, grouped (KF-4).
+//! The `?` overlay: every key binding, grouped.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
