@@ -141,3 +141,31 @@ fn a_table_of_a_filtered_array_shows_original_indices() {
         "{shown:#?}"
     );
 }
+
+#[test]
+fn back_after_clearing_the_filter_returns_to_the_same_record() {
+    let mut model = model();
+    filter(&mut model, ".n > 3");
+    typed(&mut model, "jj");
+    assert_eq!(model.state.cursor, vec![1], "the second match, record 2");
+    typed(&mut model, "gg");
+    press(&mut model, KeyCode::Esc);
+    assert!(model.filter.is_none());
+    update(
+        &mut model,
+        Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+    );
+    assert_eq!(model.state.cursor, vec![2], "record 2 in the full list");
+}
+
+#[test]
+fn a_mark_set_before_filtering_still_finds_its_record() {
+    let mut model = model();
+    typed(&mut model, "jjj");
+    assert_eq!(model.state.cursor, vec![2]);
+    typed(&mut model, "ma");
+    typed(&mut model, "gg");
+    filter(&mut model, ".n > 3");
+    typed(&mut model, "'a");
+    assert_eq!(model.state.cursor, vec![1], "record 2 is the second match");
+}

@@ -12,15 +12,15 @@ use crate::ui::status::grouped;
 use crate::view::filtered::{FilterView, Filtered};
 use crate::view::jump::{bucket_rows, reveal};
 use crate::view::nav::{self, Nav};
+use crate::view::place::{Place, rows_of};
 use crate::view::resolve::{RowKind, chain};
 use crate::view::state::TreeState;
 use crate::view::table::target;
 
-/// The active filter: its text, the container's row path, and the scan's progress.
+/// The active filter: its text, and the scan's progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterState {
     pub text: String,
-    pub path: Vec<u64>,
     pub scanned: u64,
     pub total: u64,
     pub capped: bool,
@@ -57,7 +57,6 @@ fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(
     model.prompt = None;
     model.filtering = Some(FilterState {
         text: text.to_owned(),
-        path: path.clone(),
         scanned: 0,
         total: 0,
         capped: false,
@@ -121,16 +120,20 @@ pub fn open_match<T: TreeIndex>(model: &mut Model<T>) {
 
 /// Leaves the filter; a cursor on (or inside) a match stays on that element.
 pub fn clear<T: TreeIndex>(model: &mut Model<T>, jump: bool) {
-    let Some(state) = model.filtering.take() else {
+    if model.filtering.take().is_none() {
         return;
-    };
-    let rows = full_rows(model, &state.path).unwrap_or_else(|_| state.path.clone());
+    }
+    let path = model.filter.as_deref().map_or_else(Vec::new, |filter| {
+        let view = Filtered::new(&*model.tree, None);
+        rows_of(&view, &model.state.root, Place(filter.node.offset)).unwrap_or_default()
+    });
+    let rows = full_rows(model, &path).unwrap_or_else(|_| path.clone());
     model.filter = None;
     if let Err(err) = rebuild(model, rows, false) {
         model.status = Some(err.to_string());
     }
     if jump {
-        jumped(model, state.path);
+        jumped(model, &path);
     }
 }
 

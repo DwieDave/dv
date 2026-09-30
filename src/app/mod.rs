@@ -43,6 +43,7 @@ use crate::view::filtered::{FilterView, Filtered};
 use crate::view::history::JumpList;
 use crate::view::jump::{jump, reveal};
 use crate::view::nav::{self, Nav};
+use crate::view::place::{Place, place_of, rows_of};
 use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines, value_text};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
@@ -93,7 +94,7 @@ pub struct Model<T> {
     /// Where jumps came from, for `Ctrl-o` / `Tab` (HI-1).
     pub jumps: JumpList,
     /// Marks `a`–`z` (HI-2), for this session.
-    pub marks: [Option<Vec<u64>>; 26],
+    pub marks: [Option<Place>; 26],
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
@@ -269,27 +270,46 @@ pub enum Step {
 }
 
 /// Records `before` in the jump list when a jump moved the cursor away from it.
-pub(crate) fn jumped<T>(model: &mut Model<T>, before: Vec<u64>) {
-    if model.state.cursor != before {
-        model.jumps.record(before);
+pub(crate) fn jumped<T: TreeIndex>(model: &mut Model<T>, before: &[u64]) {
+    if model.state.cursor != before
+        && let Some(place) = place_at(model, before)
+    {
+        model.jumps.record(place);
     }
+}
+
+/// The document place of the row at `rows` in the current view.
+fn place_at<T: TreeIndex>(model: &mut Model<T>, rows: &[u64]) -> Option<Place> {
+    let view = Filtered::new(&*model.tree, model.filter.as_deref());
+    match place_of(&view, &model.state.root, rows) {
+        Ok(place) => Some(place),
+        Err(err) => {
+            model.status = Some(err.to_string());
+            None
+        }
+    }
+}
+
+/// Moves the cursor to `place`, expanding its ancestors, through the current view.
+fn reveal_place<T: TreeIndex>(model: &mut Model<T>, place: Place) {
+    let view = Filtered::new(&*model.tree, model.filter.as_deref());
+    let result = rows_of(&view, &model.state.root, place)
+        .and_then(|rows| reveal(&view, &mut model.state, rows, model.height));
+    model.status = result.err().map(|err| err.to_string());
 }
 
 /// `Ctrl-o` / `Tab`: returns to a place in the jump list, expanding its ancestors.
 fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
-    let current = model.state.cursor.clone();
+    let cursor = model.state.cursor.clone();
+    let Some(current) = place_at(model, &cursor) else {
+        return;
+    };
     let target = match step {
         Step::Back => model.jumps.back(current),
         Step::Forward => model.jumps.forward(current),
     };
-    if let Some(rows) = target {
-        let result = reveal(
-            &Filtered::new(&*model.tree, model.filter.as_deref()),
-            &mut model.state,
-            rows,
-            model.height,
-        );
-        model.status = result.err().map(|err| err.to_string());
+    if let Some(place) = target {
+        reveal_place(model, place);
     }
 }
 
@@ -300,19 +320,13 @@ fn mark_slot(c: char) -> Option<usize> {
 
 /// `'{a-z}`: returns to a mark, as a jump.
 fn go_mark<T: TreeIndex>(model: &mut Model<T>, c: char) {
-    let Some(rows) = mark_slot(c).and_then(|slot| model.marks[slot].clone()) else {
+    let Some(place) = mark_slot(c).and_then(|slot| model.marks[slot]) else {
         model.note = Some(format!("mark {c} is not set"));
         return;
     };
     let before = model.state.cursor.clone();
-    let result = reveal(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &mut model.state,
-        rows,
-        model.height,
-    );
-    model.status = result.err().map(|err| err.to_string());
-    jumped(model, before);
+    reveal_place(model, place);
+    jumped(model, &before);
 }
 
 /// The most recent kind of find, repeated by `n`/`N`.
@@ -435,14 +449,17 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             );
             model.status = result.err().map(|err| err.to_string());
             if matches!(action, Nav::Top | Nav::Bottom) {
-                jumped(model, before);
+                jumped(model, &before);
             }
         }
         Msg::History(step) => history(model, step),
         Msg::SetMark(c) => {
             if let Some(slot) = mark_slot(c) {
-                model.marks[slot] = Some(model.state.cursor.clone());
-                model.note = Some(format!("mark {c} set"));
+                let cursor = model.state.cursor.clone();
+                if let Some(place) = place_at(model, &cursor) {
+                    model.marks[slot] = Some(place);
+                    model.note = Some(format!("mark {c} set"));
+                }
             }
         }
         Msg::GoMark(c) => go_mark(model, c),
@@ -506,7 +523,7 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
     match result {
         Ok(()) => {
             model.prompt = None;
-            jumped(model, before);
+            jumped(model, &before);
         }
         Err(error) => {
             if let Some(prompt) = model.prompt.as_mut() {

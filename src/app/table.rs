@@ -11,6 +11,7 @@ use crate::json::lex::Kind;
 use crate::tree::TreeIndex;
 use crate::view::filtered::Filtered;
 use crate::view::jump::{bucket_rows, reveal};
+use crate::view::place::{Place, rows_of};
 use crate::view::state::TreeState;
 pub use crate::view::table::TableState;
 use crate::view::table::{RowTo, columns, index_width, sortable, target};
@@ -31,7 +32,7 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
 }
 
 fn table_at<T: TreeIndex>(tree: &T, state: &TreeState) -> Result<Option<TableState>, IndexError> {
-    let Some((path, node)) = target(tree, &state.root, &state.cursor)? else {
+    let Some((_, node)) = target(tree, &state.root, &state.cursor)? else {
         return Ok(None);
     };
     let first = tree.children(node, 0..1)?;
@@ -41,7 +42,7 @@ fn table_at<T: TreeIndex>(tree: &T, state: &TreeState) -> Result<Option<TableSta
     {
         return Ok(None);
     }
-    Ok(Some(TableState::new(path, node, columns(tree, node)?)))
+    Ok(Some(TableState::new(node, columns(tree, node)?)))
 }
 
 /// What a key does in the table.
@@ -162,17 +163,15 @@ fn open_in_tree<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
         return;
     }
     let element = table.element(table.row);
-    let mut path = table.path;
-    path.extend(bucket_rows(rows, element));
     let before = model.state.cursor.clone();
-    let result = reveal(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &mut model.state,
-        path,
-        model.height,
-    );
+    let view = Filtered::new(&*model.tree, model.filter.as_deref());
+    let result =
+        rows_of(&view, &model.state.root, Place(table.node.offset)).and_then(|mut path| {
+            path.extend(bucket_rows(rows, element));
+            reveal(&view, &mut model.state, path, model.height)
+        });
     model.status = result.err().map(|err| err.to_string());
-    jumped(model, before);
+    jumped(model, &before);
 }
 
 #[cfg(test)]

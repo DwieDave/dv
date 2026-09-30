@@ -64,8 +64,6 @@ pub const GUTTER: &str = "  ";
 /// An open table: the container, its columns, and the cursor (TB-4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableState {
-    /// The container's row path in the tree.
-    pub path: Vec<u64>,
     pub node: NodeRef,
     pub columns: Vec<Column>,
     pub hidden: Vec<bool>,
@@ -94,10 +92,9 @@ pub enum RowTo {
 
 impl TableState {
     #[must_use]
-    pub fn new(path: Vec<u64>, node: NodeRef, columns: Vec<Column>) -> Self {
+    pub fn new(node: NodeRef, columns: Vec<Column>) -> Self {
         let hidden = vec![false; columns.len()];
         Self {
-            path,
             node,
             columns,
             hidden,
