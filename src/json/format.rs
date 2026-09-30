@@ -8,7 +8,7 @@ pub enum Style {
 }
 
 /// Streams raw JSON through a token-level formatter; any chunking gives the same output.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Formatter {
     style: Style,
     depth: usize,

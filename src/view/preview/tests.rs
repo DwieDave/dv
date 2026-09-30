@@ -150,3 +150,17 @@ fn the_line_count_stops_at_the_cap() {
     let count = preview_line_count(&tree, &root.row()).unwrap();
     assert_eq!(count.lines, MAX_PREVIEW_LINES);
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+    #[test]
+    fn seeking_from_checkpoints_matches_a_fresh_read(skip in 0u64..30_000, take in 0usize..40) {
+        let items: Vec<String> = (0..30_000).map(|i| format!("\"item-{i}\"")).collect();
+        let tree = tree_of(&format!("[{}]", items.join(",")));
+        let root = TreeState::new(&tree).unwrap().root;
+        let seeks = SeekCache::default();
+        preview_line_count_with(&tree, &root.row(), &seeks).unwrap();
+        let cached = preview_lines_with(&tree, &root.row(), skip, take, &seeks).unwrap();
+        prop_assert_eq!(cached, preview_lines(&tree, &root.row(), skip, take).unwrap());
+    }
+}

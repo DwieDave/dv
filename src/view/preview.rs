@@ -1,6 +1,7 @@
 //! Pretty-printed preview of the selected item, produced lazily.
 
 use std::ops::Range;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::index::{IndexError, to_usize};
 use crate::json::format::{Formatter, Style};
@@ -30,14 +31,31 @@ pub fn preview_lines(
     skip: u64,
     take: usize,
 ) -> Result<Preview, IndexError> {
+    preview_lines_with(tree, item, skip, take, &SeekCache::default())
+}
+
+/// `preview_lines`, resuming from and adding to `seeks`.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn preview_lines_with(
+    tree: &impl TreeIndex,
+    item: &RowItem,
+    skip: u64,
+    take: usize,
+    seeks: &SeekCache,
+) -> Result<Preview, IndexError> {
     if skip >= MAX_PREVIEW_LINES {
         return Ok(Preview::default());
     }
     let window = Window { skip, take };
     match &item.kind {
-        RowKind::Bucket { container, range } => {
-            pretty(tree, &bucket_pieces(tree, *container, range)?, window)
-        }
+        RowKind::Bucket { container, range } => pretty(
+            tree,
+            &bucket_pieces(tree, *container, range)?,
+            window,
+            seeks,
+        ),
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => {
             let records = match tree.child_count(*node)? {
                 Count::Known(n) => grouped(n),
@@ -49,7 +67,7 @@ pub fn preview_lines(
         RowKind::Value { node, end, .. } => match node.kind {
             Kind::Invalid => invalid(tree, *node, *end, window),
             Kind::String => string(tree, *node, *end, window),
-            _ => pretty(tree, &[Piece::Bytes(node.offset..*end)], window),
+            _ => pretty(tree, &[Piece::Bytes(node.offset..*end)], window, seeks),
         },
     }
 }
@@ -69,6 +87,18 @@ pub struct LineCount {
 /// # Errors
 /// Storage or lexing failures.
 pub fn preview_line_count(tree: &impl TreeIndex, item: &RowItem) -> Result<LineCount, IndexError> {
+    preview_line_count_with(tree, item, &SeekCache::default())
+}
+
+/// `preview_line_count`, leaving checkpoints in `seeks` for later seeks.
+///
+/// # Errors
+/// Storage or lexing failures.
+pub fn preview_line_count_with(
+    tree: &impl TreeIndex,
+    item: &RowItem,
+    seeks: &SeekCache,
+) -> Result<LineCount, IndexError> {
     let growing = match &item.kind {
         RowKind::Value { node, .. } if matches!(node.kind, Kind::Object | Kind::Array) => {
             matches!(tree.child_count(*node)?, Count::Pending(_))
@@ -80,13 +110,13 @@ pub fn preview_line_count(tree: &impl TreeIndex, item: &RowItem) -> Result<LineC
     };
     let lines = match &item.kind {
         RowKind::Bucket { container, range } => {
-            count_pieces(tree, &bucket_pieces(tree, *container, range)?)?
+            count_pieces(tree, &bucket_pieces(tree, *container, range)?, seeks)?
         }
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => 1,
         RowKind::Value { node, end, .. } => match node.kind {
             Kind::Invalid => invalid_lines(tree, *node, *end)?.len() as u64,
             Kind::String => string_lines(tree, *node, *end)?.len() as u64,
-            _ => count_pieces(tree, &[Piece::Bytes(node.offset..*end)])?,
+            _ => count_pieces(tree, &[Piece::Bytes(node.offset..*end)], seeks)?,
         },
     };
     Ok(LineCount {
@@ -96,32 +126,23 @@ pub fn preview_line_count(tree: &impl TreeIndex, item: &RowItem) -> Result<LineC
 }
 
 /// Lines of `pieces` through the pretty formatter, counted up to `MAX_PREVIEW_LINES`.
-fn count_pieces(tree: &impl TreeIndex, pieces: &[Piece]) -> Result<u64, IndexError> {
-    let mut formatter = Formatter::new(Style::Pretty);
-    let (mut out, mut lines, mut partial) = (Vec::new(), 0u64, false);
-    let mut take = |out: &mut Vec<u8>| {
-        lines += out.split(|&b| b == b'\n').count() as u64 - 1;
-        partial = out.last().map_or(partial, |&b| b != b'\n');
-        out.clear();
-        lines >= MAX_PREVIEW_LINES
-    };
-    for piece in pieces {
-        match piece {
-            Piece::Literal(bytes) => formatter.feed(bytes, &mut out),
-            Piece::Bytes(range) => {
-                for chunk in chunks(range) {
-                    formatter.feed(&tree.bytes(chunk)?, &mut out);
-                    if take(&mut out) {
-                        return Ok(MAX_PREVIEW_LINES);
-                    }
-                }
-            }
-        }
-        if take(&mut out) {
-            return Ok(MAX_PREVIEW_LINES);
-        }
-    }
-    Ok(lines + u64::from(partial))
+fn count_pieces(
+    tree: &impl TreeIndex,
+    pieces: &[Piece],
+    seeks: &SeekCache,
+) -> Result<u64, IndexError> {
+    let mut lines = Lines::new(Window {
+        skip: u64::MAX,
+        take: 0,
+    });
+    let capped = stream(tree, pieces, seeks, &mut lines, 0, &|l| {
+        l.seen >= MAX_PREVIEW_LINES
+    })?;
+    Ok(if capped {
+        MAX_PREVIEW_LINES
+    } else {
+        lines.seen + u64::from(!lines.partial.is_empty())
+    })
 }
 
 /// The whole text of `item` in `style`, or `None` when it exceeds `limit` bytes.
@@ -235,27 +256,148 @@ enum Piece {
     Bytes(Range<u64>),
 }
 
+impl Piece {
+    /// What identifies this piece's formatted output prefix.
+    fn shape(&self) -> (bool, u64) {
+        match self {
+            Self::Literal(bytes) => (false, u64::from(bytes.first().copied().unwrap_or(0))),
+            Self::Bytes(range) => (true, range.start),
+        }
+    }
+}
+
 /// Streams `pieces` through the pretty formatter, stopping once the window is full.
-fn pretty(tree: &impl TreeIndex, pieces: &[Piece], window: Window) -> Result<Preview, IndexError> {
-    let (mut formatter, mut lines) = (Formatter::new(Style::Pretty), Lines::new(window));
+fn pretty(
+    tree: &impl TreeIndex,
+    pieces: &[Piece],
+    window: Window,
+    seeks: &SeekCache,
+) -> Result<Preview, IndexError> {
+    let mut lines = Lines::new(window);
+    let stopped = stream(tree, pieces, seeks, &mut lines, window.skip, &Lines::full)?;
+    Ok(lines.finish(stopped))
+}
+
+/// Feeds `pieces` to the formatter, resuming at the nearest checkpoint at or before line
+/// `seek`, until `stop` holds; true when it stopped early.
+fn stream(
+    tree: &impl TreeIndex,
+    pieces: &[Piece],
+    seeks: &SeekCache,
+    lines: &mut Lines,
+    seek: u64,
+    stop: &dyn Fn(&Lines) -> bool,
+) -> Result<bool, IndexError> {
+    let (mut formatter, first, resume) = match seeks.resume(pieces, seek) {
+        Some(point) => {
+            lines.seen = point.line;
+            lines.partial = point.partial;
+            (point.formatter, point.piece, point.offset)
+        }
+        None => (Formatter::new(Style::Pretty), 0, 0),
+    };
     let mut out = Vec::new();
-    for piece in pieces {
+    for (index, piece) in pieces.iter().enumerate().skip(first) {
         match piece {
             Piece::Literal(bytes) => formatter.feed(bytes, &mut out),
             Piece::Bytes(range) => {
-                for chunk in chunks(range) {
-                    formatter.feed(&tree.bytes(chunk)?, &mut out);
-                    if lines.drain(&mut out) {
-                        return Ok(lines.finish(true));
+                let from = if index == first { resume } else { 0 };
+                for chunk in chunks(&(range.start.max(from)..range.end)) {
+                    formatter.feed(&tree.bytes(chunk.clone())?, &mut out);
+                    lines.take(&mut out);
+                    seeks.note(index, chunk.end, lines, &formatter);
+                    if stop(lines) {
+                        return Ok(true);
                     }
                 }
             }
         }
-        if lines.drain(&mut out) {
-            return Ok(lines.finish(true));
+        lines.take(&mut out);
+        if stop(lines) {
+            return Ok(true);
         }
     }
-    Ok(lines.finish(false))
+    Ok(false)
+}
+
+/// Lines between checkpoints, about.
+const CHECKPOINT_LINES: u64 = 1024;
+/// Longest unfinished line a checkpoint carries.
+const CHECKPOINT_PARTIAL: usize = 4096;
+
+/// Where the formatter stood at a chunk boundary: enough to resume without re-reading the bytes
+/// before it.
+#[derive(Debug, Clone)]
+struct Checkpoint {
+    /// Complete lines before this point.
+    line: u64,
+    partial: Vec<u8>,
+    piece: usize,
+    /// Document offset of the next byte to feed.
+    offset: u64,
+    formatter: Formatter,
+}
+
+#[derive(Debug, Default)]
+struct Seeks {
+    /// Which pieces the checkpoints belong to.
+    shape: Vec<(bool, u64)>,
+    /// In line order.
+    points: Vec<Checkpoint>,
+}
+
+/// Checkpoints for one item's preview, filled as lines stream past; any other item clears it.
+#[derive(Debug, Default)]
+pub struct SeekCache(Mutex<Seeks>);
+
+impl Clone for SeekCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for SeekCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SeekCache {}
+
+impl SeekCache {
+    fn seeks(&self) -> MutexGuard<'_, Seeks> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The last checkpoint at or before line `line` of `pieces`.
+    fn resume(&self, pieces: &[Piece], line: u64) -> Option<Checkpoint> {
+        let shape: Vec<(bool, u64)> = pieces.iter().map(Piece::shape).collect();
+        let mut seeks = self.seeks();
+        if seeks.shape != shape {
+            *seeks = Seeks {
+                shape,
+                points: Vec::new(),
+            };
+        }
+        let at = seeks.points.partition_point(|point| point.line <= line);
+        at.checked_sub(1).map(|i| seeks.points[i].clone())
+    }
+
+    /// Keeps the state after `offset` of piece `piece` when it is far enough past the last one.
+    fn note(&self, piece: usize, offset: u64, lines: &Lines, formatter: &Formatter) {
+        let mut seeks = self.seeks();
+        let last = seeks.points.last().map_or(0, |point| point.line);
+        if lines.seen < last + CHECKPOINT_LINES || lines.partial.len() > CHECKPOINT_PARTIAL {
+            return;
+        }
+        seeks.points.push(Checkpoint {
+            line: lines.seen,
+            partial: lines.partial.clone(),
+            piece,
+            offset,
+            formatter: formatter.clone(),
+        });
+    }
 }
 
 fn chunks(range: &Range<u64>) -> Vec<Range<u64>> {
@@ -293,11 +435,10 @@ impl Lines {
         }
     }
 
-    /// Takes the formatter output so far; true once the window is full.
-    fn drain(&mut self, out: &mut Vec<u8>) -> bool {
+    /// Takes the formatter output so far.
+    fn take(&mut self, out: &mut Vec<u8>) {
         self.consume(out);
         out.clear();
-        self.full()
     }
 
     fn push(&mut self, line: &[u8]) {

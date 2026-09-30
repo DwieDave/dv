@@ -511,3 +511,35 @@ fn a_huge_scroll_offset_shows_nothing_past_the_cap() {
     let got = preview_lines(&tree, &root.row(), MAX_PREVIEW_LINES + 7, 5).unwrap();
     assert!(got.lines.is_empty());
 }
+
+/// Fastest of a few draws of `app`.
+fn draw_time(app: &App<MemTree>) -> std::time::Duration {
+    (0..5)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            draw(app);
+            start.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn drawing_deep_in_a_large_value_costs_no_more_than_the_top() {
+    use crossterm::event::MouseEventKind::ScrollDown;
+    let items: Vec<String> = (0..90_000).map(|i| format!("\"item-{i:08}\"")).collect();
+    let mut app = app();
+    update_app(
+        &mut app,
+        loaded(format!("[{}]", items.join(",")).as_bytes()),
+    );
+    let top = draw_time(&app);
+    // The first scroll counts the lines, which leaves the checkpoints behind.
+    update_app(&mut app, wheel(ScrollDown, 70));
+    let Screen::Ready(ready) = &mut app.screen else {
+        panic!("not ready")
+    };
+    ready.preview.scroll = 60_000;
+    let deep = draw_time(&app);
+    assert!(deep < top * 2, "top {top:?}, line 60000 {deep:?}");
+}
