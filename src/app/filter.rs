@@ -140,14 +140,28 @@ pub fn clear<T: TreeIndex>(model: &mut Model<T>, jump: bool) {
         let view = Filtered::new(&*model.tree, None);
         rows_of(&view, &model.state.root, Place(filter.node.offset)).unwrap_or_default()
     });
-    let rows = full_rows(model, &path).unwrap_or_else(|_| path.clone());
+    let (rows, failed) = or_container(full_rows(model, &path), &path);
     model.filter = None;
     model.schema = None;
     if let Err(err) = rebuild(model, rows, false) {
         model.status = Some(err.to_string());
     }
+    if let Some(message) = failed {
+        model.status = Some(message);
+    }
     if jump {
         jumped(model, &path);
+    }
+}
+
+/// `rows`, or the filtered container's own rows with the failure's message.
+fn or_container(
+    rows: Result<Vec<u64>, IndexError>,
+    container: &[u64],
+) -> (Vec<u64>, Option<String>) {
+    match rows {
+        Ok(rows) => (rows, None),
+        Err(err) => (container.to_vec(), Some(err.to_string())),
     }
 }
 
@@ -174,9 +188,12 @@ fn full_rows<T: TreeIndex>(model: &Model<T>, container: &[u64]) -> Result<Vec<u6
         return Ok(container.to_vec());
     };
     let full = &*model.tree;
-    let original = full
+    let Some(original) = full
         .child_containing(filter.node, node.offset)?
-        .map_or(0, |c| c.index);
+        .map(|c| c.index)
+    else {
+        return Ok(container.to_vec());
+    };
     let mut rows = container.to_vec();
     rows.extend(bucket_rows(
         full.child_count(filter.node)?.available(),

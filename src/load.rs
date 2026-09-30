@@ -201,6 +201,10 @@ pub struct StreamBudget {
 /// Streaming mode's default memory budget (NFR-11).
 pub const DEFAULT_BUDGET: u64 = 512 << 20;
 
+/// The smallest budget streaming honours: below it the longest-token buffer (1/4) would reject
+/// ordinary documents.
+pub const MIN_BUDGET: u64 = 64 << 20;
+
 impl Default for StreamBudget {
     fn default() -> Self {
         Self::within(DEFAULT_BUDGET)
@@ -210,8 +214,10 @@ impl Default for StreamBudget {
 impl StreamBudget {
     /// Caches and buffers sized to fit `total` bytes (`mode.memory_budget`, FR-25): the parser's
     /// cache takes 1/16, each view 1/4, the spilled index 1/8, and the longest token 1/4.
+    /// A `total` under [`MIN_BUDGET`] is raised to it.
     #[must_use]
     pub fn within(total: u64) -> Self {
+        let total = total.max(MIN_BUDGET);
         let part = |n: u64| total / n;
         Self {
             parse_cache: part(16),
@@ -258,7 +264,8 @@ pub fn load_stream(
 ) {
     let result = match format {
         Format::Ndjson => stream_lines(file, None, sink, cancel, budget, None),
-        Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
+        Format::Json => stream_json(file, sink, cancel, budget),
+        Format::Yaml => Err(plain(ModeError::YamlTooLarge)),
     };
     report(result, sink);
 }
@@ -743,6 +750,25 @@ mod tests {
     }
 
     #[test]
+    fn streaming_yaml_is_refused_not_parsed_as_json() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"{\"a\": 1}\n").unwrap();
+        let mut seen = Vec::new();
+        load_stream(
+            &file,
+            Format::Yaml,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        let Some(LoadEvent::Loaded(Err(failure))) = seen.last() else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(failure.message, ModeError::YamlTooLarge.to_string());
+    }
+
+    #[test]
     fn streaming_loads_go_live_then_finish() {
         use std::io::Write;
         let items: Vec<String> = (0..40_000).map(|i| format!(r#"{{"id":{i}}}"#)).collect();
@@ -837,6 +863,17 @@ mod tests {
             proptest::prop_assert!(used <= total, "{} > {}", used, total);
             proptest::prop_assert!(b.stream.initial <= b.stream.max);
         }
+    }
+
+    #[test]
+    fn tiny_budgets_are_raised_to_the_floor() {
+        let floor = StreamBudget::within(MIN_BUDGET);
+        for total in [0, 1, 4096, MIN_BUDGET - 1] {
+            let b = StreamBudget::within(total);
+            assert_eq!(b.stream.max, floor.stream.max);
+            assert_eq!(b.view_cache, floor.view_cache);
+        }
+        assert!(floor.stream.max >= 1 << 20);
     }
 
     #[test]

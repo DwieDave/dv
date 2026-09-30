@@ -287,7 +287,7 @@ fn perform_effects<T>(model: &mut Model<T>, follow: &mut Follow) -> bool {
             Effect::Copy(text) => {
                 let size = human_bytes(text.len() as u64);
                 model.note = Some(match clipboard::copy(&text) {
-                    Ok(method) => format!("copied {size} ({})", method.name()),
+                    Ok(method) => clipboard::summary(method, &size),
                     Err(err) => format!("copy failed: {err}"),
                 });
             }

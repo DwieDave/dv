@@ -76,3 +76,30 @@ fn rows_are_labeled_with_their_original_indices() {
         "unmatched children are hidden"
     );
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "must be sorted")]
+fn unsorted_matches_are_rejected() {
+    let tree = tree_of("[10, 11, 12]");
+    let filter = FilterView {
+        node: tree.root().unwrap(),
+        matches: vec![2, 0],
+        done: true,
+    };
+    let _ = Filtered::new(&tree, Some(&filter));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "has no match")]
+fn an_out_of_range_position_is_not_papered_over() {
+    let tree = tree_of("[10, 11, 12]");
+    let root = tree.root().unwrap();
+    let filter = FilterView {
+        node: root,
+        matches: vec![1],
+        done: true,
+    };
+    let _ = Filtered::new(&tree, Some(&filter)).original_index(root, 5);
+}

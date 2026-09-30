@@ -18,6 +18,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::keymap::Keymap;
 use crate::app::picker::{Catalog, Picker};
@@ -787,8 +788,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
                 prompt_line(prompt, flags.as_deref(), &model.theme),
                 status_area,
             );
-            let column = prompt.kind.label().chars().count() + prompt.text.chars().count();
-            let column = u16::try_from(column).unwrap_or(u16::MAX);
+            let column = prompt_column(prompt);
             frame.set_cursor_position((status_area.x.saturating_add(column), status_area.y));
         }
         None => frame.render_widget(status(model, status_area.width.into()), status_area),
@@ -902,6 +902,12 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
     frame.render_widget(widget, area);
 }
 
+/// Display column just after the prompt text, where the cursor sits.
+fn prompt_column(prompt: &Prompt) -> u16 {
+    let column = prompt.kind.label().width() + prompt.text.width();
+    u16::try_from(column).unwrap_or(u16::MAX)
+}
+
 fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::raw(format!("{}{}", prompt.kind.label(), prompt.text))];
     if let Some(flags) = flags.filter(|f| !f.is_empty()) {
@@ -969,6 +975,14 @@ mod tests {
     use super::*;
     use crate::source::MemSource;
     use crate::tree::MemTree;
+
+    #[test]
+    fn prompt_cursor_counts_display_columns() {
+        let mut prompt = Prompt::new(PromptKind::Search);
+        let label = u16::try_from(prompt.kind.label().width()).unwrap();
+        prompt.text = "名前".to_owned();
+        assert_eq!(prompt_column(&prompt), label + 4);
+    }
 
     fn model() -> Model<MemTree> {
         let tree = MemTree::parse(MemSource::new(br#"{"a": [1, 2]}"#.to_vec())).unwrap();

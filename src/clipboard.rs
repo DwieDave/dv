@@ -20,6 +20,19 @@ impl Method {
     }
 }
 
+/// Largest text sent over OSC 52; many terminals drop longer sequences without a word.
+pub const OSC52_LIMIT: usize = 100_000;
+
+/// What to tell the user after `method` took `size` of text. OSC 52 only hands the text to
+/// the terminal, which may still refuse it.
+#[must_use]
+pub fn summary(method: Method, size: &str) -> String {
+    match method {
+        Method::Pbcopy => format!("copied {size} (pbcopy)"),
+        Method::Osc52 => format!("sent {size} to the terminal (OSC 52)"),
+    }
+}
+
 /// Methods to try, in order: OSC 52 first over SSH (pbcopy would copy on the wrong machine).
 #[must_use]
 pub fn strategy(ssh: bool) -> [Method; 2] {
@@ -78,15 +91,34 @@ fn run(method: Method, text: &str) -> io::Result<()> {
     match method {
         Method::Pbcopy => pbcopy(text),
         Method::Osc52 => {
+            let sequence = osc52_checked(text)?;
             let mut out = io::stdout().lock();
-            out.write_all(osc52(text).as_bytes())?;
+            out.write_all(sequence.as_bytes())?;
             out.flush()
         }
     }
 }
 
+/// [`osc52`], unless `text` is over [`OSC52_LIMIT`].
+fn osc52_checked(text: &str) -> io::Result<String> {
+    if text.len() > OSC52_LIMIT {
+        return Err(io::Error::other(format!(
+            "{} bytes is over the {OSC52_LIMIT}-byte OSC 52 limit",
+            text.len()
+        )));
+    }
+    Ok(osc52(text))
+}
+
+/// `pbcopy` reads UTF-8 only when `LANG` says so, and a terminal's locale may not.
+fn pbcopy_command() -> Command {
+    let mut command = Command::new("pbcopy");
+    command.env("LANG", "en_US.UTF-8");
+    command
+}
+
 fn pbcopy(text: &str) -> io::Result<()> {
-    let mut child = Command::new("pbcopy")
+    let mut child = pbcopy_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -128,6 +160,29 @@ mod tests {
     #[test]
     fn osc52_frames_the_payload() {
         assert_eq!(osc52("hi"), "\u{1b}]52;c;aGk=\u{7}");
+    }
+
+    #[test]
+    fn pbcopy_runs_with_a_utf8_locale() {
+        let command = pbcopy_command();
+        let lang = command.get_envs().find(|(k, _)| *k == "LANG");
+        assert_eq!(lang.and_then(|(_, v)| v), Some("en_US.UTF-8".as_ref()));
+    }
+
+    #[test]
+    fn osc52_refuses_text_over_the_limit() {
+        assert!(osc52_checked(&"a".repeat(OSC52_LIMIT)).is_ok());
+        let err = osc52_checked(&"a".repeat(OSC52_LIMIT + 1)).unwrap_err();
+        assert!(err.to_string().contains("OSC 52 limit"), "{err}");
+    }
+
+    #[test]
+    fn osc52_is_reported_as_sent_not_copied() {
+        assert_eq!(summary(Method::Pbcopy, "5 B"), "copied 5 B (pbcopy)");
+        assert_eq!(
+            summary(Method::Osc52, "5 B"),
+            "sent 5 B to the terminal (OSC 52)"
+        );
     }
 
     #[test]

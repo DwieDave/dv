@@ -443,7 +443,8 @@ fn index_only_stream(
     let (limits, spill, go_on) = (budget.stream, budget.spill, |_| ControlFlow::Continue(()));
     let tree = match format {
         Format::Ndjson => StreamTree::index_lines(source, limits, spill, go_on),
-        Format::Json | Format::Yaml => StreamTree::index(source, limits, spill, go_on),
+        Format::Json => StreamTree::index(source, limits, spill, go_on),
+        Format::Yaml => return Err(ModeError::YamlTooLarge.into()),
     }
     .map_err(|e| fail(&e))?;
     Ok(format!("indexed {} bytes", tree.stats().bytes))
@@ -483,6 +484,13 @@ mod tests {
             (cli.format, cli.mode, cli.index_only),
             (Some(FormatArg::Yaml), Mode::Memory, true)
         );
+    }
+
+    #[test]
+    fn index_only_refuses_streamed_yaml() {
+        let file = tempfile::tempfile().unwrap();
+        let err = index_only_stream(file, "x.yaml", Format::Yaml, StreamBudget::testing());
+        assert!(matches!(err, Err(CliError::Mode(ModeError::YamlTooLarge))));
     }
 
     #[test]

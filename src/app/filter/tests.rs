@@ -226,3 +226,15 @@ fn a_mark_set_before_filtering_still_finds_its_record() {
     typed(&mut model, "'a");
     assert_eq!(model.state.cursor, vec![1], "record 2 is the second match");
 }
+
+#[test]
+fn a_failed_exit_lookup_keeps_the_container_and_reports() {
+    let err = IndexError::Source(crate::source::SourceError::Truncated);
+    let (rows, message) = or_container(Err(err), &[2, 0]);
+    assert_eq!(rows, vec![2, 0]);
+    assert_eq!(
+        message.as_deref(),
+        Some("the file was truncated; stopped following")
+    );
+    assert_eq!(or_container(Ok(vec![1]), &[2]), (vec![1], None));
+}
