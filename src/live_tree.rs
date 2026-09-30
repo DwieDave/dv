@@ -5,13 +5,13 @@ use std::ops::Range;
 
 use crate::error::ParseErrorKind;
 use crate::format::Format;
+use crate::index::IndexError;
 use crate::index::children::Child;
-use crate::index::lines::{BadLine, Kids, Lines, LiveLines, checkpoint_index, kids};
+use crate::index::lines::{Kids, Lines, LiveLines, checkpoint_index, kids};
 use crate::index::live::{LiveStore, NodeState};
 use crate::index::window::value_end;
-use crate::index::{IndexError, to_usize};
-use crate::json::lex::{Kind, kind_of};
 use crate::source::{Source, SourceError};
+use crate::stream_core::{StreamCore, children, is_container};
 use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 
 /// A source that ends at `cap` (the indexing frontier).
@@ -37,21 +37,17 @@ impl<R: Source> Source for Capped<'_, R> {
 pub struct LiveTree<R> {
     source: R,
     store: LiveStore,
-    root: u64,
-    window: usize,
-    /// The published line index of an NDJSON document, whose root is [`LINES_ROOT`].
-    lines: Option<LiveLines>,
+    core: StreamCore<LiveLines>,
 }
 
 impl<R: Source> LiveTree<R> {
     #[must_use]
     pub fn new(source: R, store: LiveStore, root: u64) -> Self {
+        let core = StreamCore::new(root);
         Self {
             source,
             store,
-            root,
-            window: 64 << 10,
-            lines: None,
+            core,
         }
     }
 
@@ -59,7 +55,7 @@ impl<R: Source> LiveTree<R> {
     #[must_use]
     pub fn lines(source: R, store: LiveStore, lines: LiveLines) -> Self {
         Self {
-            lines: Some(lines),
+            core: StreamCore::with_lines(lines),
             ..Self::new(source, store, LINES_ROOT)
         }
     }
@@ -91,16 +87,11 @@ impl<R: Source> LiveTree<R> {
         kids(
             source,
             &self.store,
-            self.lines_of(node),
+            self.core.lines_of(node),
             node,
             k,
-            self.window,
+            self.core.window,
         )
-    }
-
-    /// The line index, when `node` is the NDJSON root.
-    fn lines_of(&self, node: NodeRef) -> Option<&LiveLines> {
-        self.lines.as_ref().filter(|_| node.offset == LINES_ROOT)
     }
 
     /// Records so far: pending while indexing, truncated if indexing stopped early.
@@ -112,40 +103,18 @@ impl<R: Source> LiveTree<R> {
             true => Count::Known(count),
         }
     }
-
-    fn bad_at(&self, offset: u64) -> Result<Option<BadLine>, IndexError> {
-        match &self.lines {
-            Some(lines) => Ok(lines.bad_at(offset)?),
-            None => Ok(None),
-        }
-    }
-}
-
-fn is_container(node: NodeRef) -> bool {
-    matches!(node.kind, Kind::Object | Kind::Array)
 }
 
 impl<R: Source> TreeIndex for LiveTree<R> {
     fn root(&self) -> Result<NodeRef, IndexError> {
-        if self.lines.is_some() {
-            return Ok(NodeRef {
-                offset: LINES_ROOT,
-                kind: Kind::Array,
-            });
-        }
-        let head = self.source.read(self.root..self.root + 1)?;
-        let kind = head.first().and_then(|&b| kind_of(b)).unwrap_or(Kind::Null);
-        Ok(NodeRef {
-            offset: self.root,
-            kind,
-        })
+        self.core.root(&self.source)
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
         if !is_container(node) {
             return Ok(Count::Known(0));
         }
-        if let Some(lines) = self.lines_of(node) {
+        if let Some(lines) = self.core.lines_of(node) {
             return Ok(self.record_count(lines));
         }
         match self.store.node(node.offset)? {
@@ -170,20 +139,15 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn children(&self, node: NodeRef, range: Range<u64>) -> Result<Vec<Child>, IndexError> {
-        if !is_container(node) || range.is_empty() {
-            return Ok(Vec::new());
-        }
         let source = self.capped();
-        self.kids(&source, node, range.start)?
-            .take(to_usize(range.end - range.start))
-            .collect()
+        children(node, range, |k| self.kids(&source, node, k))
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
         if !is_container(node) {
             return Ok(None);
         }
-        let first = checkpoint_index(&self.store, self.lines_of(node), node, offset)?;
+        let first = checkpoint_index(&self.store, self.core.lines_of(node), node, offset)?;
         let source = self.capped();
         containing(self.kids(&source, node, first)?, offset)
     }
@@ -195,28 +159,24 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     /// Open or unfinished values end, for now, at the frontier.
     fn value_end(&self, node: NodeRef) -> Result<u64, IndexError> {
         let frontier = self.store.view().frontier;
-        if self.lines_of(node).is_some() {
+        if self.core.lines_of(node).is_some() {
             return Ok(frontier);
         }
-        if let Some(bad) = self.bad_at(node.offset)? {
+        if let Some(bad) = self.core.bad_at(node.offset)? {
             return Ok(bad.resume);
         }
         match self.store.node(node.offset)? {
             Some(NodeState::Closed(big)) => Ok(big.end),
             Some(NodeState::Open { .. }) => Ok(frontier),
             None => Ok(
-                value_end(&self.capped(), &self.store, node.offset, self.window)?
+                value_end(&self.capped(), &self.store, node.offset, self.core.window)?
                     .unwrap_or(frontier),
             ),
         }
     }
 
     fn format(&self) -> Format {
-        if self.lines.is_some() {
-            Format::Ndjson
-        } else {
-            Format::Json
-        }
+        self.core.format()
     }
 
     fn stats(&self) -> Stats {
@@ -227,8 +187,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {
-        let bad = self.bad_at(node.offset).ok().flatten()?;
-        (node.kind == Kind::Invalid).then_some(bad.kind)
+        self.core.problem(node)
     }
     fn streamed(&self) -> bool {
         true
@@ -244,6 +203,7 @@ mod tests {
     use super::*;
     use crate::index::lines::{LineSpill, PendingLines};
     use crate::index::spill::{SpillBuilder, SpillLimits};
+    use crate::json::lex::Kind;
     use crate::json::lines_stream::{Moment, parse_lines_stream};
     use crate::json::stream::{StreamLimits, parse_stream};
     use crate::source::MemSource;
