@@ -366,7 +366,7 @@ fn cancel<T: TreeIndex>(model: &mut Model<T>) {
 fn accept<T: TreeIndex>(model: &mut Model<T>) {
     model.prompt = None;
     if let Some(origin) = model.search.as_ref().map(|s| s.origin.clone()) {
-        jumped(model, origin);
+        jumped(model, &origin);
     }
     if model
         .search
@@ -463,7 +463,7 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
             let before = model.state.cursor.clone();
             restore(model, hit.rows.clone());
             if model.prompt.is_none() {
-                jumped(model, before);
+                jumped(model, &before);
             }
             if let Some(search) = model.search.as_mut() {
                 (search.last, search.note) = (Some(hit), None);

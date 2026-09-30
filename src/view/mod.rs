@@ -5,6 +5,7 @@ pub mod filtered;
 pub mod history;
 pub mod jump;
 pub mod nav;
+pub mod place;
 pub mod preview;
 pub mod resolve;
 pub mod rows;

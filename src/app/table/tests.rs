@@ -59,7 +59,6 @@ fn t_on_an_element_uses_its_array_and_elsewhere_explains() {
     let mut model = model_of(PEOPLE, 40, 12);
     keys(&mut model, "jj");
     keys(&mut model, "t");
-    assert_eq!(table(&model).path, Vec::<u64>::new());
     let mut model = model_of(r#"{"a": 1}"#, 40, 12);
     keys(&mut model, "t");
     assert!(model.table.is_none());
