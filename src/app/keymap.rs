@@ -137,6 +137,54 @@ mod tests {
     }
 
     #[test]
+    fn every_other_binding_maps_to_its_message() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let table: Vec<(Vec<KeyEvent>, Msg)> = vec![
+            (keys("t"), Msg::OpenTable),
+            (keys("f"), Msg::OpenPrompt(PromptKind::Filter)),
+            (keys("o"), Msg::FilterOpen),
+            (keys("F"), Msg::ToggleFollow),
+            (keys(":"), Msg::OpenPrompt(PromptKind::Query)),
+            (keys("/"), Msg::OpenPrompt(PromptKind::Search)),
+            (keys("n"), Msg::SearchStep(Direction::Forward)),
+            (keys("N"), Msg::SearchStep(Direction::Backward)),
+            (keys("p"), Msg::Preview(PreviewCmd::Toggle)),
+            (keys("<"), Msg::Preview(PreviewCmd::SplitLeft)),
+            (keys(">"), Msg::Preview(PreviewCmd::SplitRight)),
+            (keys("J"), Msg::Preview(PreviewCmd::ScrollDown)),
+            (keys("K"), Msg::Preview(PreviewCmd::ScrollUp)),
+            (keys("w"), Msg::Preview(PreviewCmd::Wrap)),
+            (keys("?"), Msg::OpenHelp),
+            (vec![ctrl('p')], Msg::OpenPicker),
+            (vec![ctrl('o')], Msg::History(Step::Back)),
+            (vec![KeyCode::Tab.into()], Msg::History(Step::Forward)),
+            (vec![KeyCode::Esc.into()], Msg::FilterClear),
+            (keys("ma"), Msg::SetMark('a')),
+            (keys("mz"), Msg::SetMark('z')),
+            (keys("'a"), Msg::GoMark('a')),
+            (keys("'z"), Msg::GoMark('z')),
+        ];
+        for (events, expected) in table {
+            assert_eq!(last_msg(events.clone()), Some(expected), "{events:?}");
+        }
+    }
+
+    #[test]
+    fn marks_only_take_lowercase_letters() {
+        assert_eq!(last_msg(keys("mA")), None);
+        assert_eq!(last_msg(keys("'1")), None);
+        assert_eq!(last_msg(keys("m")), None);
+    }
+
+    #[test]
+    fn control_chords_do_not_trigger_plain_bindings() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        for c in ['t', 'f', 'n', 'w', '/'] {
+            assert_eq!(last_msg(vec![ctrl(c)]), None, "ctrl-{c}");
+        }
+    }
+
+    #[test]
     fn unknown_chords_reset_the_prefix() {
         assert_eq!(last_msg(keys("gx")), None);
         assert_eq!(last_msg(keys("gxj")), Some(Msg::Nav(Nav::Down)));

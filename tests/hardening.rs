@@ -11,8 +11,11 @@ use dv::json::parse::parse;
 use dv::json::stream::{StreamLimits, parse_stream};
 use dv::source::MemSource;
 use dv::tree::{MemTree, NodeRef, TreeIndex};
+use dv::view::filtered::{FilterView, Filtered};
+use dv::view::nav::{self, Nav};
 use dv::view::preview::preview_lines;
 use dv::view::state::TreeState;
+use dv::view::table::{SortDir, sort_order};
 use proptest::prelude::*;
 
 /// Raw bytes, or bytes drawn from JSON's alphabet so parsers get past the first token.
@@ -109,5 +112,128 @@ proptest! {
         let text = String::from_utf8_lossy(&bytes);
         let _ = dv::path::parse(&text);
         let _ = dv::config::parse(&text);
+    }
+}
+
+/// Random JSON documents, as text.
+fn documents() -> impl Strategy<Value = Vec<u8>> {
+    let leaf = prop_oneof![
+        Just(serde_json::Value::Null),
+        any::<bool>().prop_map(serde_json::Value::from),
+        any::<i32>().prop_map(serde_json::Value::from),
+        "[a-c ]{0,4}".prop_map(serde_json::Value::from),
+    ];
+    let value = leaf.prop_recursive(4, 48, 6, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..6).prop_map(serde_json::Value::Array),
+            prop::collection::btree_map("[a-d]{1,2}", inner, 0..6)
+                .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+        ]
+    });
+    value.prop_map(|v| v.to_string().into_bytes())
+}
+
+/// An array of small objects with mixed value types, the shape tables sort.
+fn records() -> impl Strategy<Value = Vec<u8>> {
+    let cell = prop_oneof![
+        any::<i16>().prop_map(serde_json::Value::from),
+        "[a-c]{0,3}".prop_map(serde_json::Value::from),
+        any::<bool>().prop_map(serde_json::Value::from),
+        Just(serde_json::Value::Null),
+        Just(serde_json::json!([1])),
+    ];
+    let record = prop::collection::btree_map("[ab]", cell, 0..3)
+        .prop_map(|m| serde_json::Value::Object(m.into_iter().collect()));
+    prop::collection::vec(record, 0..40)
+        .prop_map(|rows| serde_json::Value::Array(rows).to_string().into_bytes())
+}
+
+fn nav_steps() -> impl Strategy<Value = Vec<Nav>> {
+    let nav = prop::sample::select(vec![
+        Nav::Down,
+        Nav::Up,
+        Nav::HalfDown,
+        Nav::HalfUp,
+        Nav::PageDown,
+        Nav::PageUp,
+        Nav::Top,
+        Nav::Bottom,
+        Nav::Expand,
+        Nav::Collapse,
+        Nav::Toggle,
+        Nav::ExpandChildren,
+        Nav::CollapseSubtree,
+        Nav::CollapseAll,
+        Nav::ScrollDown,
+        Nav::ScrollUp,
+    ]);
+    prop::collection::vec(nav, 0..40)
+}
+
+// Taken by value so it can be passed straight to `map_err`.
+#[allow(clippy::needless_pass_by_value)]
+fn failed(e: impl ToString) -> TestCaseError {
+    TestCaseError::fail(e.to_string())
+}
+
+proptest! {
+    #[test]
+    fn navigation_keeps_the_cursor_on_a_row(
+        doc in documents(),
+        steps in nav_steps(),
+        height in 1u64..30,
+    ) {
+        let tree = MemTree::parse(MemSource::new(doc)).map_err(failed)?;
+        let mut state = TreeState::new(&tree).map_err(failed)?;
+        for nav in steps {
+            nav::apply(&tree, &mut state, nav, height).map_err(failed)?;
+            let row = state.row_of(&state.cursor);
+            prop_assert!(row.is_some_and(|r| r < state.total_rows()), "{:?}", state.cursor);
+            prop_assert!(state.top < state.total_rows());
+        }
+    }
+
+    #[test]
+    fn a_filtered_view_lists_exactly_its_matches(
+        count in 1usize..40,
+        picks in prop::collection::vec(any::<bool>(), 40),
+    ) {
+        let items: Vec<String> = (0..count).map(|i| i.to_string()).collect();
+        let text = format!("[{}]", items.join(","));
+        let tree = MemTree::parse(MemSource::new(text.into_bytes())).map_err(failed)?;
+        let root = tree.root().map_err(failed)?;
+        let matches: Vec<u64> = (0..count).filter(|&i| picks[i]).map(|i| i as u64).collect();
+        let view = FilterView { node: root, matches: matches.clone(), done: true };
+        let filtered = Filtered::new(&tree, Some(&view));
+        let n = filtered.child_count(root).map_err(failed)?;
+        prop_assert_eq!(n.available(), matches.len() as u64);
+        let kids = filtered.children(root, 0..count as u64).map_err(failed)?;
+        prop_assert_eq!(kids.len(), matches.len());
+        for (position, kid) in kids.iter().enumerate() {
+            prop_assert_eq!(kid.index, position as u64);
+            prop_assert_eq!(filtered.original_index(root, kid.index), matches[position]);
+        }
+        let inner = filtered.children(root, 1..3).map_err(failed)?;
+        prop_assert_eq!(inner.len(), matches.len().saturating_sub(1).min(2));
+    }
+
+    #[test]
+    fn sorting_a_table_yields_a_stable_permutation(
+        doc in records(),
+        key in prop::sample::select(vec!["a", "b", "zz"]),
+        desc in any::<bool>(),
+    ) {
+        let tree = MemTree::parse(MemSource::new(doc)).map_err(failed)?;
+        let root = tree.root().map_err(failed)?;
+        let total = tree.child_count(root).map_err(failed)?.available();
+        let dir = if desc { SortDir::Desc } else { SortDir::Asc };
+        let order = sort_order(&tree, root, key, dir, &|| false)
+            .map_err(failed)?
+            .ok_or_else(|| failed("cancelled"))?;
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        prop_assert_eq!(seen, (0..total).collect::<Vec<_>>());
+        let again = sort_order(&tree, root, key, dir, &|| false).map_err(failed)?;
+        prop_assert_eq!(again, Some(order));
     }
 }

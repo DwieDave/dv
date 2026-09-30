@@ -1,0 +1,16 @@
+---
+source: tests/snapshots_ui.rs
+expression: "render(&app, 60, 12)"
+---
+   #  id  name    ok
+────────────────────────────────────────────────────────────
+▎  0   0  user0   true
+   1   1  user1   false
+   2   2  user2   true
+   3   3  user3   false
+   4   4  user4   true
+   5   5  user5   false
+   6   6  user6   true
+────────────────────────────────────────────────────────────
+.  array                            JSON  1.1 kB  121 values
+ j/k rows  h/l columns  s sort  ⏎ open  esc close  x hide

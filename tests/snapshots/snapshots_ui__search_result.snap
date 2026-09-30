@@ -1,0 +1,16 @@
+---
+source: tests/snapshots_ui.rs
+expression: "render(&app, 60, 12)"
+---
+ ▾ [30]                       ┌ preview ───────────────────┐
+ │ ▾ [0]: {3}                 │user2                       │
+ │ │   id: 0                  │                            │
+ │ │   name: "user0"          │                            │
+ │ │   ok: true               │                            │
+ │ ▸ [1]: {3}                 │                            │
+ │ ▾ [2]: {3}                 │                            │
+ │ │   id: 2                  │                            │
+▎│ │   name: "user2"          └────────────────────────────┘
+────────────────────────────────────────────────────────────
+.[2].name  string                                 11 matches
+ j/k move  h/l fold  ␣ toggle  / search  n/N next  ? more
