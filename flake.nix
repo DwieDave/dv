@@ -61,7 +61,7 @@
           RUST_BACKTRACE = "1";
         };
 
-        # Nightly + cargo-fuzz for the fuzz targets (T6.3): `nix develop .#fuzz`.
+        # Nightly + cargo-fuzz for the fuzz targets: `nix develop .#fuzz`.
         fuzz = pkgs.mkShell {
           packages = [
             (pkgs.rust-bin.nightly.latest.minimal.override { extensions = [ "rust-src" ]; })
