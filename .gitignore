@@ -6,3 +6,9 @@ fuzz/corpus/
 fuzz/artifacts/
 fuzz/coverage/
 fuzz/Cargo.lock
+
+# agent docs
+AGENTS.md
+CLAUDE.md
+.docs/
+.claude/

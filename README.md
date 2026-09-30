@@ -3,19 +3,20 @@
 A fast terminal viewer for large JSON, NDJSON and YAML files, built in Rust with Ratatui.
 It targets macOS on Apple silicon.
 
-- **Opens big files at once.** 15 MB loads in about 20–40 ms. Files larger than the auto
-  threshold are *streamed*: indexed from disk in the background, browsable within ~50 ms, with
-  memory bounded (about 160 MB for a 10 GB file).
-- **Hierarchical browsing.** Keys, indices and inline values show in a tree. Large arrays are
-  split into buckets of 1024. A preview pane pretty-prints the selected value.
+- **Opens big files at once.** 15 MB loads in about 20–40 ms. Files over the auto threshold
+  stream instead. dv indexes them from disk in the background, you can browse after ~50 ms,
+  and memory stays bounded (about 160 MB for a 10 GB file).
+- **Tree browsing.** Keys, indices and inline values show in a tree. Large arrays split into
+  buckets of 1024. A preview pane pretty-prints the selected value.
 - **Search and jump.** Incremental substring or regex search over keys and/or values, jq-style
-  path jumps (`.users[42].name`), and a fuzzy picker over the document's key paths. A jump
-  history, marks, and the last position per file.
+  path jumps (`.users[42].name`), and a fuzzy picker over the document's key paths. dv also
+  keeps a jump history, marks, and your last position in each file.
 - **Table and filter.** Any array of objects as a sortable table; filter records with
   expressions like `.age > 30 and has(.email)`.
 - **Follow.** `--follow` tails a growing NDJSON log.
-- **Robust.** A strict validating parser. Malformed NDJSON lines are isolated and shown inline.
-  Errors show the line and column in context. No `unsafe` code.
+- **Strict parsing.** The parser validates everything. A malformed NDJSON line shows inline
+  without breaking the lines around it, and errors point at the line and column. No `unsafe`
+  code.
 
 ## Build
 
@@ -44,11 +45,11 @@ dv --config ./my-config.toml big.json
 | `--config PATH` | Config file (default `$XDG_CONFIG_HOME/dv/config.toml` or `~/.config/dv/config.toml`) |
 | `--follow` | Follow a growing NDJSON file (implies streaming; not for stdin) |
 
-**Streaming mode** keeps an on-disk index in private temp files, which are unlinked the moment
-they're created. It opens immediately, shows `n…` counts for containers still being indexed,
+Streaming mode keeps an on-disk index in private temp files. dv unlinks each one the moment it
+creates it. It opens immediately, shows `n…` counts for containers still being indexed,
 and fills them in as it goes. If a parse error turns up partway, everything before it stays
-browsable and a banner shows the error. Piped input larger than the threshold is spooled to a
-temp file and streamed. YAML can't be streamed; convert it first (`yq -o=json`).
+browsable and a banner shows the error. Piped input over the threshold goes to a temp file
+first and streams from there. YAML can't be streamed; convert it first (`yq -o=json`).
 
 ## Keys
 
@@ -114,8 +115,8 @@ values show their size.
 
 ### Filter
 
-`f` filters the array (or object) at the cursor: only the matching elements stay listed, with
-their original indices, and everything else (browsing, search, the table) works on that view.
+`f` filters the array or object at the cursor. Only matching elements stay listed, with their
+original indices, and browsing, search and the table all work on that view.
 Matches arrive while the scan runs (`12 of 400,000 records (scanning 40%)`), and at most 1M
 are kept. `o` opens the match under the cursor in the full tree, `Esc` clears the filter, and
 `f` edits it.
@@ -151,11 +152,11 @@ stops with a note.
 | `?` | Help overlay with every key (`j`/`k` scroll, `?`/`Esc`/`q` close) |
 | `q` / `Ctrl-c` | Quit |
 
-Copying uses `pbcopy`, falling back to the OSC 52 terminal escape.
+Copying uses `pbcopy`. Without it, dv falls back to the OSC 52 terminal escape.
 
 ## Config
 
-`~/.config/dv/config.toml`; everything is optional:
+Lives at `~/.config/dv/config.toml`. Every setting is optional.
 
 ```toml
 theme = "dusk"
@@ -210,9 +211,11 @@ just suite DIR FILE # interactive streaming suite through tmux (needs a large FI
 nix develop .#fuzz  # then: just fuzz json|ndjson|yaml [secs]
 ```
 
-How it works:
-- **The index:** a *semi-index* (after Ottaviano & Grossi). Only containers of 64 bytes or more
-  get a node, with a checkpoint every 16 children; everything else is re-lexed on demand from
-  the raw bytes.
-- **Streaming:** a read-ahead thread feeds the parser. The on-disk index is built on its own
-  thread. NDJSON blocks are parsed on a worker pool and merged in order.
+### How it works
+
+The index is a *semi-index*, after Ottaviano & Grossi. Only containers of 64 bytes or more get
+a node, with a checkpoint every 16 children. Everything else gets re-lexed from the raw bytes
+when needed.
+
+When streaming, a read-ahead thread feeds the parser and a separate thread builds the on-disk
+index. NDJSON blocks parse on a worker pool and merge back in order.
