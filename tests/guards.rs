@@ -1,4 +1,4 @@
-//! Repository guards that keep NFR-5 (no unsafe) enforced at the source level.
+//! Repository guards that keep the no-unsafe rule enforced at the source level.
 
 use std::fs;
 
@@ -42,7 +42,7 @@ fn sources(dir: &str) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// NFR-13: production code creates temp files only through `temp::file` (tests may unwrap).
+/// Production code creates temp files only through `temp::file` (tests may unwrap).
 #[test]
 fn temp_files_come_from_one_place() {
     let offenders: Vec<String> = sources("src")
@@ -61,4 +61,32 @@ fn temp_files_come_from_one_place() {
         offenders.is_empty(),
         "create temp files with temp::file(): {offenders:?}"
     );
+}
+
+/// Planning IDs: a short capital prefix, a dash and a number, or a dotted task number.
+/// Names like `UTF-8` and `BSD-3-Clause` are not IDs.
+const PLANNING_ID: &str = r"\b[A-Z]{1,3}-[0-9]+\b|\bT[0-9]+\.[0-9]+\b|\bM[0-9]\b";
+const NOT_IDS: [&str; 4] = ["UTF-", "BSD-", "SHA-", "MD-"];
+
+/// Comments say why in plain words, not which planning document item asked for it.
+#[test]
+fn source_cites_no_planning_ids() {
+    let pattern = regex::Regex::new(PLANNING_ID).expect("valid pattern");
+    let offenders: Vec<String> = sources("src")
+        .into_iter()
+        .flat_map(|path| {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            text.lines()
+                .enumerate()
+                .flat_map(|(n, line)| {
+                    pattern
+                        .find_iter(line)
+                        .filter(|m| !NOT_IDS.iter().any(|p| m.as_str().starts_with(p)))
+                        .map(|m| format!("{}:{}: {}", path.display(), n + 1, m.as_str()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(offenders.is_empty(), "planning IDs in src: {offenders:#?}");
 }

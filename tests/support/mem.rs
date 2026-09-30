@@ -1,4 +1,4 @@
-//! Peak-heap measurement for memory-bound tests (NFR-3).
+//! Peak-heap measurement for memory-bound tests.
 //!
 //! The including test binary must declare
 //! `#[global_allocator] static ALLOC: dhat::Alloc = dhat::Alloc;`.

@@ -1,4 +1,4 @@
-//! Hardening (NFR-6): every parser over arbitrary bytes, never panicking, and agreeing with
+//! Hardening: every parser over arbitrary bytes, never panicking, and agreeing with
 //! its reference. Raise `PROPTEST_CASES` for long runs (`just fuzz-long`).
 
 use std::ops::ControlFlow;
