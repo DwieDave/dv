@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub enum PromptKind {
     Query,
     Search,
-    /// `f`: a filter expression (FI-3).
+    /// `f`: a filter expression.
     Filter,
 }
 

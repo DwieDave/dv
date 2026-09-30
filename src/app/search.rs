@@ -1,4 +1,4 @@
-//! Search jobs, run inline or on a worker thread that drops stale work (FR-15).
+//! Search jobs, run inline or on a worker thread that drops stale work.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,9 +31,9 @@ pub enum Work {
     Schema,
     /// Find the next or previous occurrence of a picked schema path.
     SchemaStep(picker::Target, Direction),
-    /// Order a table's rows by a column (TB-5).
+    /// Order a table's rows by a column.
     Sort(SortSpec),
-    /// Find the children of a container that match a filter (FI-3).
+    /// Find the children of a container that match a filter.
     Filter(FilterSpec),
 }
 
@@ -103,7 +103,7 @@ pub struct Job {
     pub root: RootItem,
     pub from: Option<u64>,
     pub work: Work,
-    /// The filter the job sees the tree through (FI-4).
+    /// The filter the job sees the tree through.
     pub filter: Option<Arc<FilterView>>,
 }
 

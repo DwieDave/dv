@@ -1,4 +1,4 @@
-//! Top-level screens: loading progress, the document, or a load failure (FR-7, FR-8).
+//! Top-level screens: loading progress, the document, or a load failure.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +40,7 @@ pub enum AppEvent<T> {
     Search(Outcome),
 }
 
-/// Whether the open file is followed as it grows (FO-4).
+/// Whether the open file is followed as it grows.
 #[derive(Debug, Default)]
 pub enum Follow {
     /// Not an NDJSON file opened from a path.
@@ -62,18 +62,18 @@ pub struct App<T> {
     /// The event channel; when set, searches run on a worker that reports here.
     pub events: Option<Sender<AppEvent<T>>>,
     pub quit: bool,
-    /// Colors from the config (FR-21).
+    /// Colors from the config.
     pub theme: Theme,
     /// Whether the document view shows the footer rows (`ui.footer`).
     pub footer: bool,
     /// A config problem, shown once the document opens.
     pub warning: Option<String>,
-    /// A remembered cursor to restore once its rows exist (HI-3).
+    /// A remembered cursor to restore once its rows exist.
     pub restore: Option<Vec<u64>>,
     pub follow: Follow,
-    /// Set with `quit` when the file should be reopened following (FO-4).
+    /// Set with `quit` when the file should be reopened following.
     pub reopen: bool,
-    /// The records on screen at the last refresh, to stick to the end (FO-3).
+    /// The records on screen at the last refresh, to stick to the end.
     tail: u64,
 }
 
@@ -219,7 +219,7 @@ fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T
 }
 
 /// Refreshes the view; while following, a cursor on the last record moves to the new last
-/// record (FO-3).
+/// record.
 fn refresh<T: TreeIndex>(model: &mut Model<T>, tail: &mut u64) {
     let last = |n: u64| bucket_rows(n, n.saturating_sub(1));
     let on_last = model.following && *tail > 0 && model.state.cursor == last(*tail);
@@ -251,7 +251,7 @@ fn unfollow<T>(model: &mut Model<T>, follow: &mut Follow) {
     model.following = false;
 }
 
-/// `F`: stops following, or asks for a reopen (returns `true`) when it can start (FO-4).
+/// `F`: stops following, or asks for a reopen (returns `true`) when it can start.
 fn toggle_follow<T>(model: &mut Model<T>, follow: &mut Follow) -> bool {
     match follow {
         Follow::Off => model.note = Some("follow works on NDJSON files".to_owned()),

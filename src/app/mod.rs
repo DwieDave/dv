@@ -1,4 +1,4 @@
-//! The Elm-style application core: model, messages, update and view (D-8).
+//! The Elm-style application core: model, messages, update and view.
 
 pub mod filter;
 pub mod keymap;
@@ -73,9 +73,9 @@ pub struct Model<T> {
     pub search: Option<SearchState>,
     /// The fuzzy schema-path picker, when open.
     pub picker: Option<Picker>,
-    /// The table view, while open (TB-1).
+    /// The table view, while open.
     pub table: Option<TableState>,
-    /// The active filter's matches (FI-4); everything reads the tree through it.
+    /// The active filter's matches; everything reads the tree through it.
     pub filter: Option<Arc<FilterView>>,
     /// The active filter's expression and progress.
     pub filtering: Option<filter::FilterState>,
@@ -85,17 +85,17 @@ pub struct Model<T> {
     pub last_find: LastFind,
     /// Transient information for the status bar; the next key clears it.
     pub note: Option<String>,
-    /// A failure that stopped background indexing; stays until quit (FR-27).
+    /// A failure that stopped background indexing; stays until quit.
     pub banner: Option<String>,
-    /// Show the rule and key-hint rows under the tree (KF-1, `[ui] footer`).
+    /// Show the rule and key-hint rows under the tree (`[ui] footer`).
     pub footer: bool,
-    /// New lines of the file are being indexed as they arrive (FO-6).
+    /// New lines of the file are being indexed as they arrive.
     pub following: bool,
     /// The help overlay's scroll offset, while it is open.
     pub help: Option<u16>,
-    /// Where jumps came from, for `Ctrl-o` / `Tab` (HI-1).
+    /// Where jumps came from, for `Ctrl-o` / `Tab`.
     pub jumps: JumpList,
-    /// Marks `a`–`z` (HI-2), for this session.
+    /// Marks `a`–`z`, for this session.
     pub marks: [Option<Place>; 26],
     /// Side effects for the app layer to perform (keeps `update` pure).
     pub effects: Vec<Effect>,
@@ -248,11 +248,11 @@ pub enum Msg {
     OpenPicker,
     /// The `?` overlay listing every key.
     OpenHelp,
-    /// `F`: start or stop following the file (FO-4).
+    /// `F`: start or stop following the file.
     ToggleFollow,
-    /// `t`: the table view of the array at the cursor (TB-1).
+    /// `t`: the table view of the array at the cursor.
     OpenTable,
-    /// `o`: leave the filter at the match under the cursor (FI-4).
+    /// `o`: leave the filter at the match under the cursor.
     FilterOpen,
     /// `Esc`: leave the filter.
     FilterClear,
@@ -353,7 +353,7 @@ pub enum CopyWhat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Copy(String),
-    /// Start or stop following; only the app knows how (FO-4).
+    /// Start or stop following; only the app knows how.
     ToggleFollow,
 }
 
@@ -370,7 +370,7 @@ pub enum PreviewCmd {
     SplitRight,
     ScrollDown,
     ScrollUp,
-    /// Word wrap on or off (WR-1).
+    /// Word wrap on or off.
     Wrap,
 }
 
@@ -384,7 +384,7 @@ pub struct PreviewState {
     pub scroll: u64,
     /// With wrap on: the first row of that line shown.
     pub row: u64,
-    /// Word wrap with value-aligned continuation rows (WR-1).
+    /// Word wrap with value-aligned continuation rows.
     pub wrap: bool,
     /// The cursor the scroll belongs to; a new cursor resets it.
     pub for_cursor: Vec<u64>,
@@ -596,7 +596,7 @@ fn preview_cmd(preview: &mut PreviewState, cmd: PreviewCmd, lines: u64) {
     }
 }
 
-/// A preview command; with wrap on, scrolling moves by screen rows (WR-5).
+/// A preview command; with wrap on, scrolling moves by screen rows.
 fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps: u64) {
     match cmd {
         PreviewCmd::ScrollDown | PreviewCmd::ScrollUp if model.preview.wrap => {
