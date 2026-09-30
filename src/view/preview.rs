@@ -1,4 +1,4 @@
-//! Pretty-printed preview of the selected item, produced lazily (FR-19).
+//! Pretty-printed preview of the selected item, produced lazily.
 
 use std::ops::Range;
 

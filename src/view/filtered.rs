@@ -1,4 +1,4 @@
-//! A tree seen through a filter: one container lists only its matching children (FI-4).
+//! A tree seen through a filter: one container lists only its matching children.
 
 use std::borrow::Cow;
 use std::ops::Range;

@@ -1,4 +1,4 @@
-//! Resolving path queries to rows and moving the cursor there (FR-16).
+//! Resolving path queries to rows and moving the cursor there.
 
 use thiserror::Error;
 
