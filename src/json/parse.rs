@@ -101,19 +101,12 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>> Parser<'a, H> {
         Self::with_builder(bytes, hook, VecStoreBuilder::default())
     }
 
-    fn run(mut self) -> Result<Parsed, ParseError> {
-        self.pos = skip_ws(self.bytes, 0);
-        let root = self.pos as u64;
-        self.value()?;
-        self.pos = skip_ws(self.bytes, self.pos);
-        if self.pos < self.bytes.len() {
-            return Err(fail(ParseErrorKind::TrailingData, self.pos));
-        }
-        self.final_report();
+    fn run(self) -> Result<Parsed, ParseError> {
+        let (root, builder, values) = self.run_with()?;
         Ok(Parsed {
             root,
-            store: self.builder.finish(),
-            values: self.values,
+            store: builder.finish(),
+            values,
         })
     }
 }
@@ -182,7 +175,6 @@ impl<'a, H: FnMut(u64) -> ControlFlow<()>, B: Builder> Parser<'a, H, B> {
     }
 
     /// Parses a whole document; returns the root offset, the builder and the value count.
-    #[cfg(test)]
     pub(crate) fn run_with(mut self) -> Result<(u64, B, u64), ParseError> {
         self.pos = skip_ws(self.bytes, 0);
         let root = self.pos as u64;

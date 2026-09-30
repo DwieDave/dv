@@ -24,6 +24,12 @@ pub enum IndexError {
     Parse(#[from] ParseError),
 }
 
+/// Converts an offset to `u32`, saturating; offsets fit once `ensure_addressable` passed.
+#[must_use]
+pub fn to_u32(offset: impl TryInto<u32>) -> u32 {
+    offset.try_into().unwrap_or(u32::MAX)
+}
+
 /// Converts an offset to `usize`, saturating (lossless on 64-bit targets).
 #[must_use]
 pub fn to_usize(offset: u64) -> usize {

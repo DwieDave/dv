@@ -6,7 +6,7 @@ use crate::error::{ParseError, ParseErrorKind};
 use crate::index::IndexError;
 use crate::index::children::{Child, skip_value};
 use crate::index::store::{Builder, CHECKPOINT_EVERY, NodeStore, VecStore};
-use crate::index::to_usize;
+use crate::index::{to_u32, to_usize};
 use crate::json::lex::{Kind, fail, skip_ws};
 use crate::json::parse::{Parser, ensure_addressable};
 
@@ -58,7 +58,7 @@ impl LineIndex {
 
     fn record_start(&mut self, start: usize) {
         if self.count.is_multiple_of(CHECKPOINT_EVERY) {
-            self.checkpoints.push(offset32(start));
+            self.checkpoints.push(to_u32(start));
         }
         self.count += 1;
     }
@@ -185,7 +185,7 @@ impl LineSink for LineIndex {
     }
 
     fn bad(&mut self, start: usize, resume: usize, kind: ParseErrorKind) {
-        let (start, resume) = (offset32(start), offset32(resume));
+        let (start, resume) = (to_u32(start), to_u32(resume));
         self.bad.push(BadRecord {
             start,
             resume,
@@ -270,11 +270,6 @@ fn record<H: FnMut(u64) -> ControlFlow<()>, B: Builder>(
 /// The offset after the first newline at or after `at` (or the end).
 fn resume_after(bytes: &[u8], at: usize) -> usize {
     memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |i| at + i + 1)
-}
-
-#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
-fn offset32(pos: usize) -> u32 {
-    pos as u32
 }
 
 #[cfg(test)]

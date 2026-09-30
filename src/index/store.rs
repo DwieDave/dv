@@ -1,6 +1,6 @@
 //! Storage for big-container spans and their child checkpoints.
 
-use crate::index::to_usize;
+use crate::index::{to_u32, to_usize};
 use crate::source::SourceError;
 
 /// Containers shorter than this are re-lexed instead of indexed.
@@ -99,15 +99,15 @@ impl Builder for VecStoreBuilder {
     type Mark = Mark;
 
     fn open(&mut self, start: u64) -> Slot {
-        VecStoreBuilder::open(self, offset32_u64(start))
+        VecStoreBuilder::open(self, to_u32(start))
     }
 
     fn add_child(&mut self, slot: &Slot, offset: u64) {
-        VecStoreBuilder::add_child(self, slot, offset32_u64(offset));
+        VecStoreBuilder::add_child(self, slot, to_u32(offset));
     }
 
     fn close(&mut self, slot: Slot, end: u64) {
-        VecStoreBuilder::close(self, slot, offset32_u64(end));
+        VecStoreBuilder::close(self, slot, to_u32(end));
     }
 
     fn mark(&mut self) -> Mark {
@@ -117,12 +117,6 @@ impl Builder for VecStoreBuilder {
     fn rollback(&mut self, mark: Mark) {
         VecStoreBuilder::rollback(self, mark);
     }
-}
-
-/// In-memory offsets fit in u32 once `ensure_addressable` passed.
-#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
-fn offset32_u64(offset: u64) -> u32 {
-    offset as u32
 }
 
 /// Builder lengths captured by [`VecStoreBuilder::mark`].
@@ -149,7 +143,7 @@ impl VecStoreBuilder {
     /// Reserves a span for the container opening at `start`.
     pub fn open(&mut self, start: u32) -> Slot {
         self.spans.push(Span32 { start, len: 0 });
-        Slot(offset32(self.spans.len() - 1))
+        Slot(to_u32(self.spans.len() - 1))
     }
 
     /// Offset of the opening bracket of `slot`.
@@ -184,7 +178,7 @@ impl VecStoreBuilder {
     }
 
     fn record_fanout(&mut self, node: u32, count: u32, run: usize) {
-        let first = offset32(self.checkpoints.len());
+        let first = to_u32(self.checkpoints.len());
         self.rows.push(FanoutRow { node, count, first });
         self.checkpoints.extend_from_slice(&self.open_cps[run..]);
     }
@@ -218,12 +212,6 @@ impl VecStoreBuilder {
             checkpoints: self.checkpoints,
         }
     }
-}
-
-/// Store indices and offsets fit in u32 because inputs do.
-#[allow(clippy::cast_possible_truncation)] // guarded by ensure_addressable
-fn offset32(n: usize) -> u32 {
-    n as u32
 }
 
 /// In-memory node store with u32 offsets.

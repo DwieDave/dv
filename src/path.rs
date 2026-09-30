@@ -6,11 +6,13 @@ use crate::json::lex::{scan_string, skip_ws};
 use crate::json::text::{quote_into, unescape};
 use crate::tree::TreeIndex;
 
-/// One step from a container to a child.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One step from a container to a child, shared by filters, paths and schemas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Segment {
     Key(String),
     Index(u64),
+    /// Any array element; schema paths render it as `[]`.
+    Items,
 }
 
 impl Segment {
@@ -37,16 +39,30 @@ pub fn render(segments: &[Segment]) -> String {
     }
 }
 
+/// Whether `byte` can start an identifier key.
+pub(crate) fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+/// The length of the identifier at the start of `bytes` (0 when there is none).
+pub(crate) fn ident_len(bytes: &[u8]) -> usize {
+    match bytes.first() {
+        Some(&b) if is_ident_start(b) => {
+            1 + bytes[1..]
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+                .count()
+        }
+        _ => 0,
+    }
+}
+
 fn is_identifier(key: &str) -> bool {
-    let mut chars = key.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !key.is_empty() && ident_len(key.as_bytes()) == key.len()
 }
 
 /// A JSON string literal for `key`.
-fn quote(key: &str) -> String {
+pub(crate) fn quote(key: &str) -> String {
     let mut out = Vec::with_capacity(key.len() + 2);
     quote_into(&mut out, key);
     String::from_utf8(out).unwrap_or_default()
@@ -111,7 +127,7 @@ impl PathParser<'_> {
                 match self.peek() {
                     Some(b'[') => self.bracket(),
                     Some(b'"') => self.quoted_key().map(Step::Key),
-                    Some(c) if c.is_ascii_alphabetic() || c == b'_' => Ok(Step::Key(self.ident())),
+                    Some(c) if is_ident_start(c) => Ok(Step::Key(self.ident())),
                     _ => Err(self.error("expected a key or `[` after `.`")),
                 }
             }
@@ -183,10 +199,7 @@ impl PathParser<'_> {
     }
 
     fn ident(&mut self) -> String {
-        let len = self.bytes[self.pos..]
-            .iter()
-            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
-            .count();
+        let len = ident_len(&self.bytes[self.pos..]);
         let ident = String::from_utf8_lossy(&self.bytes[self.pos..self.pos + len]).into_owned();
         self.pos += len;
         ident
@@ -219,6 +232,7 @@ impl PathParser<'_> {
 fn fragment(segment: &Segment) -> String {
     match segment {
         Segment::Index(i) => format!("[{i}]"),
+        Segment::Items => "[]".to_owned(),
         Segment::Key(k) if is_identifier(k) => format!(".{k}"),
         Segment::Key(k) => format!(".{}", quote(k)),
     }

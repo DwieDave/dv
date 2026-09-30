@@ -14,7 +14,10 @@ fn key() -> impl Strategy<Value = String> {
 }
 
 fn path() -> impl Strategy<Value = Path> {
-    let step = prop_oneof![key().prop_map(Step::Key), (0u64..5).prop_map(Step::Index)];
+    let step = prop_oneof![
+        key().prop_map(Segment::Key),
+        (0u64..5).prop_map(Segment::Index)
+    ];
     prop::collection::vec(step, 0..4).prop_map(Path)
 }
 
@@ -95,8 +98,8 @@ fn precedence_and_grouping() {
 
 fn lookup<'v>(value: &'v Value, path: &Path) -> Option<&'v Value> {
     path.0.iter().try_fold(value, |v, step| match (step, v) {
-        (Step::Key(k), Value::Object(map)) => map.get(k),
-        (Step::Index(i), Value::Array(items)) => items.get(usize::try_from(*i).ok()?),
+        (Segment::Key(k), Value::Object(map)) => map.get(k),
+        (Segment::Index(i), Value::Array(items)) => items.get(usize::try_from(*i).ok()?),
         _ => None,
     })
 }

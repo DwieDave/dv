@@ -11,7 +11,7 @@ use crate::index::lines::{Kids, LineStore, Lines, checkpoint_index, kids};
 use crate::index::store::{Fanout, NodeStore};
 use crate::index::window::value_end;
 use crate::source::Source;
-use crate::stream_core::{DEFAULT_WINDOW, StreamCore, children, is_container};
+use crate::stream_core::{DEFAULT_WINDOW, StreamCore, children};
 use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 
 /// A document indexed without being held in memory.
@@ -126,7 +126,7 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(Count::Known(0));
         }
         if let Some(lines) = self.core.lines_of(node) {
@@ -145,7 +145,7 @@ impl<R: Source, S: NodeStore> TreeIndex for StreamTree<R, S> {
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(None);
         }
         let first = checkpoint_index(&self.store, self.core.lines_of(node), node, offset)?;

@@ -11,7 +11,7 @@ use crate::index::lines::{Kids, Lines, LiveLines, checkpoint_index, kids};
 use crate::index::live::{LiveStore, NodeState};
 use crate::index::window::value_end;
 use crate::source::{Source, SourceError};
-use crate::stream_core::{StreamCore, children, is_container};
+use crate::stream_core::{StreamCore, children};
 use crate::tree::{Count, LINES_ROOT, NodeRef, Stats, TreeIndex, containing};
 
 /// A source that ends at `cap` (the indexing frontier).
@@ -111,7 +111,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn child_count(&self, node: NodeRef) -> Result<Count, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(Count::Known(0));
         }
         if let Some(lines) = self.core.lines_of(node) {
@@ -144,7 +144,7 @@ impl<R: Source> TreeIndex for LiveTree<R> {
     }
 
     fn child_containing(&self, node: NodeRef, offset: u64) -> Result<Option<Child>, IndexError> {
-        if !is_container(node) {
+        if !node.kind.is_container() {
             return Ok(None);
         }
         let first = checkpoint_index(&self.store, self.core.lines_of(node), node, offset)?;

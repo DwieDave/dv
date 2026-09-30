@@ -10,6 +10,7 @@ use crate::index::children::Child;
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::json::text::{quote_into, unescape};
+use crate::path::{Segment, render};
 use crate::pulse::Pulse;
 use crate::tree::{NodeRef, TreeIndex};
 
@@ -29,13 +30,7 @@ pub enum Expr {
 
 /// A path relative to the child: `.` is the child itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Path(pub Vec<Step>);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Step {
-    Key(String),
-    Index(u64),
-}
+pub struct Path(pub Vec<Segment>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -148,28 +143,8 @@ impl fmt::Display for Expr {
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_empty() {
-            return write!(f, ".");
-        }
-        for (i, step) in self.0.iter().enumerate() {
-            match step {
-                Step::Key(key) if is_bare(key) => write!(f, ".{key}")?,
-                Step::Key(key) => write!(f, ".{}", quoted(key))?,
-                Step::Index(n) if i == 0 => write!(f, ".[{n}]")?,
-                Step::Index(n) => write!(f, "[{n}]")?,
-            }
-        }
-        Ok(())
+        f.write_str(&render(&self.0))
     }
-}
-
-/// Keys that need no quotes: an identifier.
-fn is_bare(key: &str) -> bool {
-    let mut bytes = key.bytes();
-    bytes
-        .next()
-        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 impl fmt::Display for Op {
@@ -254,14 +229,14 @@ fn resolve<T: TreeIndex + ?Sized>(
 fn step_into<T: TreeIndex + ?Sized>(
     tree: &T,
     at: &Child,
-    step: &Step,
+    step: &Segment,
 ) -> Result<Option<Child>, IndexError> {
     match (step, at.kind) {
-        (Step::Index(i), Kind::Array) => Ok(tree
+        (Segment::Index(i), Kind::Array) => Ok(tree
             .children(at.node(), *i..i.saturating_add(1))?
             .into_iter()
             .next()),
-        (Step::Key(key), Kind::Object) => member(tree, at, key),
+        (Segment::Key(key), Kind::Object) => member(tree, at, key),
         _ => Ok(None),
     }
 }

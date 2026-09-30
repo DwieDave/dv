@@ -3,11 +3,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::ControlFlow;
 
-use crate::index::IndexError;
 use crate::index::children::Child;
-use crate::json::lex::Kind;
+use crate::index::{IndexError, to_u32};
 use crate::json::text::unescape;
-use crate::path::{Segment, render as render_path};
+use crate::path::Segment;
 use crate::pulse::Pulse;
 use crate::search::Direction;
 use crate::tree::{NodeRef, TreeIndex};
@@ -26,7 +25,7 @@ pub const PARTIAL_EVERY: u64 = 100_000;
 /// Collected schema paths; `truncated` when a cap stopped the walk early.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Collected {
-    pub paths: Vec<Vec<Seg>>,
+    pub paths: Vec<Vec<Segment>>,
     pub truncated: bool,
 }
 
@@ -46,13 +45,6 @@ impl Default for Caps {
             partial_every: PARTIAL_EVERY,
         }
     }
-}
-
-/// One schema step: a named member, or any array element.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Seg {
-    Key(String),
-    Items,
 }
 
 /// Children fetched per step of a walk.
@@ -95,7 +87,7 @@ pub(crate) fn collect_within(
         if visits.is_multiple_of(caps.partial_every.max(1)) {
             pulse.schema(seen.collected(false));
         }
-        if is_container(child.node()) {
+        if child.node().kind.is_container() {
             if stack.len() < MAX_DEPTH {
                 stack.push(Frame::new(tree, child.node(), id)?);
             } else {
@@ -117,7 +109,7 @@ struct Frame {
 
 impl Frame {
     fn new(tree: &impl TreeIndex, node: NodeRef, id: u32) -> Result<Self, IndexError> {
-        let count = if is_container(node) {
+        let count = if node.kind.is_container() {
             child_total(tree, node)?
         } else {
             0
@@ -145,14 +137,14 @@ impl Frame {
 /// Unique schema nodes; id 0 is the root.
 #[derive(Default)]
 struct Trie {
-    nodes: Vec<(u32, Seg)>,
-    ids: HashMap<(u32, Seg), u32>,
+    nodes: Vec<(u32, Segment)>,
+    ids: HashMap<(u32, Segment), u32>,
 }
 
 impl Trie {
     /// The id of `parent` + `seg`, adding it when new.
-    fn insert(&mut self, parent: u32, seg: Seg) -> u32 {
-        let next = offset32(self.nodes.len() + 1);
+    fn insert(&mut self, parent: u32, seg: Segment) -> u32 {
+        let next = to_u32(self.nodes.len() + 1);
         *self.ids.entry((parent, seg.clone())).or_insert_with(|| {
             self.nodes.push((parent, seg));
             next
@@ -165,12 +157,12 @@ impl Trie {
 
     fn collected(&self, truncated: bool) -> Collected {
         let paths = (1..=self.nodes.len())
-            .map(|id| self.path(offset32(id)))
+            .map(|id| self.path(to_u32(id)))
             .collect();
         Collected { paths, truncated }
     }
 
-    fn path(&self, mut id: u32) -> Vec<Seg> {
+    fn path(&self, mut id: u32) -> Vec<Segment> {
         let mut segs = Vec::new();
         while id > 0 {
             let (parent, seg) = &self.nodes[id as usize - 1];
@@ -182,32 +174,11 @@ impl Trie {
     }
 }
 
-fn seg_of(tree: &impl TreeIndex, child: &Child) -> Result<Seg, IndexError> {
+fn seg_of(tree: &impl TreeIndex, child: &Child) -> Result<Segment, IndexError> {
     Ok(match &child.key {
-        Some(span) => Seg::Key(unescape(&tree.bytes(span.clone())?).into_owned()),
-        None => Seg::Items,
+        Some(span) => Segment::Key(unescape(&tree.bytes(span.clone())?).into_owned()),
+        None => Segment::Items,
     })
-}
-
-fn is_container(node: NodeRef) -> bool {
-    matches!(node.kind, Kind::Object | Kind::Array)
-}
-
-/// Renders a schema path jq-style; `[]` stands for any index.
-#[must_use]
-pub fn render(segs: &[Seg]) -> String {
-    let joined: String = segs
-        .iter()
-        .map(|seg| match seg {
-            Seg::Key(key) => render_path(&[Segment::Key(key.clone())]),
-            Seg::Items => "[]".to_owned(),
-        })
-        .collect();
-    if joined.is_empty() || joined.starts_with('[') {
-        format!(".{joined}")
-    } else {
-        joined
-    }
 }
 
 /// The row path of the next occurrence of `segs` after `after` (or the previous one before it),
@@ -218,7 +189,7 @@ pub fn render(segs: &[Seg]) -> String {
 pub fn find(
     tree: &impl TreeIndex,
     root: &RootItem,
-    segs: &[Seg],
+    segs: &[Segment],
     after: Option<u64>,
     direction: Direction,
 ) -> Result<Option<Vec<u64>>, IndexError> {
@@ -258,7 +229,7 @@ fn occurrences(
     tree: &impl TreeIndex,
     node: NodeRef,
     start: u64,
-    segs: &[Seg],
+    segs: &[Segment],
     rows: &mut Vec<u64>,
     visit: &mut dyn FnMut(u64, &[u64]) -> ControlFlow<()>,
 ) -> Result<ControlFlow<()>, IndexError> {
@@ -279,11 +250,6 @@ fn occurrences(
         }
     }
     Ok(ControlFlow::Continue(()))
-}
-
-#[allow(clippy::cast_possible_truncation)] // bounded by MAX_ENTRIES
-fn offset32(n: usize) -> u32 {
-    n as u32
 }
 
 #[cfg(test)]

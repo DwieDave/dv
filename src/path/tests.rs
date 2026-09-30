@@ -68,6 +68,7 @@ fn as_step(segment: &Segment) -> Step {
     match segment {
         Segment::Key(k) => Step::Key(k.clone()),
         Segment::Index(i) => Step::Index(i64::try_from(*i).unwrap()),
+        Segment::Items => Step::Slice(None, None),
     }
 }
 
@@ -76,7 +77,7 @@ proptest! {
     fn parsing_inverts_rendering(segments in proptest::collection::vec(segment(), 0..6)) {
         let segments: Vec<Segment> = segments.into_iter().map(|s| match s {
             Segment::Index(i) => Segment::Index(i % (1 << 40)),
-            Segment::Key(k) => Segment::Key(k),
+            other => other,
         }).collect();
         let steps: Vec<Step> = segments.iter().map(as_step).collect();
         prop_assert_eq!(parse(&render(&segments)), Ok(steps));

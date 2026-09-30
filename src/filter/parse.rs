@@ -1,8 +1,9 @@
 //! Lexing and recursive-descent parsing of filter expressions.
 
-use super::{Expr, FilterError, Literal, Op, Path, Pattern, Step};
+use super::{Expr, FilterError, Literal, Op, Path, Pattern};
 use crate::json::lex::hex4;
 use crate::json::text::unescape;
+use crate::path::{Segment, ident_len, is_ident_start};
 
 /// The deepest an expression may nest, so evaluating, printing and dropping it stay on the stack.
 pub const MAX_NESTING: usize = 256;
@@ -85,17 +86,14 @@ fn token(text: &str, pos: usize, c: char) -> Result<(Token, usize), FilterError>
         ('>', _) => single(Token::Op(Op::Gt)),
         ('"', _) => string(text, pos),
         ('-' | '0'..='9', _) => number(text, pos),
-        (c, _) if c.is_ascii_alphabetic() || c == '_' => Ok(word(text, pos)),
+        (c, _) if c.is_ascii() && is_ident_start(c as u8) => Ok(word(text, pos)),
         ('=' | '!', _) => Err(error(text, "expected `==` or `!=`", pos)),
         _ => Err(error(text, "unexpected character", pos)),
     }
 }
 
 fn word(text: &str, pos: usize) -> (Token, usize) {
-    let len = text[pos..]
-        .bytes()
-        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
-        .count();
+    let len = ident_len(&text.as_bytes()[pos..]);
     (Token::Word(text[pos..pos + len].to_owned()), pos + len)
 }
 
@@ -141,7 +139,7 @@ fn escape_len(bytes: &[u8], i: usize) -> Option<usize> {
 
 /// What comes next in a path.
 enum Next {
-    Step(Step),
+    Step(Segment),
     /// A `.` with no key after it (the value itself, or before `[n]`).
     Dot,
     End,
@@ -291,7 +289,7 @@ impl Parser<'_> {
             return Ok(match self.peek().cloned() {
                 Some(Token::Word(key) | Token::Str(key)) => {
                     self.at += 1;
-                    Next::Step(Step::Key(key))
+                    Next::Step(Segment::Key(key))
                 }
                 _ => Next::Dot,
             });
@@ -308,7 +306,7 @@ impl Parser<'_> {
         };
         self.at += 1;
         self.expect(&Token::RBracket, "expected `]`")?;
-        Ok(Next::Step(Step::Index(index)))
+        Ok(Next::Step(Segment::Index(index)))
     }
 
     fn literal(&mut self) -> Result<Literal, FilterError> {

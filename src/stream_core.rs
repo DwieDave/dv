@@ -15,12 +15,6 @@ use crate::tree::{LINES_ROOT, NodeRef};
 /// Initial window size for lexing reads.
 pub const DEFAULT_WINDOW: usize = 64 << 10;
 
-/// Whether `node` has children.
-#[must_use]
-pub fn is_container(node: NodeRef) -> bool {
-    matches!(node.kind, Kind::Object | Kind::Array)
-}
-
 /// The parts of a streaming tree that do not depend on how far indexing has come.
 #[derive(Debug)]
 pub struct StreamCore<L> {
@@ -114,7 +108,7 @@ pub fn children<I>(
 where
     I: Iterator<Item = Result<Child, IndexError>>,
 {
-    if !is_container(node) || range.is_empty() {
+    if !node.kind.is_container() || range.is_empty() {
         return Ok(Vec::new());
     }
     kids(range.start)?
