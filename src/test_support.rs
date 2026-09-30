@@ -151,14 +151,21 @@ pub fn ndjson() -> impl Strategy<Value = Vec<u8>> {
         json_value(),
         prop::sample::select(vec!["", " ", " \n", "\t\r"]),
     );
-    let records = prop::collection::vec((record, any::<bool>()), 0..6);
+    let cut = prop::option::of(any::<prop::sample::Index>());
+    let records = prop::collection::vec(((record, any::<bool>()), cut), 0..6);
     let noise = prop::sample::select(b"\n\xff\xe2{}[]\",: 1e-tn\r".to_vec());
     let inserts = prop::collection::vec((any::<prop::sample::Index>(), noise), 0..4);
     (records, inserts, any::<bool>()).prop_map(|(records, inserts, final_newline)| {
         let lines: Vec<String> = records
             .iter()
-            .map(|((value, ws), blank)| {
-                let (text, _) = layout(value, ws);
+            .map(|(((value, ws), blank), cut)| {
+                let (mut text, _) = layout(value, ws);
+                if let Some(at) = cut {
+                    let end = (0..=at.index(text.len()))
+                        .rev()
+                        .find(|&i| text.is_char_boundary(i));
+                    text.truncate(end.unwrap_or(0));
+                }
                 if *blank { format!("{text}\n") } else { text }
             })
             .collect();

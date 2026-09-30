@@ -151,7 +151,9 @@ pub struct ParsedLines {
     pub lines: LineIndex,
 }
 
-/// Parses every line; malformed records are recorded, not fatal.
+/// Parses every record; malformed ones are recorded, not fatal. A record may span lines, but a
+/// malformed one covers only its first line: parsing resumes after the first newline past its
+/// start, so a truncated record never swallows the complete lines after it.
 ///
 /// # Errors
 /// Size limits, or `Cancelled` when `hook` breaks.
@@ -224,7 +226,7 @@ pub(crate) fn parse_block<H: FnMut(u64) -> ControlFlow<()>, B: Builder>(
                 parser.builder.rollback(mark);
                 parser.abandon();
                 parser.values = values + 1;
-                parser.pos = resume_after(bytes, err.offset);
+                parser.pos = resume_after(bytes, start);
                 sink.bad(start, parser.pos, err.kind);
             }
             Ok(()) => {}
@@ -265,9 +267,8 @@ fn record<H: FnMut(u64) -> ControlFlow<()>, B: Builder>(
     Ok(())
 }
 
-/// The offset after the first newline at or after `offset` (or the end).
-fn resume_after(bytes: &[u8], offset: u64) -> usize {
-    let at = to_usize(offset).min(bytes.len());
+/// The offset after the first newline at or after `at` (or the end).
+fn resume_after(bytes: &[u8], at: usize) -> usize {
     memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |i| at + i + 1)
 }
 
@@ -317,6 +318,16 @@ mod tests {
             Some(ParseErrorKind::TrailingData)
         );
         assert_eq!(parsed.lines.bad_at(0), None);
+    }
+
+    #[test]
+    fn a_truncated_record_does_not_swallow_the_next_line() {
+        let parsed = parse(b"{\"a\":1\n{\"b\":2}\n{\"c\":3}\n");
+        assert_eq!(parsed.lines.count(), 3);
+        assert_eq!(
+            bad(&parsed.lines),
+            vec![(0, 7, ParseErrorKind::UnexpectedByte(b'{'))]
+        );
     }
 
     #[test]
