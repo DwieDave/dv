@@ -1,4 +1,4 @@
-//! Single-pass validating JSON parser that builds the semi-index (D-2, D-3).
+//! Single-pass validating JSON parser that builds the semi-index.
 
 use std::ops::ControlFlow;
 
@@ -15,7 +15,7 @@ pub struct Parsed {
     pub values: u64,
 }
 
-/// Rejects inputs whose offsets do not fit the in-memory u32 index (NFR-8).
+/// Rejects inputs whose offsets do not fit the in-memory u32 index.
 ///
 /// # Errors
 /// `TooLarge` when `len` exceeds `u32::MAX`.
