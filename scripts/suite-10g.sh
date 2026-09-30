@@ -50,10 +50,15 @@ indexed() { screen | tail -1 | grep -Eq '[0-9] values'; }
 
 trap 'tmux kill-session -t "$session" 2>/dev/null || true' EXIT
 start=$(now)
-tmux new-session -d -s "$session" -x 120 -y 40 "$dv --mode $mode '$file'"
+# `%q` escapes each word for the shell tmux runs the command in
+command=$(printf '%q --mode %q %q' "$dv" "$mode" "$file")
+tmux new-session -d -s "$session" -x 120 -y 40 "$command"
 wait_for 120000 "the first screen" has_tree
 echo "first screen: $(($(now) - start)) ms"
-pid=$(pgrep -n -f "$dv --mode $mode")
+# The pane's process is dv itself when the shell execs it, otherwise the shell's only child.
+pane=$(tmux display-message -p -t "$session" '#{pane_pid}')
+pid=$(pgrep -P "$pane" | head -1 || true)
+pid=${pid:-$pane}
 echo "expand root while indexing: $(latency l), RSS $(rss) MB"
 wait_for 1800000 "indexing to finish" indexed
 echo "indexing done: $(($(now) - start)) ms, RSS $(rss) MB"
@@ -62,8 +67,9 @@ samples=()
 for keys in G l G l G gg G PageUp PageUp gg; do
     # shellcheck disable=SC2086 # `gg` is sent as two keys
     took=$(latency $(echo "$keys" | sed 's/^gg$/g g/'))
-    samples+=("$(rss)")
-    echo "  $keys: ${took}, RSS ${samples[-1]} MB"
+    sample=$(rss)
+    samples+=("$sample")
+    echo "  $keys: ${took}, RSS $sample MB"
 done
 printf 'RSS while browsing: min %s MB, max %s MB\n' \
     "$(printf '%s\n' "${samples[@]}" | sort -n | head -1)" \

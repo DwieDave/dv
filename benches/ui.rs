@@ -58,7 +58,7 @@ fn nav_bench(c: &mut Criterion, name: &str, tree: &MemTree, state: &TreeState, n
 fn ui(c: &mut Criterion) {
     let Some((tree, top)) = open() else {
         eprintln!("missing {FIXTURE}: run `just data`");
-        return;
+        std::process::exit(1);
     };
     let deep = deep_state(&tree, &top);
     let Ok(mut terminal) = Terminal::new(TestBackend::new(200, 60));

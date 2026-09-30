@@ -151,8 +151,9 @@ fn streaming_never_leaves_names_in_the_temp_dir() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"[1, 2, ").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Far more than a pipe holds: `write_all` returns only once the child has read most of it.
+    let open_array = [b"[1, 2, ".as_slice(), &b"3, ".repeat(1 << 20)].concat();
+    stdin.write_all(&open_array).unwrap();
     let during = std::fs::read_dir(dir.path()).unwrap().count();
     drop(stdin);
     child.kill().unwrap();

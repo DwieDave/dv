@@ -105,7 +105,7 @@ mod tests {
         use crate::load::{LoadEvent, StreamBudget, load_stream};
         let text = br#"{"a": [1, 2, 3]}"#;
         assert!(!Document::Mem(MemTree::parse(MemSource::new(text.to_vec())).unwrap()).streamed());
-        let mut file = tempfile::tempfile().unwrap();
+        let mut file = crate::temp::file().unwrap();
         file.write_all(text).unwrap();
         let mut docs = Vec::new();
         let sink = &mut |e| {
