@@ -258,7 +258,8 @@ pub fn load_stream(
 ) {
     let result = match format {
         Format::Ndjson => stream_lines(file, sink, cancel, budget, None),
-        Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
+        Format::Json => stream_json(file, sink, cancel, budget),
+        Format::Yaml => Err(plain(ModeError::YamlTooLarge)),
     };
     report(result, sink);
 }
@@ -718,6 +719,25 @@ mod tests {
             panic!("expected failure")
         };
         assert!(failure.snippet.is_some(), "{failure:?}");
+    }
+
+    #[test]
+    fn streaming_yaml_is_refused_not_parsed_as_json() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"{\"a\": 1}\n").unwrap();
+        let mut seen = Vec::new();
+        load_stream(
+            &file,
+            Format::Yaml,
+            &mut |e| seen.push(e),
+            &AtomicBool::new(false),
+            StreamBudget::testing(),
+        );
+        let Some(LoadEvent::Loaded(Err(failure))) = seen.last() else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(failure.message, ModeError::YamlTooLarge.to_string());
     }
 
     #[test]
