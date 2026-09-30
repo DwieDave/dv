@@ -1,4 +1,4 @@
-//! Styles per syntax token (FR-21 makes them configurable).
+//! Styles per syntax token, configurable from the config.
 
 use ratatui::style::{Color, Style};
 

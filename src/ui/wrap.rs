@@ -1,5 +1,5 @@
 //! Word wrap for preview lines: breaks after spaces or commas, continuation rows aligned with
-//! the value, colors kept (WR-2, WR-3, WR-4).
+//! the value, colors kept.
 
 use std::ops::Range;
 

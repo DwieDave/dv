@@ -1,4 +1,4 @@
-//! The load-failure screen: message, source context, caret (FR-7).
+//! The load-failure screen: message, source context, caret.
 
 use ratatui::text::{Line, Span};
 

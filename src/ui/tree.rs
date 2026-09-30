@@ -1,4 +1,4 @@
-//! The virtualized tree widget: resolves and draws only the visible rows (FR-9, FR-12).
+//! The virtualized tree widget: resolves and draws only the visible rows.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -84,7 +84,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
     }
 
     /// The gutter column, then a guide per nesting level: dim, except the level of the
-    /// cursor's container on the rows inside it (TA-2, TA-3).
+    /// cursor's container on the rows inside it.
     fn indent(&self, path: &[u64]) -> Vec<Span<'static>> {
         let cursor = &self.state.cursor;
         let lit = cursor

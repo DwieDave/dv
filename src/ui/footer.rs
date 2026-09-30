@@ -1,4 +1,4 @@
-//! The key-hint row at the bottom of the screen, lazygit-style (KF-2, KF-3, KF-5).
+//! The key-hint row at the bottom of the screen, lazygit-style.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};

@@ -1,4 +1,4 @@
-//! The table widget: a header, a rule, and one row per element (TB-2, TB-3, TB-4).
+//! The table widget: a header, a rule, and one row per element.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
