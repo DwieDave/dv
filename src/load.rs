@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -257,23 +257,27 @@ pub fn load_stream(
     budget: StreamBudget,
 ) {
     let result = match format {
-        Format::Ndjson => stream_lines(file, sink, cancel, budget, None),
+        Format::Ndjson => stream_lines(file, None, sink, cancel, budget, None),
         Format::Json | Format::Yaml => stream_json(file, sink, cancel, budget),
     };
     report(result, sink);
 }
 
 /// Streams an NDJSON `file` and keeps following it: appended lines are indexed as they arrive,
-/// until cancelled or the file shrinks (FO-2, FO-5). Setting `stop` ends following and
-/// finishes the index normally (FO-4).
+/// until cancelled or the file shrinks or is replaced at `path` (FO-2, FO-5). Setting `stop`
+/// ends following and finishes the index normally (FO-4).
 pub fn load_follow(
     file: &File,
+    path: &Path,
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
     stop: Arc<AtomicBool>,
 ) {
-    report(stream_lines(file, sink, cancel, budget, Some(stop)), sink);
+    report(
+        stream_lines(file, Some(path), sink, cancel, budget, Some(stop)),
+        sink,
+    );
 }
 
 /// Sends the outcome of a streaming load (nothing when cancelled).
@@ -299,8 +303,14 @@ struct Sources {
     finished: FileSource,
 }
 
-fn sources(file: &File, budget: StreamBudget) -> Result<Sources, LoadFailure> {
-    let open = |cache| FileSource::new(file.try_clone().map_err(plain)?, cache).map_err(plain);
+fn sources(file: &File, path: Option<&Path>, budget: StreamBudget) -> Result<Sources, LoadFailure> {
+    let open = |cache| {
+        let source = FileSource::new(file.try_clone().map_err(plain)?, cache).map_err(plain)?;
+        Ok(match path {
+            Some(path) => source.watching(path),
+            None => source,
+        })
+    };
     Ok(Sources {
         parse: open(budget.parse_cache)?,
         live: open(budget.view_cache)?,
@@ -358,7 +368,7 @@ fn stream_json(
     cancel: &AtomicBool,
     budget: StreamBudget,
 ) -> Result<Option<Document>, LoadFailure> {
-    let src = sources(file, budget)?;
+    let src = sources(file, None, budget)?;
     let root = first_value(&src.parse).map_err(plain)?;
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let live = LiveTree::new(src.live, store, root);
@@ -377,12 +387,13 @@ fn stream_json(
 
 fn stream_lines(
     file: &File,
+    path: Option<&Path>,
     sink: &mut impl FnMut(LoadEvent<Document>),
     cancel: &AtomicBool,
     budget: StreamBudget,
     follow: Option<Arc<AtomicBool>>,
 ) -> Result<Option<Document>, LoadFailure> {
-    let src = sources(file, budget)?;
+    let src = sources(file, path, budget)?;
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let (spill, lines) = LineSpill::live(budget.spill.stack).map_err(plain)?;
     sink(LoadEvent::Live(Document::Live(LiveTree::lines(
@@ -898,11 +909,13 @@ mod tests {
         file.write_all(b"{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n")
             .unwrap();
         let reader = file.reopen().unwrap();
+        let path = file.path().to_owned();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut sink = |e| drop(tx.send(e));
             load_follow(
                 &reader,
+                &path,
                 &mut sink,
                 &AtomicBool::new(false),
                 StreamBudget::testing(),
@@ -955,6 +968,61 @@ mod tests {
         }
     }
 
+    /// Follows a file holding two lines until the load ends, after `change` has run on it.
+    fn followed_failure(change: impl FnOnce(&std::path::Path)) -> String {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.ndjson");
+        std::fs::write(&path, b"{\"a\":1}\n{\"a\":2}\n").unwrap();
+        let reader = File::open(&path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let watched = path.clone();
+        std::thread::spawn(move || {
+            let mut sink = |e| drop(tx.send(e));
+            load_follow(
+                &reader,
+                &watched,
+                &mut sink,
+                &AtomicBool::new(false),
+                StreamBudget::testing(),
+                std::sync::Arc::default(),
+            );
+        });
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(LoadEvent::Live(_))
+        ));
+        std::thread::sleep(Duration::from_millis(300));
+        change(&path);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(LoadEvent::Loaded(Err(failure))) => return failure.message,
+                Ok(_) => {}
+                Err(err) => panic!("nothing reported: {err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn following_reports_a_file_rotated_away() {
+        let message = followed_failure(|path| {
+            std::fs::rename(path, path.with_extension("1")).unwrap();
+            std::fs::write(path, b"{\"a\":9}\n").unwrap();
+        });
+        assert!(message.contains("replaced"), "{message}");
+    }
+
+    #[test]
+    fn following_reports_a_file_truncated_and_regrown() {
+        let message = followed_failure(|path| {
+            std::fs::write(path, b"{\"b\":1}\n{\"b\":2}\n{\"b\":3}\n").unwrap();
+        });
+        assert!(message.contains("truncated"), "{message}");
+    }
+
     #[test]
     fn stopping_a_follow_finishes_with_the_lines_so_far() {
         use std::io::Write;
@@ -965,13 +1033,21 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(b"1\n2\n").unwrap();
         let reader = file.reopen().unwrap();
+        let path = file.path().to_owned();
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let halt = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut sink = |e| drop(tx.send(e));
             let cancel = AtomicBool::new(false);
-            load_follow(&reader, &mut sink, &cancel, StreamBudget::testing(), halt);
+            load_follow(
+                &reader,
+                &path,
+                &mut sink,
+                &cancel,
+                StreamBudget::testing(),
+                halt,
+            );
         });
         std::thread::sleep(Duration::from_millis(300));
         file.write_all(b"3\n").unwrap();

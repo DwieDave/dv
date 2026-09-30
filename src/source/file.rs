@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,13 +30,19 @@ pub struct FileSource {
     file: File,
     /// Grows while following a file (FO-2).
     len: AtomicU64,
+    /// The path being followed, to notice the file being replaced there.
+    path: Option<PathBuf>,
     cache: Mutex<ChunkCache>,
 }
+
+/// Bytes at the end of the known length, kept to notice a file rewritten in place.
+const TAIL: u64 = 64;
 
 #[derive(Debug, Default)]
 struct ChunkCache {
     capacity: usize,
     chunks: HashMap<u64, (Vec<u8>, u64)>,
+    tail: Vec<u8>,
     tick: u64,
     stats: CacheStats,
 }
@@ -52,13 +59,22 @@ impl FileSource {
         let capacity = usize::try_from((budget / CHUNK).max(1)).unwrap_or(usize::MAX);
         let cache = Mutex::new(ChunkCache {
             capacity,
+            tail: read_tail(&file, len)?,
             ..ChunkCache::default()
         });
         Ok(Self {
             file,
             len: AtomicU64::new(len),
+            path: None,
             cache,
         })
+    }
+
+    /// Makes [`Source::refresh`] report `Rotated` once `path` no longer names this file.
+    #[must_use]
+    pub fn watching(mut self, path: &Path) -> Self {
+        self.path = Some(path.to_owned());
+        self
     }
 
     /// Runs `f` on the bytes of `range`, borrowing the cached chunk (no copy) when the range
@@ -139,6 +155,13 @@ impl ChunkCache {
     }
 }
 
+fn read_tail(file: &File, len: u64) -> io::Result<Vec<u8>> {
+    let n = len.min(TAIL);
+    let mut tail = vec![0; to_usize(n)];
+    file.read_exact_at(&mut tail, len - n)?;
+    Ok(tail)
+}
+
 fn load(file: &File, index: u64, len: u64) -> Result<Vec<u8>, SourceError> {
     let offset = index * CHUNK;
     let size = usize::try_from(CHUNK.min(len.saturating_sub(offset))).unwrap_or(0);
@@ -153,17 +176,38 @@ impl Source for FileSource {
     }
 
     /// Picks up growth; the cached chunk holding the old end is dropped (it was partial).
+    /// A file cut short, rewritten in place, or replaced at its path is not growth.
     fn refresh(&self) -> Result<Growth, SourceError> {
-        let (old, new) = (self.size(), self.file.metadata()?.len());
+        let meta = self.file.metadata()?;
+        if let Some(path) = &self.path {
+            match std::fs::metadata(path) {
+                Ok(now) if (now.dev(), now.ino()) == (meta.dev(), meta.ino()) => {}
+                Ok(_) => return Ok(Growth::Rotated),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Growth::Rotated),
+                Err(err) => return Err(err.into()),
+            }
+        }
+        // The length changes only under the cache lock, so readers never cache a chunk cut
+        // at a stale end.
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| io::Error::other("chunk cache poisoned"))?;
+        let (old, new) = (self.size(), meta.len());
         if new < old {
             return Ok(Growth::Shrank);
+        }
+        match read_tail(&self.file, old) {
+            Ok(tail) if tail == cache.tail => {}
+            Ok(_) => return Ok(Growth::Shrank),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(Growth::Shrank),
+            Err(err) => return Err(err.into()),
         }
         if new == old {
             return Ok(Growth::Same);
         }
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.forget(old / CHUNK);
-        }
+        cache.forget(old / CHUNK);
+        cache.tail = read_tail(&self.file, new)?;
         self.len.store(new, Ordering::Relaxed);
         Ok(Growth::Grew)
     }
@@ -176,23 +220,22 @@ impl Source for FileSource {
     }
 
     fn read(&self, range: Range<u64>) -> Result<Cow<'_, [u8]>, SourceError> {
-        let (start, end) = (range.start.min(self.size()), range.end.min(self.size()));
-        let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
-        if start >= end {
-            return Ok(Cow::Owned(out));
-        }
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| io::Error::other("chunk cache poisoned"))?;
+        let len = self.size();
+        let (start, end) = (range.start.min(len), range.end.min(len));
+        let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
+        if start >= end {
+            return Ok(Cow::Owned(out));
+        }
         for index in start / CHUNK..=(end - 1) / CHUNK {
-            let chunk = cache.chunk(index, &self.file, self.size())?;
+            let chunk = cache.chunk(index, &self.file, len)?;
             let base = index * CHUNK;
-            let (lo, hi) = (
-                start.max(base) - base,
-                end.min(base + chunk.len() as u64) - base,
-            );
-            out.extend_from_slice(&chunk[to_usize(lo)..to_usize(hi)]);
+            let lo = start.max(base) - base;
+            let hi = (end.min(base + chunk.len() as u64) - base).max(lo);
+            out.extend_from_slice(chunk.get(to_usize(lo)..to_usize(hi)).unwrap_or_default());
         }
         Ok(Cow::Owned(out))
     }
@@ -262,5 +305,103 @@ mod tests {
             before.misses + 1,
             "chunk 1 was the least recently used"
         );
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect()
+    }
+
+    #[test]
+    fn reading_while_the_file_grows_never_panics_or_misreads() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grow");
+        let step = to_usize(CHUNK / 7);
+        let total = to_usize(6 * CHUNK);
+        let bytes = pattern(total);
+        std::fs::write(&path, &bytes[..step]).unwrap();
+        let source = FileSource::new(File::open(&path).unwrap(), 2 * CHUNK).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let done = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut written = step;
+                while written < total {
+                    let next = (written + step).min(total);
+                    writer.write_all(&bytes[written..next]).unwrap();
+                    written = next;
+                    source.refresh().unwrap();
+                    assert!(Instant::now() < deadline);
+                }
+                done.store(true, Ordering::Relaxed);
+            });
+            scope.spawn(|| {
+                let mut at = 0u64;
+                while !done.load(Ordering::Relaxed) {
+                    let known = source.len();
+                    let got = source.read(at..at + CHUNK / 3).unwrap();
+                    let want_len = known.saturating_sub(at).min(CHUNK / 3);
+                    assert!(got.len() as u64 >= want_len, "short read");
+                    let lo = to_usize(at).min(total);
+                    assert_eq!(&*got, &bytes[lo..lo + got.len()]);
+                    at = (at + CHUNK / 5) % (known.max(1));
+                    assert!(Instant::now() < deadline);
+                }
+            });
+        });
+        assert_eq!(&*source.read(0..total as u64).unwrap(), &bytes[..]);
+    }
+
+    #[test]
+    fn a_truncated_file_is_reported() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&pattern(1000)).unwrap();
+        let source = FileSource::new(file.reopen().unwrap(), CHUNK).unwrap();
+        assert_eq!(source.refresh().unwrap(), Growth::Same);
+        file.as_file().set_len(10).unwrap();
+        assert_eq!(source.refresh().unwrap(), Growth::Shrank);
+    }
+
+    #[test]
+    fn a_file_truncated_and_regrown_past_its_old_size_is_reported() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&pattern(1000)).unwrap();
+        let source = FileSource::new(file.reopen().unwrap(), CHUNK).unwrap();
+        file.as_file().set_len(0).unwrap();
+        file.as_file().write_all_at(&[b'x'; 1500], 0).unwrap();
+        assert_eq!(source.refresh().unwrap(), Growth::Shrank);
+    }
+
+    #[test]
+    fn appending_is_not_mistaken_for_a_replacement() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&pattern(1000)).unwrap();
+        let source = FileSource::new(file.reopen().unwrap(), CHUNK).unwrap();
+        for _ in 0..3 {
+            file.write_all(&pattern(100)).unwrap();
+            assert_eq!(source.refresh().unwrap(), Growth::Grew);
+            assert_eq!(source.refresh().unwrap(), Growth::Same);
+        }
+    }
+
+    #[test]
+    fn a_file_replaced_at_its_path_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        std::fs::write(&path, pattern(1000)).unwrap();
+        let source = FileSource::new(File::open(&path).unwrap(), CHUNK)
+            .unwrap()
+            .watching(&path);
+        assert_eq!(source.refresh().unwrap(), Growth::Same);
+        std::fs::rename(&path, dir.path().join("log.1")).unwrap();
+        assert_eq!(source.refresh().unwrap(), Growth::Rotated, "path is gone");
+        std::fs::write(&path, pattern(5000)).unwrap();
+        assert_eq!(source.refresh().unwrap(), Growth::Rotated, "new inode");
     }
 }

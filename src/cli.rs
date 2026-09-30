@@ -95,6 +95,7 @@ enum Input {
     /// Indexed from disk (FR-22).
     Stream {
         file: File,
+        path: PathBuf,
         label: String,
         format: Format,
     },
@@ -185,8 +186,10 @@ fn loader(input: Input, budget: StreamBudget, follow: Option<Arc<AtomicBool>>) -
         } => Box::new(move |mut sink, cancel| {
             load_spooled(reader, &request, spool_at, &mut sink, cancel, budget);
         }),
-        Input::Stream { file, format, .. } => Box::new(move |mut sink, cancel| match follow {
-            Some(stop) => load_follow(&file, &mut sink, cancel, budget, stop),
+        Input::Stream {
+            file, path, format, ..
+        } => Box::new(move |mut sink, cancel| match follow {
+            Some(stop) => load_follow(&file, &path, &mut sink, cancel, budget, stop),
             None => load_stream(&file, format, &mut sink, cancel, budget),
         }),
     }
@@ -205,6 +208,7 @@ fn index_only_input(input: Input, budget: StreamBudget) -> Result<String, CliErr
             file,
             label,
             format,
+            ..
         } => index_only_stream(file, &label, format, budget),
     }
 }
@@ -245,6 +249,7 @@ fn open_path(cli: &Cli, path: &Path, limit: u64) -> Result<Opened, CliError> {
     let input = if choose(mode, size_hint, limit, format)? == Storage::Stream {
         Input::Stream {
             file,
+            path: path.to_owned(),
             label,
             format,
         }
@@ -417,6 +422,7 @@ fn following(
     let format = Format::Ndjson;
     let input = Input::Stream {
         file,
+        path: path.to_owned(),
         label,
         format,
     };
