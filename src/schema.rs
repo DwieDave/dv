@@ -5,7 +5,6 @@ use std::ops::ControlFlow;
 
 use crate::index::children::Child;
 use crate::index::{IndexError, to_u32};
-use crate::json::text::unescape;
 use crate::path::Segment;
 use crate::pulse::Pulse;
 use crate::search::Direction;
@@ -175,10 +174,7 @@ impl Trie {
 }
 
 fn seg_of(tree: &impl TreeIndex, child: &Child) -> Result<Segment, IndexError> {
-    Ok(match &child.key {
-        Some(span) => Segment::Key(unescape(&tree.bytes(span.clone())?).into_owned()),
-        None => Segment::Items,
-    })
+    Ok(tree.key_of(child)?.map_or(Segment::Items, Segment::Key))
 }
 
 /// The row path of the next occurrence of `segs` after `after` (or the previous one before it),

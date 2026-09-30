@@ -142,3 +142,38 @@ proptest! {
         prop_assert_eq!(stats, Stats { bytes: text.len() as u64, values: Some(value_count(&value)) });
     }
 }
+
+#[test]
+fn members_are_found_by_decoded_key_across_batches() {
+    let tree = tree_of(r#"{"a": 1, "b\n": 2, "c": 3}"#);
+    let root = tree.root().unwrap();
+    let found = tree.find_member(root, "b\n", 1).unwrap().unwrap();
+    assert_eq!(found.index, 1);
+    assert_eq!(tree.key_of(&found).unwrap().as_deref(), Some("b\n"));
+    assert!(tree.find_member(root, "z", 1).unwrap().is_none());
+}
+
+#[test]
+fn find_member_ignores_arrays() {
+    let tree = tree_of("[1, 2]");
+    let root = tree.root().unwrap();
+    assert!(tree.find_member(root, "a", 1).unwrap().is_none());
+    let first = tree.children(root, 0..1).unwrap().remove(0);
+    assert_eq!(tree.key_of(&first).unwrap(), None);
+}
+
+proptest! {
+    #[test]
+    fn batched_visit_matches_a_single_read(n in 0u64..40, batch in 1u64..9) {
+        let text = format!("[{}]", (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        let tree = tree_of(&text);
+        let root = tree.root().unwrap();
+        let mut seen = Vec::new();
+        tree.children_batched(root, n, batch, &mut |child| {
+            seen.push(child.index);
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+        prop_assert_eq!(seen, (0..n).collect::<Vec<_>>());
+    }
+}

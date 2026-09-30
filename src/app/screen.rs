@@ -14,9 +14,9 @@ use crate::app::{Effect, Model, Msg, input_msg, show_banner, update, view};
 use crate::clipboard;
 use crate::config::Config;
 use crate::load::{LoadEvent, LoadFailure, Phase, Progress};
+use crate::number::human_bytes;
 use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
-use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
 use crate::view::jump::bucket_rows;
 use crate::view::resolve::resolve;
@@ -119,7 +119,7 @@ impl<T: TreeIndex> App<T> {
     #[must_use]
     pub fn final_cursor(&self) -> Option<Vec<u64>> {
         match &self.screen {
-            Screen::Ready(model) => Some(model.state.cursor.clone()),
+            Screen::Ready(model) => Some(model.state.cursor().to_vec()),
             _ => None,
         }
     }
@@ -160,7 +160,10 @@ fn try_restore<T: TreeIndex>(app: &mut App<T>) {
     let (Screen::Ready(model), Some(rows)) = (&mut app.screen, &app.restore) else {
         return;
     };
-    if !matches!(resolve(&model.view(), &model.state.root, rows), Ok(Some(_))) {
+    if !matches!(
+        resolve(&model.view(), &model.state.root(), rows),
+        Ok(Some(_))
+    ) {
         return;
     }
     model.reveal(rows.clone(), false);
@@ -219,9 +222,9 @@ fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T
 /// record.
 fn refresh<T: TreeIndex>(model: &mut Model<T>, tail: &mut u64) {
     let last = |n: u64| bucket_rows(n, n.saturating_sub(1));
-    let on_last = model.following && *tail > 0 && model.state.cursor == last(*tail);
+    let on_last = model.following && *tail > 0 && model.state.cursor() == last(*tail);
     update(model, Msg::Refresh);
-    let Ok(count) = model.view().child_count(model.state.root.node) else {
+    let Ok(count) = model.view().child_count(model.state.root().node) else {
         return;
     };
     let records = count.available();

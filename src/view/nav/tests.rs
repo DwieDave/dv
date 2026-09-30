@@ -22,13 +22,13 @@ fn run(tree: &MemTree, state: &mut TreeState, navs: &[Nav]) {
 fn moves_down_up_and_to_the_ends() {
     let (tree, mut state) = setup();
     run(&tree, &mut state, &[Nav::Down, Nav::Down]);
-    assert_eq!(state.cursor, vec![1]);
+    assert_eq!(state.cursor(), vec![1]);
     run(&tree, &mut state, &[Nav::Up]);
-    assert_eq!(state.cursor, vec![0]);
+    assert_eq!(state.cursor(), vec![0]);
     run(&tree, &mut state, &[Nav::Bottom]);
-    assert_eq!(state.cursor, vec![2]);
+    assert_eq!(state.cursor(), vec![2]);
     run(&tree, &mut state, &[Nav::Top, Nav::Up]);
-    assert_eq!(state.cursor, Vec::<u64>::new());
+    assert_eq!(state.cursor(), Vec::<u64>::new());
 }
 
 #[test]
@@ -37,11 +37,11 @@ fn expand_enters_and_collapse_returns_to_parent() {
     run(&tree, &mut state, &[Nav::Down, Nav::Down, Nav::Expand]);
     assert!(state.is_expanded(&[1]));
     run(&tree, &mut state, &[Nav::Expand]);
-    assert_eq!(state.cursor, vec![1, 0]);
+    assert_eq!(state.cursor(), vec![1, 0]);
     run(&tree, &mut state, &[Nav::Expand]);
-    assert_eq!(state.cursor, vec![1, 0], "scalars do not expand");
+    assert_eq!(state.cursor(), vec![1, 0], "scalars do not expand");
     run(&tree, &mut state, &[Nav::Collapse]);
-    assert_eq!(state.cursor, vec![1]);
+    assert_eq!(state.cursor(), vec![1]);
     run(&tree, &mut state, &[Nav::Collapse]);
     assert!(!state.is_expanded(&[1]));
 }
@@ -60,7 +60,10 @@ fn zo_expands_direct_container_children_and_zm_resets() {
         "empty containers stay collapsed"
     );
     run(&tree, &mut state, &[Nav::CollapseAll]);
-    assert_eq!((state.cursor.clone(), state.total_rows()), (Vec::new(), 4));
+    assert_eq!(
+        (state.cursor().to_vec(), state.total_rows()),
+        (Vec::new(), 4)
+    );
 }
 
 #[test]
@@ -80,7 +83,7 @@ fn zc_on_a_leaf_collapses_the_parent() {
         &mut state,
         &[Nav::Bottom, Nav::Expand, Nav::Expand, Nav::CollapseSubtree],
     );
-    assert_eq!(state.cursor, vec![2]);
+    assert_eq!(state.cursor(), vec![2]);
     assert!(!state.is_expanded(&[2]));
 }
 
@@ -109,32 +112,37 @@ proptest! {
         let (tree, mut state) = setup();
         for nav in navs {
             apply(&tree, &mut state, nav, height).unwrap();
-            let row = state.row_of(&state.cursor);
-            prop_assert!(row.is_some(), "cursor {:?} not visible", state.cursor);
+            let row = state.row_of(state.cursor());
+            prop_assert!(row.is_some(), "cursor {:?} not visible", state.cursor());
             let row = row.unwrap();
-            prop_assert!(state.top <= row && row < state.top + height);
-            prop_assert!(state.top < state.total_rows());
+            prop_assert!(state.top() <= row && row < state.top() + height);
+            prop_assert!(state.top() < state.total_rows());
         }
     }
+}
+
+/// One gutter column, then two per nesting level, as the tree widget lays rows out.
+fn marker_column(depth: usize) -> u64 {
+    1 + 2 * depth as u64
 }
 
 #[test]
 fn clicking_a_label_selects_and_the_marker_toggles() {
     let (tree, mut state) = setup();
-    click(&tree, &mut state, 2, 8, 10).unwrap();
-    assert_eq!(state.cursor, vec![1]);
+    click(&tree, &mut state, 2, 8, 10, marker_column).unwrap();
+    assert_eq!(state.cursor(), vec![1]);
     assert!(!state.is_expanded(&[1]));
-    click(&tree, &mut state, 2, 3, 10).unwrap();
+    click(&tree, &mut state, 2, 3, 10, marker_column).unwrap();
     assert!(state.is_expanded(&[1]));
-    click(&tree, &mut state, 2, 4, 10).unwrap();
+    click(&tree, &mut state, 2, 4, 10, marker_column).unwrap();
     assert!(!state.is_expanded(&[1]));
 }
 
 #[test]
 fn clicks_past_the_last_row_do_nothing() {
     let (tree, mut state) = setup();
-    click(&tree, &mut state, 9, 0, 10).unwrap();
-    assert_eq!(state.cursor, Vec::<u64>::new());
+    click(&tree, &mut state, 9, 0, 10, marker_column).unwrap();
+    assert_eq!(state.cursor(), Vec::<u64>::new());
 }
 
 #[test]
@@ -143,9 +151,9 @@ fn wheel_scrolls_the_view_and_drags_the_cursor_along() {
     run(&tree, &mut state, &[Nav::ExpandChildren]);
     assert_eq!(state.total_rows(), 8);
     apply(&tree, &mut state, Nav::ScrollDown, 2).unwrap();
-    assert_eq!((state.top, state.row_of(&state.cursor)), (3, Some(3)));
+    assert_eq!((state.top(), state.row_of(state.cursor())), (3, Some(3)));
     apply(&tree, &mut state, Nav::ScrollUp, 2).unwrap();
-    assert_eq!((state.top, state.row_of(&state.cursor)), (0, Some(1)));
+    assert_eq!((state.top(), state.row_of(state.cursor())), (0, Some(1)));
 }
 
 proptest! {
@@ -153,10 +161,10 @@ proptest! {
     fn clicks_keep_the_cursor_visible(clicks in proptest::collection::vec((0u64..8, 0u64..12, nav()), 0..40), height in 1u64..8) {
         let (tree, mut state) = setup();
         for (row, column, nav) in clicks {
-            click(&tree, &mut state, row, column, height).unwrap();
+            click(&tree, &mut state, row, column, height, marker_column).unwrap();
             apply(&tree, &mut state, nav, height).unwrap();
-            let row = state.row_of(&state.cursor).unwrap();
-            prop_assert!(state.top <= row && row < state.top + height);
+            let row = state.row_of(state.cursor()).unwrap();
+            prop_assert!(state.top() <= row && row < state.top() + height);
         }
     }
 }

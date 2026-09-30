@@ -63,7 +63,7 @@ fn a_loaded_tree_becomes_navigable() {
     let Screen::Ready(model) = &app.screen else {
         panic!("not ready")
     };
-    assert_eq!(model.state.cursor, vec![0]);
+    assert_eq!(model.state.cursor(), vec![0]);
     update_app(&mut app, key('q'));
     assert!(app.quit);
 }
@@ -117,7 +117,7 @@ fn searches_run_on_the_worker_and_come_back_as_events() {
     let Screen::Ready(model) = &app.screen else {
         panic!("not ready")
     };
-    assert_eq!(model.state.cursor, vec![1]);
+    assert_eq!(model.state.cursor(), vec![1]);
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn a_live_document_is_browsable_and_swapped_when_finished() {
         panic!("not ready after Live")
     };
     assert!(matches!(*model.tree, Document::Live(_)));
-    assert_eq!(model.state.cursor, vec![0]);
+    assert_eq!(model.state.cursor(), vec![0]);
     for event in events {
         update_app(&mut app, AppEvent::Load(event));
     }
@@ -156,9 +156,9 @@ fn a_live_document_is_browsable_and_swapped_when_finished() {
         panic!("not ready at the end")
     };
     assert!(matches!(*model.tree, Document::Stream(_)));
-    assert_eq!(model.state.cursor, vec![0], "the view survives the swap");
+    assert_eq!(model.state.cursor(), vec![0], "the view survives the swap");
     assert_eq!(
-        model.tree.child_count(model.state.root.node).unwrap(),
+        model.tree.child_count(model.state.root().node).unwrap(),
         crate::tree::Count::Known(20_000)
     );
 }
@@ -329,7 +329,7 @@ fn a_remembered_position_is_restored_once_its_rows_exist() {
     let Screen::Ready(model) = &app.screen else {
         panic!("not ready")
     };
-    assert_eq!(model.state.cursor, vec![0, 1]);
+    assert_eq!(model.state.cursor(), vec![0, 1]);
     assert!(model.state.is_expanded(&[0]));
     assert_eq!(app.final_cursor(), Some(vec![0, 1]));
 }
@@ -507,7 +507,7 @@ fn j_stops_at_the_last_page_with_and_without_wrap() {
 fn a_huge_scroll_offset_shows_nothing_past_the_cap() {
     use crate::view::preview::{MAX_PREVIEW_LINES, preview_lines};
     let tree = MemTree::parse(MemSource::new(numbers(100_100))).unwrap();
-    let root = crate::view::state::TreeState::new(&tree).unwrap().root;
+    let root = crate::view::state::TreeState::new(&tree).unwrap().root();
     let got = preview_lines(&tree, &root.row(), MAX_PREVIEW_LINES + 7, 5).unwrap();
     assert!(got.lines.is_empty());
 }

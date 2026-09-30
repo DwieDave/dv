@@ -26,7 +26,7 @@ fn open() -> Option<(MemTree, TreeState)> {
 /// Root expanded, cursor moved into the middle bucket and that bucket expanded.
 fn deep_state(tree: &MemTree, state: &TreeState) -> TreeState {
     let mut state = state.clone();
-    let middle = state.expansion.as_ref().map_or(0, |e| e.level().len() / 2);
+    let middle = state.expansion().map_or(0, |e| e.level().len() / 2);
     for _ in 0..middle {
         let _ = apply(tree, &mut state, Nav::Down, HEIGHT);
     }

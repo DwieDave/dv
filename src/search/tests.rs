@@ -28,7 +28,7 @@ fn doc(value: &serde_json::Value) -> Doc {
         })
         .collect();
     let tree = MemTree::parse(MemSource::new(text.clone().into_bytes())).unwrap();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     Doc {
         text,
         key_spans,
@@ -280,7 +280,7 @@ fn searches_read_the_document_in_bounded_windows() {
         inner: &tree,
         widest: std::cell::Cell::new(0),
     };
-    let root = TreeState::new(&spy).unwrap().root;
+    let root = TreeState::new(&spy).unwrap().root();
     let m = literal("needle", Scope::Both);
     let hit = find(&spy, &root, &m, None, Direction::Forward, &never).unwrap();
     assert_eq!(

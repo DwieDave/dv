@@ -25,7 +25,7 @@ impl<T: TreeIndex> Widget for TableWidget<'_, T> {
         let lines = self
             .lines(area)
             .unwrap_or_else(|err| vec![Line::styled(err.to_string(), self.theme.error)]);
-        let selected = self.table.row.saturating_sub(self.table.top) + 2;
+        let selected = self.table.row().saturating_sub(self.table.top()) + 2;
         for (y, line) in (area.top()..area.bottom()).zip(&lines) {
             if u64::from(y - area.top()) == selected {
                 buf.set_style(Rect::new(area.x, y, area.width, 1), self.theme.selection);
@@ -37,16 +37,18 @@ impl<T: TreeIndex> Widget for TableWidget<'_, T> {
 
 impl<T: TreeIndex> TableWidget<'_, T> {
     fn lines(&self, area: Rect) -> Result<Vec<Line<'static>>, IndexError> {
-        let rows = self.tree.child_count(self.table.node)?.available();
+        let rows = self.tree.child_count(self.table.node())?.available();
         let index = index_width(rows);
         let columns = self.on_screen(usize::from(area.width), index);
         let rule = Line::styled("─".repeat(usize::from(area.width)), self.theme.badge);
         let mut lines = vec![self.header(&columns, index), rule];
-        let top = self.table.top;
+        let top = self.table.top();
         let end = rows.min(top + u64::from(area.height.saturating_sub(2)));
         for row in top..end {
             let element = self.table.element(row);
-            let children = self.tree.children(self.table.node, element..element + 1)?;
+            let children = self
+                .tree
+                .children(self.table.node(), element..element + 1)?;
             if let Some(child) = children.first() {
                 lines.push(self.row(row, child, &columns, index)?);
             }
@@ -59,7 +61,7 @@ impl<T: TreeIndex> TableWidget<'_, T> {
         let mut used = GUTTER.len() + index;
         let shown = self.table.shown().map(|(_, c)| c).enumerate();
         shown
-            .skip(self.table.left)
+            .skip(self.table.left())
             .take_while(|(_, column)| {
                 used += GAP + column.width;
                 used <= width
@@ -78,7 +80,7 @@ impl<T: TreeIndex> TableWidget<'_, T> {
             self.theme.badge,
         )];
         for (position, column) in columns {
-            let style = if *position == self.table.col {
+            let style = if *position == self.table.col() {
                 current
             } else {
                 key
@@ -98,10 +100,10 @@ impl<T: TreeIndex> TableWidget<'_, T> {
         index: usize,
     ) -> Result<Line<'static>, IndexError> {
         let (i, node) = (
-            self.tree.original_index(self.table.node, child.index),
+            self.tree.original_index(self.table.node(), child.index),
             child.node(),
         );
-        let gutter = if row == self.table.row {
+        let gutter = if row == self.table.row() {
             Span::styled("▎", self.theme.marker)
         } else {
             Span::raw(" ")
@@ -133,8 +135,8 @@ impl<T: TreeIndex> TableWidget<'_, T> {
     fn arrow(&self, column: &Column) -> &'static str {
         let sorted = self
             .table
-            .sort
-            .and_then(|(i, dir)| Some((self.table.columns.get(i)?, dir)));
+            .sort()
+            .and_then(|(i, dir)| Some((self.table.columns().get(i)?, dir)));
         match sorted {
             Some((c, SortDir::Asc)) if c.key == column.key => "▲",
             Some((c, SortDir::Desc)) if c.key == column.key => "▼",

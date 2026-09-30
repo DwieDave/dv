@@ -65,7 +65,7 @@ fn rows_are_labeled_with_their_original_indices() {
     let view = Filtered::new(&tree, Some(&filter));
     assert_eq!(view.child_count(root).unwrap(), Count::Pending(2));
     let state = TreeState::new(&view).unwrap();
-    let items = chain(&view, &state.root, &[1]).unwrap();
+    let items = chain(&view, &state.root(), &[1]).unwrap();
     let RowKind::Value { label, .. } = &items[1].kind else {
         panic!("not a value")
     };

@@ -7,8 +7,8 @@ use crate::app::search::{FilterSpec, Work, submit_job};
 use crate::app::{Model, jumped};
 use crate::filter::{Expr, MAX_MATCHES, Scan, parse};
 use crate::index::IndexError;
+use crate::number::grouped;
 use crate::tree::TreeIndex;
-use crate::ui::status::grouped;
 use crate::view::filtered::{FilterView, Filtered};
 use crate::view::jump::{bucket_rows, reveal};
 use crate::view::nav::{self, Nav};
@@ -51,7 +51,7 @@ pub fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
 fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(), String> {
     clear(model, false);
     model.schema = None;
-    let found = target(&*model.tree, &model.state.root, &model.state.cursor);
+    let found = target(&*model.tree, &model.state.root(), model.state.cursor());
     let (path, node) = found
         .map_err(|err| err.to_string())?
         .ok_or("filter needs an array or object")?;
@@ -73,7 +73,7 @@ fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(
         return Err(err.to_string());
     }
     model.prompt = None;
-    let root = model.state.root;
+    let root = model.state.root();
     submit_job(
         model,
         Work::Filter(FilterSpec { node, expr }),
@@ -138,7 +138,7 @@ pub fn clear<T: TreeIndex>(model: &mut Model<T>, jump: bool) {
     }
     let path = model.filter.as_deref().map_or_else(Vec::new, |filter| {
         let view = Filtered::new(&*model.tree, None);
-        rows_of(&view, &model.state.root, Place(filter.node.offset)).unwrap_or_default()
+        rows_of(&view, &model.state.root(), Place(filter.node.offset)).unwrap_or_default()
     });
     let (rows, failed) = or_container(full_rows(model, &path), &path);
     model.filter = None;
@@ -167,15 +167,15 @@ fn or_container(
 
 /// The cursor's rows in the unfiltered tree.
 fn full_rows<T: TreeIndex>(model: &Model<T>, container: &[u64]) -> Result<Vec<u64>, IndexError> {
-    let cursor = &model.state.cursor;
+    let cursor = model.state.cursor();
     let Some(filter) = model.filter.as_deref() else {
-        return Ok(cursor.clone());
+        return Ok(cursor.to_vec());
     };
     if cursor.len() <= container.len() || !cursor.starts_with(container) {
-        return Ok(cursor.clone());
+        return Ok(cursor.to_vec());
     }
     let view = Filtered::new(&*model.tree, Some(filter));
-    let items = chain(&view, &model.state.root, cursor)?;
+    let items = chain(&view, &model.state.root(), cursor)?;
     let element = items
         .iter()
         .enumerate()

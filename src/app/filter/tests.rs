@@ -74,13 +74,13 @@ fn o_opens_the_match_in_the_full_tree() {
     typed(&mut model, "jj");
     typed(&mut model, "o");
     assert!(model.filter.is_none());
-    assert_eq!(model.state.cursor, vec![2]);
+    assert_eq!(model.state.cursor(), vec![2]);
     update(
         &mut model,
         Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
     );
     assert_eq!(
-        model.state.cursor,
+        model.state.cursor(),
         Vec::<u64>::new(),
         "back at the filtered container"
     );
@@ -101,7 +101,7 @@ fn esc_clears_the_filter_and_f_edits_it() {
     press(&mut model, KeyCode::Esc);
     assert!(model.filter.is_none());
     assert_eq!(
-        model.state.cursor,
+        model.state.cursor(),
         vec![1],
         "the cursor stays on the same element"
     );
@@ -191,11 +191,17 @@ fn a_filtered_table_stops_at_the_last_visible_row_and_opens_it() {
     let mut model = model();
     filter(&mut model, ".n > 3");
     typed(&mut model, "tG");
-    assert_eq!(model.table.as_ref().map(|table| table.row), Some(1));
+    assert_eq!(
+        model
+            .table
+            .as_ref()
+            .map(crate::view::table::TableState::row),
+        Some(1)
+    );
     press(&mut model, KeyCode::Enter);
     assert!(model.table.is_none());
     // The second match, still shown through the filter.
-    assert_eq!(model.state.cursor, vec![1]);
+    assert_eq!(model.state.cursor(), vec![1]);
     assert!(model.filter.is_some());
 }
 
@@ -204,7 +210,7 @@ fn back_after_clearing_the_filter_returns_to_the_same_record() {
     let mut model = model();
     filter(&mut model, ".n > 3");
     typed(&mut model, "jj");
-    assert_eq!(model.state.cursor, vec![1], "the second match, record 2");
+    assert_eq!(model.state.cursor(), vec![1], "the second match, record 2");
     typed(&mut model, "gg");
     press(&mut model, KeyCode::Esc);
     assert!(model.filter.is_none());
@@ -212,19 +218,23 @@ fn back_after_clearing_the_filter_returns_to_the_same_record() {
         &mut model,
         Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
     );
-    assert_eq!(model.state.cursor, vec![2], "record 2 in the full list");
+    assert_eq!(model.state.cursor(), vec![2], "record 2 in the full list");
 }
 
 #[test]
 fn a_mark_set_before_filtering_still_finds_its_record() {
     let mut model = model();
     typed(&mut model, "jjj");
-    assert_eq!(model.state.cursor, vec![2]);
+    assert_eq!(model.state.cursor(), vec![2]);
     typed(&mut model, "ma");
     typed(&mut model, "gg");
     filter(&mut model, ".n > 3");
     typed(&mut model, "'a");
-    assert_eq!(model.state.cursor, vec![1], "record 2 is the second match");
+    assert_eq!(
+        model.state.cursor(),
+        vec![1],
+        "record 2 is the second match"
+    );
 }
 
 #[test]

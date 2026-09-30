@@ -6,8 +6,8 @@ use std::fmt;
 use regex::Regex;
 use thiserror::Error;
 
+use crate::index::IndexError;
 use crate::index::children::Child;
-use crate::index::{IndexError, to_usize};
 use crate::json::lex::Kind;
 use crate::json::text::{quote_into, unescape};
 use crate::path::{Segment, render};
@@ -236,34 +236,13 @@ fn step_into<T: TreeIndex + ?Sized>(
             .children(at.node(), *i..i.saturating_add(1))?
             .into_iter()
             .next()),
-        (Segment::Key(key), Kind::Object) => member(tree, at, key),
+        (Segment::Key(key), Kind::Object) => tree.find_member(at.node(), key, MEMBER_BATCH),
         _ => Ok(None),
     }
 }
 
 /// Members read per batch while looking for a key.
 const MEMBER_BATCH: u64 = 256;
-
-/// The first member of the object `at` named `key`.
-fn member<T: TreeIndex + ?Sized>(
-    tree: &T,
-    at: &Child,
-    key: &str,
-) -> Result<Option<Child>, IndexError> {
-    let total = tree.child_count(at.node())?.available();
-    for start in (0..total).step_by(to_usize(MEMBER_BATCH)) {
-        let end = start.saturating_add(MEMBER_BATCH).min(total);
-        for child in tree.children(at.node(), start..end)? {
-            let Some(span) = child.key.clone() else {
-                continue;
-            };
-            if unescape(&tree.bytes(span)?) == key {
-                return Ok(Some(child));
-            }
-        }
-    }
-    Ok(None)
-}
 
 /// Integers compare exactly; a fractional or huge value falls back to `f64`.
 fn compare_integer(raw: &[u8], literal: i64) -> Option<Ordering> {

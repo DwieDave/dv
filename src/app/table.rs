@@ -26,7 +26,7 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
 }
 
 fn table_at<T: TreeIndex>(tree: &T, state: &TreeState) -> Result<Option<TableState>, IndexError> {
-    let Some((_, node)) = target(tree, &state.root, &state.cursor)? else {
+    let Some((_, node)) = target(tree, &state.root(), state.cursor())? else {
         return Ok(None);
     };
     let first = tree.children(node, 0..1)?;
@@ -86,11 +86,11 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
     let Some(table) = model.table.as_mut() else {
         return;
     };
-    let chord = std::mem::take(&mut table.chord);
+    let chord = table.take_chord();
     match action(key, chord, i64::try_from(page).unwrap_or(i64::MAX)) {
         Action::Row(to) => table.move_row(to, rows, page),
         Action::Column(delta) => table.move_col(delta, width, index_width(rows)),
-        Action::Chord => table.chord = true,
+        Action::Chord => table.start_chord(),
         Action::Hide => table.hide(),
         Action::ShowAll => table.show_all(),
         Action::Sort => sort(model, rows),
@@ -110,15 +110,10 @@ fn sort<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     let Some(table) = model.table.as_mut() else {
         return;
     };
-    table.sort = table.next_sort();
-    table.order = None;
-    let spec = table.sort.and_then(|(column, dir)| {
-        let key = table.columns.get(column)?.key.clone();
-        Some(SortSpec {
-            node: table.node,
-            key,
-            dir,
-        })
+    let spec = table.advance_sort().map(|(key, dir)| SortSpec {
+        node: table.node(),
+        key,
+        dir,
     });
     let Some(spec) = spec else {
         // Nothing to wait for: a running sort's result is now stale.
@@ -126,14 +121,14 @@ fn sort<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
         return;
     };
     model.note = Some("sorting…".to_owned());
-    let root = model.state.root;
+    let root = model.state.root();
     submit_job(model, Work::Sort(spec), None, None, root);
 }
 
 /// A finished sort: rows now show in its order.
 pub fn sorted<T>(model: &mut Model<T>, order: Vec<u64>) {
     if let Some(table) = model.table.as_mut() {
-        table.order = Some(order);
+        table.set_order(order);
     }
     model.note = None;
 }
@@ -143,7 +138,7 @@ fn row_count<T: TreeIndex>(model: &Model<T>) -> u64 {
     model.table.as_ref().map_or(0, |table| {
         model
             .view()
-            .child_count(table.node)
+            .child_count(table.node())
             .map_or(0, crate::tree::Count::available)
     })
 }
@@ -156,12 +151,16 @@ fn open_in_tree<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     if rows == 0 {
         return;
     }
-    let element = table.element(table.row);
-    let path =
-        rows_of(&model.view(), &model.state.root, Place(table.node.offset)).map(|mut path| {
-            path.extend(bucket_rows(rows, element));
-            path
-        });
+    let element = table.element(table.row());
+    let path = rows_of(
+        &model.view(),
+        &model.state.root(),
+        Place(table.node().offset),
+    )
+    .map(|mut path| {
+        path.extend(bucket_rows(rows, element));
+        path
+    });
     model.reveal_result(path, true);
 }
 

@@ -8,10 +8,10 @@ use crate::view::rows::Expansion;
 /// Expansion, cursor and scroll position; `expansion` is `None` when the root is collapsed.
 #[derive(Debug, Clone)]
 pub struct TreeState {
-    pub root: RootItem,
-    pub expansion: Option<Expansion>,
-    pub cursor: Vec<u64>,
-    pub top: u64,
+    root: RootItem,
+    expansion: Option<Expansion>,
+    cursor: Vec<u64>,
+    top: u64,
 }
 
 impl TreeState {
@@ -37,6 +37,48 @@ impl TreeState {
     #[must_use]
     pub fn total_rows(&self) -> u64 {
         self.expansion.as_ref().map_or(1, Expansion::total)
+    }
+
+    #[must_use]
+    pub fn root(&self) -> RootItem {
+        self.root
+    }
+
+    #[must_use]
+    pub fn expansion(&self) -> Option<&Expansion> {
+        self.expansion.as_ref()
+    }
+
+    pub fn expansion_mut(&mut self) -> &mut Option<Expansion> {
+        &mut self.expansion
+    }
+
+    pub fn set_expansion(&mut self, expansion: Option<Expansion>) {
+        self.expansion = expansion;
+    }
+
+    /// The path of child indices from the root to the selected row.
+    #[must_use]
+    pub fn cursor(&self) -> &[u64] {
+        &self.cursor
+    }
+
+    pub fn cursor_mut(&mut self) -> &mut Vec<u64> {
+        &mut self.cursor
+    }
+
+    pub fn set_cursor(&mut self, cursor: Vec<u64>) {
+        self.cursor = cursor;
+    }
+
+    /// The row shown on the first line of the view.
+    #[must_use]
+    pub fn top(&self) -> u64 {
+        self.top
+    }
+
+    pub fn set_top(&mut self, top: u64) {
+        self.top = top;
     }
 
     #[must_use]

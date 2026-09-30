@@ -35,7 +35,7 @@ fn random_path(value: &Value, picks: &[prop::sample::Index]) -> Vec<Segment> {
 }
 
 fn cursor_path(tree: &MemTree, state: &TreeState) -> Vec<Segment> {
-    segments(tree, &chain(tree, &state.root, &state.cursor).unwrap()).unwrap()
+    segments(tree, &chain(tree, &state.root(), state.cursor()).unwrap()).unwrap()
 }
 
 proptest! {
@@ -49,8 +49,8 @@ proptest! {
         let target = random_path(&value, &picks);
         jump(&tree, &mut state, &parse(&render(&target)).unwrap(), 10).unwrap();
         prop_assert_eq!(cursor_path(&tree, &state), target);
-        let row = state.row_of(&state.cursor).unwrap();
-        prop_assert!(state.top <= row && row < state.top + 10);
+        let row = state.row_of(state.cursor()).unwrap();
+        prop_assert!(state.top() <= row && row < state.top() + 10);
     }
 }
 
@@ -71,7 +71,7 @@ fn jump_to(tree: &MemTree, path: &str) -> Result<TreeState, JumpError> {
 fn indices_behind_buckets_negative_indices_and_slices() {
     let tree = big();
     let state = jump_to(&tree, ".a[1500].n").unwrap();
-    assert_eq!(state.cursor, vec![0, 1, 476, 0]);
+    assert_eq!(state.cursor(), vec![0, 1, 476, 0]);
     assert_eq!(render(&cursor_path(&tree, &state)), ".a[1500].n");
     let last = jump_to(&tree, ".a[-1]").unwrap();
     assert_eq!(render(&cursor_path(&tree, &last)), ".a[1999]");

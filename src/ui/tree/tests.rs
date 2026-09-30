@@ -13,9 +13,9 @@ fn tree_of(text: &str) -> MemTree {
 }
 
 fn expand(tree: &MemTree, state: &mut TreeState, path: &[u64]) {
-    let item = resolve(tree, &state.root, path).unwrap().unwrap();
+    let item = resolve(tree, &state.root(), path).unwrap().unwrap();
     let level = level_of(tree, &item).unwrap();
-    assert!(state.expansion.as_mut().unwrap().expand(path, level));
+    assert!(state.expansion_mut().as_mut().unwrap().expand(path, level));
 }
 
 fn draw(tree: &MemTree, state: &TreeState, width: u16, height: u16) -> Buffer {
@@ -76,8 +76,8 @@ fn truncates_scalars_to_the_width() {
 fn highlights_the_cursor_row_and_scrolls() {
     let tree = tree_of(DOC);
     let mut state = TreeState::new(&tree).unwrap();
-    state.cursor = vec![2];
-    state.top = 2;
+    state.set_cursor(vec![2]);
+    state.set_top(2);
     let buf = draw(&tree, &state, 20, 2);
     assert_eq!(text_lines(&buf), [" │ ▸ b: [2]", "▎│   s: \"hello wor…\""]);
     let theme = Theme::default();
@@ -151,7 +151,7 @@ fn guides_mark_nesting_and_the_cursor_container_is_highlighted() {
     let tree = tree_of(r#"{"a": {"b": 1, "c": [1]}, "d": 2}"#);
     let mut state = TreeState::new(&tree).unwrap();
     expand(&tree, &mut state, &[0]);
-    state.cursor = vec![0, 0];
+    state.set_cursor(vec![0, 0]);
     let buf = draw(&tree, &state, 30, 5);
     let lines = text_lines(&buf);
     let theme = Theme::default();

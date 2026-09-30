@@ -21,10 +21,9 @@ impl Segment {
     /// # Errors
     /// Storage failures while reading the key.
     pub fn of(child: &Child, tree: &impl TreeIndex) -> Result<Self, IndexError> {
-        match &child.key {
-            Some(span) => Ok(Self::Key(unescape(&tree.bytes(span.clone())?).into_owned())),
-            None => Ok(Self::Index(child.index)),
-        }
+        Ok(tree
+            .key_of(child)?
+            .map_or(Self::Index(child.index), Self::Key))
     }
 }
 
