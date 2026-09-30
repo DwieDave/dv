@@ -129,3 +129,24 @@ fn value_text_respects_the_limit_and_covers_buckets_and_records() {
         Some("{\"a\":1}\n[2]".into())
     );
 }
+
+proptest! {
+    #[test]
+    fn the_line_count_matches_the_pretty_lines(value in json_value()) {
+        let (text, _) = layout(&value, " \n");
+        let tree = tree_of(&text);
+        let root = TreeState::new(&tree).unwrap().root;
+        let count = preview_line_count(&tree, &root.row()).unwrap();
+        prop_assert_eq!(count.lines, expected_lines(&value).len() as u64);
+        prop_assert!(!count.growing);
+    }
+}
+
+#[test]
+fn the_line_count_stops_at_the_cap() {
+    let items: Vec<String> = (0..MAX_PREVIEW_LINES + 50).map(|i| i.to_string()).collect();
+    let tree = tree_of(&format!("[{}]", items.join(",")));
+    let root = TreeState::new(&tree).unwrap().root;
+    let count = preview_line_count(&tree, &root.row()).unwrap();
+    assert_eq!(count.lines, MAX_PREVIEW_LINES);
+}

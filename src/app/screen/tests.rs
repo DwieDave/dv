@@ -440,3 +440,66 @@ fn following_keeps_the_cursor_on_the_newest_record() {
     assert_eq!(cursor(&app), vec![3], "elsewhere the cursor stays");
     stop.store(true, Ordering::Relaxed);
 }
+
+fn wheel(kind: crossterm::event::MouseEventKind, column: u16) -> AppEvent<MemTree> {
+    AppEvent::Input(Event::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    }))
+}
+
+/// An array of `n` numbers: `n + 2` preview lines.
+fn numbers(n: usize) -> Vec<u8> {
+    let items: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+    format!("[{}]", items.join(",")).into_bytes()
+}
+
+fn draw(app: &App<MemTree>) {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| view_app(app, frame)).unwrap();
+}
+
+#[test]
+fn the_preview_wheel_stops_at_the_last_page() {
+    use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+    let mut app = app();
+    update_app(&mut app, loaded(&numbers(50)));
+    for _ in 0..1000 {
+        update_app(&mut app, wheel(ScrollDown, 70));
+    }
+    draw(&app);
+    let preview = &model(&app).preview;
+    // 52 lines; the pane shows its height less two borders and the `…` row.
+    let page = model(&app).height - 3;
+    assert_eq!(preview.scroll, 52 - page);
+    update_app(&mut app, wheel(ScrollUp, 70));
+    assert_eq!(model(&app).preview.scroll, 52 - page - 3);
+}
+
+#[test]
+fn j_stops_at_the_last_page_with_and_without_wrap() {
+    let mut app = app();
+    update_app(&mut app, loaded(&numbers(50)));
+    for _ in 0..200 {
+        update_app(&mut app, key('J'));
+    }
+    let page = model(&app).height - 3;
+    assert_eq!(model(&app).preview.scroll, 52 - page);
+    update_app(&mut app, key('w'));
+    for _ in 0..200 {
+        update_app(&mut app, key('J'));
+    }
+    let preview = &model(&app).preview;
+    assert!(preview.scroll < 52, "scrolled to {}", preview.scroll);
+}
+
+#[test]
+fn a_huge_scroll_offset_shows_nothing_past_the_cap() {
+    use crate::view::preview::{MAX_PREVIEW_LINES, preview_lines};
+    let tree = MemTree::parse(MemSource::new(numbers(100_100))).unwrap();
+    let root = crate::view::state::TreeState::new(&tree).unwrap().root;
+    let got = preview_lines(&tree, &root.row(), MAX_PREVIEW_LINES + 7, 5).unwrap();
+    assert!(got.lines.is_empty());
+}

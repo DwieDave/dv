@@ -43,7 +43,9 @@ use crate::view::filtered::{FilterView, Filtered};
 use crate::view::history::JumpList;
 use crate::view::jump::{jump, reveal};
 use crate::view::nav::{self, Nav};
-use crate::view::preview::{MAX_PREVIEW_LINES, Preview, preview_lines, value_text};
+use crate::view::preview::{
+    LineCount, MAX_PREVIEW_LINES, Preview, preview_line_count, preview_lines, value_text,
+};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
 
@@ -235,6 +237,8 @@ pub enum Msg {
     Resize(u16, u16),
     Nav(Nav),
     Mouse(MouseEvent),
+    /// Consecutive wheel events of one kind, merged into a single step of `ticks`.
+    Wheel(MouseEvent, u64),
     OpenPrompt(PromptKind),
     SearchStep(Direction),
     SearchOutcome(Outcome),
@@ -370,6 +374,10 @@ pub struct PreviewState {
     pub wrap: bool,
     /// The cursor the scroll belongs to; a new cursor resets it.
     pub for_cursor: Vec<u64>,
+    /// The filter the count belongs to.
+    pub for_filter: Option<Arc<FilterView>>,
+    /// Lines in the value at `for_cursor`, counted on the first scroll.
+    pub count: Option<LineCount>,
 }
 
 impl Default for PreviewState {
@@ -381,6 +389,8 @@ impl Default for PreviewState {
             row: 0,
             wrap: false,
             for_cursor: Vec::new(),
+            for_filter: None,
+            count: None,
         }
     }
 }
@@ -394,6 +404,16 @@ pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     if model.preview.for_cursor != model.state.cursor {
         model.preview.for_cursor.clone_from(&model.state.cursor);
         (model.preview.scroll, model.preview.row) = (0, 0);
+        model.preview.count = None;
+    }
+    let same_filter = match (&model.preview.for_filter, &model.filter) {
+        (None, None) => true,
+        (Some(counted), Some(current)) => Arc::ptr_eq(counted, current),
+        _ => false,
+    };
+    if !same_filter {
+        model.preview.for_filter.clone_from(&model.filter);
+        model.preview.count = None;
     }
 }
 
@@ -446,8 +466,9 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             }
         }
         Msg::GoMark(c) => go_mark(model, c),
-        Msg::Mouse(_) if model.table.is_some() => {}
-        Msg::Mouse(mouse) => on_mouse(model, mouse),
+        Msg::Mouse(_) | Msg::Wheel(..) if model.table.is_some() => {}
+        Msg::Mouse(mouse) => on_mouse(model, mouse, 1),
+        Msg::Wheel(mouse, ticks) => on_mouse(model, mouse, ticks),
         Msg::OpenPrompt(PromptKind::Search) => search::open(model),
         Msg::OpenPrompt(PromptKind::Filter) => filter::open(model),
         Msg::FilterOpen => filter::open_match(model),
@@ -462,6 +483,9 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         Msg::ToggleFollow => model.effects.push(Effect::ToggleFollow),
         Msg::OpenTable => table::open(model),
         Msg::Refresh => {
+            if model.preview.count.is_some_and(|count| count.growing) {
+                model.preview.count = None;
+            }
             if let Err(err) = model
                 .state
                 .refresh(&Filtered::new(&*model.tree, model.filter.as_deref()))
@@ -560,20 +584,50 @@ fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps: u64) {
     match cmd {
         PreviewCmd::ScrollDown | PreviewCmd::ScrollUp if model.preview.wrap => {
             for _ in 0..steps {
-                scroll_row(model, cmd == PreviewCmd::ScrollDown);
+                if !scroll_row(model, cmd == PreviewCmd::ScrollDown) {
+                    break;
+                }
             }
+        }
+        PreviewCmd::ScrollDown => {
+            let limit = max_scroll(model);
+            preview_cmd(&mut model.preview, cmd, steps);
+            model.preview.scroll = model.preview.scroll.min(limit);
         }
         _ => preview_cmd(&mut model.preview, cmd, steps),
     }
 }
 
-/// Moves the wrapped preview one row, re-wrapping at most one neighboring line.
-fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) {
+/// The furthest the unwrapped preview scrolls: the last page of the value, or, while it is
+/// still growing, its last known line.
+fn max_scroll<T: TreeIndex>(model: &mut Model<T>) -> u64 {
+    if model.preview.count.is_none() {
+        let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
+        let item = resolve(tree, &model.state.root, &model.state.cursor);
+        model.preview.count = item
+            .ok()
+            .flatten()
+            .and_then(|item| preview_line_count(tree, &item).ok());
+    }
+    let page = model.height.saturating_sub(3).max(1);
+    match model.preview.count {
+        Some(count) if count.growing => count.lines.saturating_sub(1),
+        Some(count) => count.lines.saturating_sub(page),
+        None => MAX_PREVIEW_LINES,
+    }
+}
+
+/// Moves the wrapped preview one row, re-wrapping at most one neighboring line; false when it
+/// cannot move.
+fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) -> bool {
     let (line, row) = (model.preview.scroll, model.preview.row);
     let next = if down {
         match wrapped_rows(model, line) {
             Some(rows) if row + 1 < rows => Some((line, row + 1)),
-            _ => wrapped_rows(model, line + 1).map(|_| (line + 1, 0)),
+            _ if line + 1 < MAX_PREVIEW_LINES => {
+                wrapped_rows(model, line + 1).map(|_| (line + 1, 0))
+            }
+            _ => None,
         }
     } else if row > 0 {
         Some((line, row - 1))
@@ -581,9 +635,11 @@ fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) {
         line.checked_sub(1)
             .map(|up| (up, wrapped_rows(model, up).map_or(0, |rows| rows - 1)))
     };
-    if let Some((line, row)) = next {
-        (model.preview.scroll, model.preview.row) = (line, row);
-    }
+    let Some((line, row)) = next else {
+        return false;
+    };
+    (model.preview.scroll, model.preview.row) = (line, row);
+    true
 }
 
 /// Rows that preview line `line` wraps into, or `None` past the last line.
@@ -621,17 +677,25 @@ fn over_preview<T>(model: &Model<T>, column: u16) -> bool {
     model.preview.visible && model.width >= MIN_PREVIEW_WIDTH && column >= tree.right()
 }
 
-fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent) {
+fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent, ticks: u64) {
     let over_preview = over_preview(model, mouse.column);
     match mouse.kind {
         MouseEventKind::ScrollDown if over_preview => {
-            preview(model, PreviewCmd::ScrollDown, 3);
+            preview(model, PreviewCmd::ScrollDown, ticks.saturating_mul(3));
         }
         MouseEventKind::ScrollUp if over_preview => {
-            preview(model, PreviewCmd::ScrollUp, 3);
+            preview(model, PreviewCmd::ScrollUp, ticks.saturating_mul(3));
         }
-        MouseEventKind::ScrollDown => update(model, Msg::Nav(Nav::ScrollDown)),
-        MouseEventKind::ScrollUp => update(model, Msg::Nav(Nav::ScrollUp)),
+        MouseEventKind::ScrollDown => {
+            for _ in 0..ticks {
+                update(model, Msg::Nav(Nav::ScrollDown));
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            for _ in 0..ticks {
+                update(model, Msg::Nav(Nav::ScrollUp));
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) if over_preview => {}
         MouseEventKind::Down(MouseButton::Left) => {
             let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
@@ -1161,7 +1225,7 @@ mod tests {
     #[test]
     fn preview_keys_toggle_resize_and_scroll() {
         let mut model = model();
-        update(&mut model, Msg::Resize(100, 20));
+        update(&mut model, Msg::Resize(100, 8));
         assert!(model.preview.visible);
         typed(&mut model, ">>>>>>>>");
         assert_eq!(model.preview.tree_percent, 80);
