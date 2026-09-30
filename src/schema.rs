@@ -1,4 +1,4 @@
-//! Schema paths: unique key paths with array indices wildcarded, e.g. `.users[].name` (FR-17).
+//! Schema paths: unique key paths with array indices wildcarded, e.g. `.users[].name`.
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::ControlFlow;

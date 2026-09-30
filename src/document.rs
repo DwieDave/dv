@@ -1,4 +1,4 @@
-//! One document type for the app: in memory, live (indexing) or streamed (D-14).
+//! One document type for the app: in memory, live (indexing) or streamed.
 
 use std::borrow::Cow;
 use std::ops::Range;

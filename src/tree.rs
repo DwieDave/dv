@@ -1,4 +1,4 @@
-//! Mode-independent tree access used by the UI (D-14).
+//! Mode-independent tree access used by the UI.
 
 use std::borrow::Cow;
 use std::ops::{ControlFlow, Range};
@@ -122,7 +122,7 @@ pub trait TreeIndex {
     }
 
     /// The document's index of the child numbered `index` under `node` (they differ only
-    /// in a filtered view, FI-4).
+    /// in a filtered view).
     fn original_index(&self, _node: NodeRef, index: u64) -> u64 {
         index
     }

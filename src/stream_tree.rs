@@ -1,4 +1,4 @@
-//! The document tree in streaming mode: a spilled index over a file read on demand (FR-24).
+//! The document tree in streaming mode: a spilled index over a file read on demand.
 
 use std::borrow::Cow;
 use std::ops::{ControlFlow, Range};

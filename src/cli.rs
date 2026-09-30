@@ -1,4 +1,4 @@
-//! Command-line interface (FR-1, FR-3).
+//! Command-line interface.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
@@ -34,7 +34,7 @@ pub enum FormatArg {
     Yaml,
 }
 
-/// Storage mode override (streaming arrives in M5).
+/// Storage mode override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Mode {
     #[default]
@@ -85,14 +85,14 @@ pub enum CliError {
 
 /// A readable input and the facts used to load it.
 enum Input {
-    /// Read into memory; piped input longer than `spool_at` moves to a temp file (FR-28).
+    /// Read into memory; piped input longer than `spool_at` moves to a temp file.
     Memory {
         reader: Box<dyn Read + Send>,
         request: Request,
         label: String,
         spool_at: u64,
     },
-    /// Indexed from disk (FR-22).
+    /// Indexed from disk.
     Stream {
         file: File,
         path: PathBuf,
@@ -101,13 +101,13 @@ enum Input {
     },
 }
 
-/// An input and whether it is an NDJSON file, which `F` can follow (FO-4).
+/// An input and whether it is an NDJSON file, which `F` can follow.
 struct Opened {
     input: Input,
     ndjson_file: bool,
 }
 
-/// In-memory mode never holds more than the u32 index can address (NFR-8).
+/// In-memory mode never holds more than the u32 index can address.
 const MAX_IN_MEMORY: u64 = u32::MAX as u64;
 
 /// Runs `dv`; returns a summary to print for `--index-only`.
@@ -156,7 +156,7 @@ pub fn run(cli: &Cli) -> Result<Option<String>, CliError> {
     Ok(None)
 }
 
-/// Saves the cursor for next time (HI-3); failing to is only worth a warning.
+/// Saves the cursor for next time; failing to is only worth a warning.
 fn remember(state: &Path, key: FileKey, cursor: Vec<u64>) {
     if let Err(err) = Positions::update(state, key, cursor) {
         eprintln!("dv: could not remember the position: {err}");
@@ -211,7 +211,7 @@ fn index_only_input(input: Input, budget: StreamBudget) -> Result<String, CliErr
     }
 }
 
-/// The file named on the command line, or stdin when omitted or `-` (FR-1, FR-2).
+/// The file named on the command line, or stdin when omitted or `-`.
 fn open_input(cli: &Cli, limit: u64) -> Result<Opened, CliError> {
     let base = Request {
         format: cli.format.map(Format::from),
@@ -308,7 +308,7 @@ impl From<FormatArg> for Format {
     }
 }
 
-/// Loads and indexes without starting the UI (benchmarks, NFR-1).
+/// Loads and indexes without starting the UI (benchmarks).
 fn index_only(
     file: impl Read,
     request: &Request,
@@ -339,7 +339,7 @@ struct Session {
 }
 
 /// Runs the UI; returns the final cursor of the open document. `F` on an NDJSON file
-/// reopens `reopen`'s path following it, keeping the cursor (FO-4).
+/// reopens `reopen`'s path following it, keeping the cursor.
 fn tui(
     first: Session,
     config: &Config,
@@ -368,7 +368,7 @@ struct Ended {
     reopen: bool,
 }
 
-/// Opens the UI at once while a worker thread loads and indexes the input (FR-8).
+/// Opens the UI at once while a worker thread loads and indexes the input.
 fn run_session(
     guard: &mut TerminalGuard,
     session: Session,
@@ -431,7 +431,7 @@ fn following(
     })
 }
 
-/// Streams and indexes a file without starting the UI (benchmarks, NFR-12).
+/// Streams and indexes a file without starting the UI (benchmarks).
 fn index_only_stream(
     file: File,
     path: &str,

@@ -1,4 +1,4 @@
-//! Supported input formats and their detection (FR-3).
+//! Supported input formats and their detection.
 
 use std::path::Path;
 

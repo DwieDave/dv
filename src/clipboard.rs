@@ -1,4 +1,4 @@
-//! Copying text to the system clipboard: pbcopy locally, OSC 52 over SSH (FR-18, D-10).
+//! Copying text to the system clipboard: pbcopy locally, OSC 52 over SSH.
 
 use std::io::{self, Write};
 use std::process::{Command, Stdio};

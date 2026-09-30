@@ -1,4 +1,4 @@
-//! `~/.config/dv/config.toml`: named themes and mode settings (FR-21, FR-22, FR-25).
+//! `~/.config/dv/config.toml`: named themes and mode settings.
 
 use std::io;
 use std::path::{Path, PathBuf};
