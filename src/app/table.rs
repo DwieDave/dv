@@ -1,10 +1,8 @@
 //! The table view over an array of objects: opening it and its keys (TB-1, TB-4).
 
-use std::sync::atomic::Ordering;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::search::{SortSpec, Work, submit_job};
+use crate::app::search::{JobKind, SortSpec, Work, submit_job};
 use crate::app::{Model, jumped};
 use crate::index::IndexError;
 use crate::json::lex::Kind;
@@ -127,7 +125,7 @@ fn sort<T: TreeIndex>(model: &mut Model<T>, rows: u64) {
     });
     let Some(spec) = spec else {
         // Nothing to wait for: a running sort's result is now stale.
-        model.generation.fetch_add(1, Ordering::Relaxed);
+        model.generation.next(JobKind::Sort);
         return;
     };
     model.note = Some("sorting…".to_owned());

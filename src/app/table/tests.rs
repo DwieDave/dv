@@ -200,3 +200,20 @@ fn enter_on_a_sorted_row_opens_that_element() {
     press(&mut model, KeyCode::Enter);
     assert_eq!(model.state.cursor, vec![1]);
 }
+
+#[test]
+fn a_failed_sort_shows_its_error_and_stops_sorting() {
+    use crate::app::search::{JobKind, JobResult, Outcome, apply};
+    let mut model = model_of(PEOPLE, 40, 12);
+    keys(&mut model, "t");
+    model.note = Some("sorting…".to_owned());
+    let generation = model.generation.next(JobKind::Sort);
+    let failed = Outcome {
+        generation,
+        kind: JobKind::Sort,
+        result: JobResult::Failed("read failed".to_owned()),
+    };
+    apply(&mut model, failed);
+    assert_eq!(model.status.as_deref(), Some("read failed"));
+    assert_eq!(model.note, None);
+}

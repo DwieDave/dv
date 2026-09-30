@@ -54,7 +54,6 @@ fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(
     let (path, node) = found
         .map_err(|err| err.to_string())?
         .ok_or("filter needs an array or object")?;
-    model.prompt = None;
     model.filtering = Some(FilterState {
         text: text.to_owned(),
         path: path.clone(),
@@ -68,7 +67,12 @@ fn start<T: TreeIndex>(model: &mut Model<T>, text: &str, expr: Expr) -> Result<(
         matches,
         done,
     }));
-    rebuild(model, path, true).map_err(|err| err.to_string())?;
+    if let Err(err) = rebuild(model, path, true) {
+        model.filtering = None;
+        model.filter = None;
+        return Err(err.to_string());
+    }
+    model.prompt = None;
     let root = model.state.root;
     submit_job(
         model,
@@ -107,6 +111,13 @@ pub fn receive<T: TreeIndex>(model: &mut Model<T>, scan: Scan, done: bool) {
     let view = Filtered::new(&*model.tree, model.filter.as_deref());
     if let Err(err) = model.state.refresh(&view) {
         model.status = Some(err.to_string());
+    }
+}
+
+/// A failed scan will not finish: the view keeps what it has and stops saying it is scanning.
+pub fn finish<T>(model: &mut Model<T>) {
+    if let Some(filter) = model.filter.as_mut() {
+        Arc::make_mut(filter).done = true;
     }
 }
 
