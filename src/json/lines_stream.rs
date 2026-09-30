@@ -500,6 +500,18 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_record_does_not_swallow_the_next_line() {
+        let text = b"{\"a\":1\n{\"b\":2}\n{\"c\":3}\n";
+        for initial in 1..12 {
+            let got = streamed(text, initial);
+            assert_eq!(got.lines.count(), 3, "initial {initial}");
+            let bad = got.lines.bad_at(0).unwrap().map(|b| b.resume);
+            assert_eq!(bad, Some(7), "initial {initial}");
+            assert_eq!(got.lines.bad_at(7).unwrap(), None);
+        }
+    }
+
+    #[test]
     fn invalid_utf8_in_a_multi_line_record_resumes_inside_it() {
         let text = b"[\"\xff\",\n1]\n2\n";
         for initial in 1..12 {
