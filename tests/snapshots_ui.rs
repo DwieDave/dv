@@ -99,3 +99,63 @@ fn tree_and_preview() {
     keys(&mut app, "jl");
     insta::assert_snapshot!(render(&app, 70, 10));
 }
+
+fn press(app: &mut App<MemTree>, code: KeyCode) {
+    update_app(app, AppEvent::Input(Event::Key(KeyEvent::from(code))));
+}
+
+fn records_app() -> Result<App<MemTree>, dv::error::ParseError> {
+    let rows: Vec<String> = (0..30)
+        .map(|i| format!(r#"{{"id":{i},"name":"user{i}","ok":{}}}"#, i % 2 == 0))
+        .collect();
+    let text = format!("[{}]", rows.join(","));
+    let tree = MemTree::parse(MemSource::new(text.into_bytes()))?;
+    let mut app = app();
+    update_app(&mut app, AppEvent::Input(Event::Resize(60, 12)));
+    update_app(&mut app, AppEvent::Load(LoadEvent::Loaded(Ok(tree))));
+    Ok(app)
+}
+
+#[test]
+fn filter_prompt() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "f.id > 2");
+    insta::assert_snapshot!(render(&app, 60, 12));
+}
+
+#[test]
+fn filtered_records() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "f.id > 25");
+    press(&mut app, KeyCode::Enter);
+    insta::assert_snapshot!(render(&app, 60, 12));
+}
+
+#[test]
+fn table_view() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "t");
+    insta::assert_snapshot!(render(&app, 60, 12));
+}
+
+#[test]
+fn help_screen() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "?");
+    insta::assert_snapshot!(render(&app, 70, 40));
+}
+
+#[test]
+fn search_prompt() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "/user1");
+    insta::assert_snapshot!(render(&app, 60, 12));
+}
+
+#[test]
+fn search_result() {
+    let mut app = records_app().unwrap();
+    keys(&mut app, "/user2");
+    press(&mut app, KeyCode::Enter);
+    insta::assert_snapshot!(render(&app, 60, 12));
+}

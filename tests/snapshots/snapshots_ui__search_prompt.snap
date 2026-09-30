@@ -1,0 +1,16 @@
+---
+source: tests/snapshots_ui.rs
+expression: "render(&app, 60, 12)"
+---
+ ▾ [30]                       ┌ preview ───────────────────┐
+ │ ▾ [0]: {3}                 │user1                       │
+ │ │   id: 0                  │                            │
+ │ │   name: "user0"          │                            │
+ │ │   ok: true               │                            │
+ │ ▾ [1]: {3}                 │                            │
+ │ │   id: 1                  │                            │
+▎│ │   name: "user1"          │                            │
+ │ │   ok: false              └────────────────────────────┘
+────────────────────────────────────────────────────────────
+/user1
+ ⏎ count  esc cancel  tab scope  ^r regex  ^e case

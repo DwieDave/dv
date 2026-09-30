@@ -1,0 +1,16 @@
+---
+source: tests/snapshots_ui.rs
+expression: "render(&app, 60, 12)"
+---
+▎▾ [4]                        ┌ preview ───────────────────┐
+ │ ▸ [26]: {3}                │[                           │
+ │ ▸ [27]: {3}                │  {                         │
+ │ ▸ [28]: {3}                │    "id": 0,                │
+ │ ▸ [29]: {3}                │    "name": "user0",        │
+                              │    "ok": true              │
+                              │  },                        │
+                              │…                           │
+                              └────────────────────────────┘
+────────────────────────────────────────────────────────────
+.  array                                     4 of 30 records
+ o open  esc clear  f edit  j/k move  h/l fold  ? more

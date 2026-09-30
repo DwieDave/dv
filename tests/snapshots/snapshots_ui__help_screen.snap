@@ -1,0 +1,44 @@
+---
+source: tests/snapshots_ui.rs
+expression: "render(&app, 70, 40)"
+---
+▎▾ [30┌ keys ──────────────────────────────────────────────────┐─────┐
+ │ ▸ [│ Navigation                                             │     │
+ │ ▸ [│   j k  ↓ ↑   move down / up                            │     │
+ │ ▸ [│   l  →       expand, or move into                      │     │
+ │ ▸ [│   h  ←       collapse, or move to the parent           │     │
+ │ ▸ [│   ␣  ⏎       toggle expand                             │     │
+ │ ▸ [│   gg  Home   top                                       │     │
+ │ ▸ [│   G  End     bottom                                    │     │
+ │ ▸ [│   ^d ^u      half page down / up                       │     │
+ │ ▸ [│   PgDn PgUp  page down / up                            │     │
+ │ ▸ [│   zo         expand all children                       │     │
+ │ ▸ [│   zc         collapse the subtree                      │     │
+ │ ▸ [│   zM         collapse everything                       │     │
+ │ ▸ [│                                                        │     │
+ │ ▸ [│ Finding                                                │     │
+ │ ▸ [│   /          search as you type (⏎ count, esc back)    │     │
+ │ ▸ [│   tab        in search: keys / values / both           │     │
+ │ ▸ [│   ^r ^e      in search: regex / case sensitivity       │     │
+ │ ▸ [│   n N        next / previous match                     │     │
+ │ ▸ [│   :          jump to a path, e.g. .items[-1].id        │     │
+ │ ▸ [│   f          filter the array, e.g. .age > 30 and has(.│     │
+ │ ▸ [│   o          in a filter: open the match in the full tr│     │
+ │ ▸ [│   esc        in a filter: clear it                     │     │
+ │ ▸ [│   ^p         fuzzy picker over key paths               │     │
+ │ ▸ [│   ^o  tab    back / forward through jumps              │     │
+ │ ▸ [│   m{a-z}     set a mark                                │     │
+ │ ▸ [│   '{a-z}     go to a mark                              │     │
+ │ ▸ [│                                                        │     │
+ │ ▸ [│ Preview & copy                                         │     │
+ │ ▸ [│   p          show or hide the preview                  │     │
+ │ ▸ [│   < >        move the split                            │     │
+      │   J K        scroll the preview                        │     │
+      │   w          wrap long lines in the preview            │     │
+      │   yp         copy the path                             │     │
+      │   yy yY      copy the value, minified / pretty         │     │
+      │   F          follow the file as it grows (NDJSON)      │     │
+      └────────────────────────────────────────────────────────┘─────┘
+──────────────────────────────────────────────────────────────────────
+.  array                                      JSON  1.1 kB  121 values
+ j/k scroll  esc close
