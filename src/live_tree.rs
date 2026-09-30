@@ -363,8 +363,8 @@ mod tests {
             let mut failure = None;
             let publish = |b: &mut SpillBuilder, lines: &mut PendingLines<'_>, frontier: u64, moment: Moment| {
                 let last = moment == Moment::Last;
-                b.publish(frontier, last);
-                lines.publish(last);
+                b.publish(frontier, last).unwrap();
+                lines.publish(last).unwrap();
                 if failure.is_none() {
                     failure = check_lines(&finished, &live, last).err();
                 }
@@ -386,7 +386,7 @@ mod tests {
             let live = LiveTree::new(MemSource::new(text.as_bytes().to_vec()), store, root);
             let mut failure = None;
             let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
-                b.publish(frontier, last);
+                b.publish(frontier, last).unwrap();
                 if failure.is_none() {
                     failure = check(&text, &containers, &finished, &live, frontier).err();
                 }

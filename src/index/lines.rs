@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::error::ParseErrorKind;
 use crate::index::children::{Child, skip_value};
+use crate::index::spill::copy_error;
 use crate::index::store::{CHECKPOINT_EVERY, NodeStore};
 use crate::index::u64file::{U64File, read_u64};
 use crate::index::window::{OffsetStore, ReadWindow, StreamChildren, stream_seek, trusted};
@@ -69,20 +70,29 @@ impl LineSpill {
 
     /// Makes the records before the frontier visible; `pending` means the last record
     /// started is still being parsed.
-    pub fn publish(&mut self, pending: bool, done: bool) {
+    ///
+    /// # Errors
+    /// The first write failure, or a poisoned view lock; nothing is published after it.
+    pub fn publish(&mut self, pending: bool, done: bool) -> io::Result<()> {
+        self.check()?;
         let Some(shared) = self.live.clone() else {
-            return;
+            return Ok(());
         };
         let Ok(mut view) = shared.view.write() else {
-            return;
+            self.fail(io::Error::other("the live index lock was poisoned"));
+            return self.check();
         };
         let flushed = self.checkpoints.flush().and_then(|()| self.bad.flush());
-        flushed.unwrap_or_else(|err| self.fail(err));
+        if let Err(err) = flushed {
+            self.fail(err);
+            return self.check();
+        }
         *view = View {
             count: self.count - u64::from(pending),
             bad: self.bad.len() / 3,
             done,
         };
+        Ok(())
     }
 
     pub fn record_start(&mut self, start: u64) {
@@ -102,6 +112,13 @@ impl LineSpill {
 
     fn fail(&mut self, err: io::Error) {
         self.error.get_or_insert(err);
+    }
+
+    /// The first write failure, reported again to every caller.
+    fn check(&self) -> io::Result<()> {
+        self.error
+            .as_ref()
+            .map_or(Ok(()), |err| Err(copy_error(err)))
     }
 
     /// # Errors
@@ -203,8 +220,11 @@ pub struct PendingLines<'a> {
 
 impl PendingLines<'_> {
     /// Makes the records before the frontier visible (no-op unless live).
-    pub fn publish(&mut self, done: bool) {
-        self.spill.publish(self.pending, done);
+    ///
+    /// # Errors
+    /// As [`LineSpill::publish`].
+    pub fn publish(&mut self, done: bool) -> io::Result<()> {
+        self.spill.publish(self.pending, done)
     }
 }
 

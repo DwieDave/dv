@@ -124,6 +124,27 @@ impl SpillBuilder {
         self.error.get_or_insert(err);
     }
 
+    /// The first write failure, reported again to every caller.
+    fn check(&self) -> io::Result<()> {
+        self.error
+            .as_ref()
+            .map_or(Ok(()), |err| Err(copy_error(err)))
+    }
+
+    /// Makes every later write fail, for tests of the failure paths.
+    #[cfg(test)]
+    pub(crate) fn break_writes(&mut self) {
+        let read_only = || File::open("/dev/null").unwrap();
+        self.records.file = read_only();
+        self.stack.file = read_only();
+        self.cps.file = read_only();
+    }
+
+    /// The first write failure so far, if any.
+    pub(crate) fn failure(&self) -> Option<io::Error> {
+        self.check().err()
+    }
+
     fn record(&mut self, open: Open, end: u64) -> io::Result<()> {
         let first = if open.count > CHECKPOINT_EVERY {
             let run = self.stack.read(open.cp_base..self.stack.len())?;
@@ -282,9 +303,11 @@ impl Records {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        for (slot, record) in std::mem::take(&mut self.late) {
-            self.file.write_all_at(&record, slot * RECORD)?;
+        // Late closes stay queued until written, so a failed flush can be retried.
+        for (slot, record) in &self.late {
+            self.file.write_all_at(record, slot * RECORD)?;
         }
+        self.late.clear();
         let bytes: Vec<u8> = self.window.iter().flatten().copied().collect();
         self.file.write_all_at(&bytes, self.low * RECORD)?;
         self.low += self.window.len() as u64;
@@ -366,20 +389,30 @@ impl SpillBuilder {
         Ok((builder, LiveStore { shared }))
     }
 
-    /// Makes everything parsed before `frontier` visible to readers.
-    pub fn publish(&mut self, frontier: u64, done: bool) {
+    /// Makes everything parsed before `frontier` visible to readers. After the first
+    /// failure nothing more is published and every call reports it.
+    ///
+    /// # Errors
+    /// The first write failure, or a poisoned view lock.
+    pub fn publish(&mut self, frontier: u64, done: bool) -> io::Result<()> {
+        self.check()?;
         let Some(shared) = self.live.clone() else {
-            return;
+            return Ok(());
         };
         let Ok(mut view) = shared.view.write() else {
-            return;
+            let err = io::Error::other("the live index lock was poisoned");
+            self.fail(err);
+            return self.check();
         };
         let flushed = self
             .records
             .flush()
             .and_then(|()| self.cps.flush())
             .and_then(|()| self.stack.flush());
-        flushed.unwrap_or_else(|err| self.fail(err));
+        if let Err(err) = flushed {
+            self.fail(err);
+            return self.check();
+        }
         let opens = self
             .open
             .iter()
@@ -396,7 +429,13 @@ impl SpillBuilder {
             opens,
             done,
         };
+        Ok(())
     }
+}
+
+/// An equivalent error, since [`io::Error`] cannot be cloned.
+pub(crate) fn copy_error(err: &io::Error) -> io::Error {
+    io::Error::new(err.kind(), err.to_string())
 }
 
 #[cfg(test)]
@@ -471,7 +510,7 @@ mod tests {
         };
         let source = MemSource::new(text.as_bytes().to_vec());
         let publish = |b: &mut SpillBuilder, frontier: u64, last: bool| {
-            b.publish(frontier, last);
+            b.publish(frontier, last).unwrap();
             let view = live.view();
             assert_eq!(view.frontier, frontier);
             for (start, byte) in text
@@ -570,5 +609,34 @@ mod tests {
                 prop_assert_eq!(a.map(|n| (n.start, n.end)), b.map(|n| (n.start, n.end)), "offset {}", offset);
             }
         }
+    }
+
+    #[test]
+    fn a_failed_flush_keeps_the_late_records() {
+        let mut records = Records::new(File::open("/dev/null").unwrap(), 4);
+        records.low = 10;
+        records.defer = true;
+        records.put(3, encode([1, 2, 3, 4])).unwrap();
+        assert!(records.flush().is_err());
+        assert_eq!(records.late.len(), 1);
+    }
+
+    #[test]
+    fn publishing_stops_after_the_first_write_failure() {
+        let (mut builder, store) = SpillBuilder::live(SpillLimits {
+            window: 2,
+            stack: 2,
+            cache: 4096,
+        })
+        .unwrap();
+        builder.break_writes();
+        for i in 0..4u64 {
+            builder.open(i * 100);
+            builder.close(SpillSlot, i * 100 + 99);
+        }
+        assert!(builder.publish(400, false).is_err());
+        assert!(builder.publish(500, false).is_err());
+        assert_eq!(store.view().frontier, 0);
+        assert!(builder.finish().is_err());
     }
 }

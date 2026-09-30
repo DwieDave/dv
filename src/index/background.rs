@@ -1,11 +1,13 @@
 //! The spilled index built on its own thread: the parser only queues events (NFR-12).
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::index::live::LiveStore;
-use crate::index::spill::{SpillBuilder, SpillLimits, SpillSlot, SpillStore};
+use crate::index::spill::{SpillBuilder, SpillLimits, SpillSlot, SpillStore, copy_error};
 use crate::index::store::Builder;
 use crate::source::SourceError;
 
@@ -29,13 +31,45 @@ enum Message {
     Publish { frontier: u64, done: bool },
 }
 
+/// The first failure of a [`BackgroundSpill`], latched so the loader can stop at once.
+#[derive(Debug, Default)]
+pub struct Failure {
+    set: AtomicBool,
+    error: Mutex<Option<io::Error>>,
+}
+
+impl Failure {
+    /// Latches `err` unless a failure is already latched.
+    pub fn set(&self, err: io::Error) {
+        if let Ok(mut slot) = self.error.lock() {
+            slot.get_or_insert(err);
+        }
+        self.set.store(true, Ordering::Release);
+    }
+
+    /// Whether the builder failed or died.
+    pub fn is_set(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+
+    /// The latched error, if any; later calls see an equivalent copy.
+    pub fn error(&self) -> Option<io::Error> {
+        let slot = self.error.lock().ok()?;
+        slot.as_ref().map(copy_error)
+    }
+}
+
 /// A [`SpillBuilder`] on its own thread; calls are batched and replayed in order.
+///
+/// Dropping it stops the thread and waits for it.
 #[derive(Debug)]
 pub struct BackgroundSpill {
     batch: Vec<Event>,
     tx: Option<SyncSender<Message>>,
     spare: Receiver<Vec<Event>>,
-    published: Receiver<()>,
+    published: Receiver<io::Result<()>>,
+    failure: Arc<Failure>,
+    cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<Result<SpillStore, SourceError>>>,
 }
 
@@ -59,14 +93,26 @@ impl BackgroundSpill {
         let (tx, rx) = sync_channel(QUEUED);
         let (spare_tx, spare) = channel();
         let (published_tx, published) = channel();
-        let worker = thread::spawn(move || replay(builder, &rx, &spare_tx, &published_tx));
+        let failure = Arc::new(Failure::default());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (latch, stop) = (Arc::clone(&failure), Arc::clone(&cancelled));
+        let worker =
+            thread::spawn(move || replay(builder, &rx, &spare_tx, &published_tx, &latch, &stop));
         Self {
             batch: Vec::with_capacity(BATCH),
             tx: Some(tx),
             spare,
             published,
+            failure,
+            cancelled,
             worker: Some(worker),
         }
+    }
+
+    /// The latch set when the builder fails or its thread dies.
+    #[must_use]
+    pub fn failure(&self) -> Arc<Failure> {
+        Arc::clone(&self.failure)
     }
 
     fn push(&mut self, event: Event) {
@@ -83,18 +129,38 @@ impl BackgroundSpill {
             .try_recv()
             .unwrap_or_else(|_| Vec::with_capacity(BATCH));
         let batch = std::mem::replace(&mut self.batch, fresh);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Events(batch));
+        if let Some(tx) = &self.tx
+            && tx.send(Message::Events(batch)).is_err()
+        {
+            self.failure.set(gone());
         }
     }
 
     /// Makes everything before `frontier` visible to readers; returns once it is.
-    pub fn publish(&mut self, frontier: u64, done: bool) {
+    ///
+    /// # Errors
+    /// The builder's first failure, or its thread dying. Nothing is published after it.
+    pub fn publish(&mut self, frontier: u64, done: bool) -> io::Result<()> {
         self.send();
-        if let Some(tx) = &self.tx
-            && tx.send(Message::Publish { frontier, done }).is_ok()
-        {
-            let _ = self.published.recv();
+        let sent = self
+            .tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(Message::Publish { frontier, done }).is_ok());
+        let reply = if sent {
+            self.published.recv().ok()
+        } else {
+            None
+        };
+        match reply {
+            Some(Ok(())) => Ok(()),
+            Some(Err(err)) => {
+                self.failure.set(copy_error(&err));
+                Err(err)
+            }
+            None => {
+                self.failure.set(gone());
+                Err(self.failure.error().unwrap_or_else(gone))
+            }
         }
     }
 
@@ -105,13 +171,29 @@ impl BackgroundSpill {
     pub fn finish(mut self) -> Result<SpillStore, SourceError> {
         self.send();
         self.tx = None;
-        let worker = self.worker.take().ok_or_else(gone)?;
-        worker.join().map_err(|_| gone())?
+        let worker = self
+            .worker
+            .take()
+            .ok_or_else(|| SourceError::from(gone()))?;
+        worker.join().map_err(|_| SourceError::from(gone()))?
     }
 }
 
-fn gone() -> SourceError {
-    io::Error::other("the index builder thread stopped").into()
+fn gone() -> io::Error {
+    io::Error::other("the index builder thread stopped")
+}
+
+impl Drop for BackgroundSpill {
+    fn drop(&mut self) {
+        // Cancel: the thread skips what is still queued, then ends when the channel closes.
+        if self.worker.is_some() {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        self.tx = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Builder for BackgroundSpill {
@@ -145,20 +227,34 @@ fn replay(
     mut builder: SpillBuilder,
     rx: &Receiver<Message>,
     spare: &Sender<Vec<Event>>,
-    published: &Sender<()>,
+    published: &Sender<io::Result<()>>,
+    failure: &Failure,
+    cancelled: &AtomicBool,
 ) -> Result<SpillStore, SourceError> {
     let mut mark = None;
     for message in rx {
         match message {
             Message::Events(mut events) => {
-                for event in events.drain(..) {
-                    apply(&mut builder, &mut mark, event);
+                if !failure.is_set() && !cancelled.load(Ordering::Acquire) {
+                    for event in events.drain(..) {
+                        apply(&mut builder, &mut mark, event);
+                    }
+                    if let Some(err) = builder.failure() {
+                        failure.set(err);
+                    }
                 }
+                events.clear();
                 let _ = spare.send(events);
             }
             Message::Publish { frontier, done } => {
-                builder.publish(frontier, done);
-                let _ = published.send(());
+                let reply = match failure.error() {
+                    Some(err) => Err(err),
+                    None => builder.publish(frontier, done),
+                };
+                if let Err(err) = &reply {
+                    failure.set(copy_error(err));
+                }
+                let _ = published.send(reply);
             }
         }
     }
@@ -249,9 +345,61 @@ mod tests {
             builder.open(i * 100);
             builder.close(SpillSlot, i * 100 + 99);
         }
-        builder.publish(5_000_000, false);
+        builder.publish(5_000_000, false).unwrap();
         assert_eq!(store.view().frontier, 5_000_000);
         assert!(store.node_at(4_999_900).unwrap().is_some());
         builder.finish().unwrap();
+    }
+
+    #[test]
+    fn a_write_failure_is_reported_by_publish_and_latched() {
+        let (mut builder, _store) = SpillBuilder::live(LIMITS).unwrap();
+        builder.break_writes();
+        let mut background = BackgroundSpill::spawn(builder);
+        let failure = background.failure();
+        for i in 0..100u64 {
+            background.open(i * 100);
+            background.close(SpillSlot, i * 100 + 99);
+        }
+        assert!(background.publish(10_000, false).is_err());
+        assert!(failure.is_set());
+        assert!(background.publish(20_000, false).is_err());
+        assert!(failure.error().is_some());
+        assert!(background.finish().is_err());
+    }
+
+    #[test]
+    fn a_dead_builder_thread_is_noticed_at_once() {
+        let (tx, rx) = sync_channel(QUEUED);
+        drop(rx);
+        let (_spare_tx, spare) = channel();
+        let (_published_tx, published) = channel();
+        let mut background = BackgroundSpill {
+            batch: Vec::new(),
+            tx: Some(tx),
+            spare,
+            published,
+            failure: Arc::new(Failure::default()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            worker: Some(thread::spawn(|| Err(gone().into()))),
+        };
+        let failure = background.failure();
+        background.open(0);
+        background.send();
+        assert!(failure.is_set());
+        assert!(background.publish(10, false).is_err());
+    }
+
+    #[test]
+    fn dropping_the_builder_joins_its_thread() {
+        let (mut background, _store) = BackgroundSpill::live(LIMITS).unwrap();
+        let failure = background.failure();
+        for i in 0..50_000u64 {
+            background.open(i * 100);
+            background.close(SpillSlot, i * 100 + 99);
+        }
+        drop(background);
+        // The thread held the only other reference.
+        assert_eq!(Arc::strong_count(&failure), 1);
     }
 }
