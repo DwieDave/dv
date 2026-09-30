@@ -18,8 +18,7 @@ use crate::tree::TreeIndex;
 use crate::ui::error::error_lines;
 use crate::ui::status::human_bytes;
 use crate::ui::theme::Theme;
-use crate::view::filtered::Filtered;
-use crate::view::jump::{bucket_rows, reveal};
+use crate::view::jump::bucket_rows;
 use crate::view::resolve::resolve;
 
 /// What is on screen.
@@ -161,12 +160,10 @@ fn try_restore<T: TreeIndex>(app: &mut App<T>) {
     let (Screen::Ready(model), Some(rows)) = (&mut app.screen, &app.restore) else {
         return;
     };
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
-    if !matches!(resolve(tree, &model.state.root, rows), Ok(Some(_))) {
+    if !matches!(resolve(&model.view(), &model.state.root, rows), Ok(Some(_))) {
         return;
     }
-    let result = reveal(tree, &mut model.state, rows.clone(), model.height);
-    model.status = result.err().map(|err| err.to_string());
+    model.reveal(rows.clone(), false);
     app.restore = None;
 }
 
@@ -205,7 +202,7 @@ fn apply_event<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, event: Ap
 
 /// Shows the loaded document (or the failure).
 fn open<T: TreeIndex + Send + Sync + 'static>(app: &mut App<T>, result: Result<T, LoadFailure>) {
-    app.screen = ready_or_failed(result, app.size);
+    app.screen = ready_or_failed(result);
     if let Screen::Ready(model) = &mut app.screen {
         model.theme = app.theme;
         model.status = app.warning.take();
@@ -224,20 +221,12 @@ fn refresh<T: TreeIndex>(model: &mut Model<T>, tail: &mut u64) {
     let last = |n: u64| bucket_rows(n, n.saturating_sub(1));
     let on_last = model.following && *tail > 0 && model.state.cursor == last(*tail);
     update(model, Msg::Refresh);
-    let Ok(count) =
-        Filtered::new(&*model.tree, model.filter.as_deref()).child_count(model.state.root.node)
-    else {
+    let Ok(count) = model.view().child_count(model.state.root.node) else {
         return;
     };
     let records = count.available();
     if on_last && records > *tail {
-        let moved = reveal(
-            &Filtered::new(&*model.tree, model.filter.as_deref()),
-            &mut model.state,
-            last(records),
-            model.height,
-        );
-        model.status = moved.err().map(|err| err.to_string());
+        model.reveal(last(records), false);
     }
     *tail = records;
 }
@@ -310,16 +299,10 @@ fn attach_worker<T: TreeIndex + Send + Sync + 'static>(
     ));
 }
 
-fn ready_or_failed<T: TreeIndex>(
-    result: Result<T, LoadFailure>,
-    (cols, rows): (u16, u16),
-) -> Screen<T> {
+fn ready_or_failed<T: TreeIndex>(result: Result<T, LoadFailure>) -> Screen<T> {
     let model = result.and_then(|tree| Model::new(tree).map_err(|err| LoadFailure::plain(&err)));
     match model {
-        Ok(mut model) => {
-            update(&mut model, Msg::Resize(cols, rows));
-            Screen::Ready(Box::new(model))
-        }
+        Ok(model) => Screen::Ready(Box::new(model)),
         Err(failure) => Screen::Failed(failure),
     }
 }

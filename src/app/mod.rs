@@ -1,8 +1,10 @@
 //! The Elm-style application core: model, messages, update and view.
 
 pub mod filter;
+pub mod jumps;
 pub mod keymap;
 pub mod picker;
+pub mod preview;
 pub mod prompt;
 pub mod run;
 pub mod screen;
@@ -10,18 +12,22 @@ pub mod search;
 pub mod table;
 pub mod terminal;
 
+pub use jumps::Step;
+pub(crate) use jumps::jumped;
+pub use preview::{PreviewCmd, PreviewState};
+
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
 
+use crate::app::jumps::{go_mark, history, set_mark};
 use crate::app::keymap::Keymap;
 use crate::app::picker::{Catalog, Picker};
+use crate::app::preview::{on_mouse, panes, preview};
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::search::{Generations, Job, Outcome, SearchState};
 use crate::app::table::TableState;
@@ -29,24 +35,23 @@ use crate::index::IndexError;
 use crate::json::format::Style;
 use crate::json::lex::Kind;
 use crate::path::{parse, render};
-use crate::search::{Direction, Query, Scope};
+use crate::search::Direction;
 use crate::tree::TreeIndex;
 use crate::ui::footer::{Context, hint_line, hints};
-use crate::ui::help::help_lines;
-use crate::ui::preview::{PreviewWidget, highlight};
+use crate::ui::help::{help_lines, render_help};
+use crate::ui::picker::render_picker;
+use crate::ui::preview::PreviewWidget;
+use crate::ui::prompt::{flags, prompt_column, prompt_line};
 use crate::ui::status::{Status, status_line};
 use crate::ui::table::TableWidget;
 use crate::ui::theme::Theme;
 use crate::ui::tree::TreeWidget;
-use crate::ui::wrap::wrap;
 use crate::view::filtered::{FilterView, Filtered};
 use crate::view::history::JumpList;
-use crate::view::jump::{jump, reveal};
+use crate::view::jump::jump;
 use crate::view::nav::{self, Nav};
-use crate::view::place::{Place, place_of, rows_of};
-use crate::view::preview::{
-    LineCount, MAX_PREVIEW_LINES, Preview, preview_line_count, preview_lines, value_text,
-};
+use crate::view::place::Place;
+use crate::view::preview::{Preview, preview_lines, value_text};
 use crate::view::resolve::{RowKind, chain, resolve, segments};
 use crate::view::state::TreeState;
 
@@ -107,6 +112,20 @@ pub struct Model<T> {
 }
 
 impl<T: TreeIndex> Model<T> {
+    /// The tree seen through the active filter.
+    #[must_use]
+    pub fn view(&self) -> Filtered<'_, T> {
+        Filtered::new(&*self.tree, self.filter.as_deref())
+    }
+
+    /// The filtered tree beside the mutable view state, for calls that move the cursor.
+    pub(crate) fn view_state(&mut self) -> (Filtered<'_, T>, &mut TreeState) {
+        (
+            Filtered::new(&*self.tree, self.filter.as_deref()),
+            &mut self.state,
+        )
+    }
+
     /// # Errors
     /// Storage or lexing failures while reading the root.
     pub fn new(tree: T) -> Result<Self, IndexError> {
@@ -167,24 +186,6 @@ fn help_key<T>(model: &mut Model<T>, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => Some(scroll.saturating_sub(1)),
         _ => Some(scroll),
     };
-}
-
-/// The help overlay: a centered bordered popup, scrolled by `scroll` lines.
-fn render_help(scroll: u16, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let lines = help_lines(theme);
-    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let [popup] = Layout::horizontal([Constraint::Length(58)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [popup] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(popup);
-    let block = Block::bordered().title(" keys ").border_style(theme.badge);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(block).scroll((scroll, 0)),
-        popup,
-    );
 }
 
 /// What the keys do right now, for the hint row.
@@ -266,73 +267,6 @@ pub enum Msg {
     Refresh,
 }
 
-/// A direction in the jump list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
-    Back,
-    Forward,
-}
-
-/// Records `before` in the jump list when a jump moved the cursor away from it.
-pub(crate) fn jumped<T: TreeIndex>(model: &mut Model<T>, before: &[u64]) {
-    if model.state.cursor != before
-        && let Some(place) = place_at(model, before)
-    {
-        model.jumps.record(place);
-    }
-}
-
-/// The document place of the row at `rows` in the current view.
-fn place_at<T: TreeIndex>(model: &mut Model<T>, rows: &[u64]) -> Option<Place> {
-    let view = Filtered::new(&*model.tree, model.filter.as_deref());
-    match place_of(&view, &model.state.root, rows) {
-        Ok(place) => Some(place),
-        Err(err) => {
-            model.status = Some(err.to_string());
-            None
-        }
-    }
-}
-
-/// Moves the cursor to `place`, expanding its ancestors, through the current view.
-fn reveal_place<T: TreeIndex>(model: &mut Model<T>, place: Place) {
-    let view = Filtered::new(&*model.tree, model.filter.as_deref());
-    let result = rows_of(&view, &model.state.root, place)
-        .and_then(|rows| reveal(&view, &mut model.state, rows, model.height));
-    model.status = result.err().map(|err| err.to_string());
-}
-
-/// `Ctrl-o` / `Tab`: returns to a place in the jump list, expanding its ancestors.
-fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
-    let cursor = model.state.cursor.clone();
-    let Some(current) = place_at(model, &cursor) else {
-        return;
-    };
-    let target = match step {
-        Step::Back => model.jumps.back(current),
-        Step::Forward => model.jumps.forward(current),
-    };
-    if let Some(place) = target {
-        reveal_place(model, place);
-    }
-}
-
-/// The index of mark `c` (`a`–`z`).
-fn mark_slot(c: char) -> Option<usize> {
-    c.is_ascii_lowercase().then(|| usize::from(c as u8 - b'a'))
-}
-
-/// `'{a-z}`: returns to a mark, as a jump.
-fn go_mark<T: TreeIndex>(model: &mut Model<T>, c: char) {
-    let Some(place) = mark_slot(c).and_then(|slot| model.marks[slot]) else {
-        model.note = Some(format!("mark {c} is not set"));
-        return;
-    };
-    let before = model.state.cursor.clone();
-    reveal_place(model, place);
-    jumped(model, &before);
-}
-
 /// The most recent kind of find, repeated by `n`/`N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LastFind {
@@ -359,58 +293,6 @@ pub enum Effect {
 
 /// Largest value copied to the clipboard.
 const COPY_LIMIT: usize = 16 << 20;
-
-/// Preview pane commands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewCmd {
-    Toggle,
-    /// Moves the split left: a narrower tree.
-    SplitLeft,
-    /// Moves the split right: a wider tree.
-    SplitRight,
-    ScrollDown,
-    ScrollUp,
-    /// Word wrap on or off.
-    Wrap,
-}
-
-/// Preview pane layout and scroll position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreviewState {
-    pub visible: bool,
-    /// Share of the width given to the tree.
-    pub tree_percent: u16,
-    /// The first line shown.
-    pub scroll: u64,
-    /// With wrap on: the first row of that line shown.
-    pub row: u64,
-    /// Word wrap with value-aligned continuation rows.
-    pub wrap: bool,
-    /// The cursor the scroll belongs to; a new cursor resets it.
-    pub for_cursor: Vec<u64>,
-    /// The filter the count belongs to.
-    pub for_filter: Option<Arc<FilterView>>,
-    /// Lines in the value at `for_cursor`, counted on the first scroll.
-    pub count: Option<LineCount>,
-}
-
-impl Default for PreviewState {
-    fn default() -> Self {
-        Self {
-            visible: true,
-            tree_percent: 50,
-            scroll: 0,
-            row: 0,
-            wrap: false,
-            for_cursor: Vec::new(),
-            for_filter: None,
-            count: None,
-        }
-    }
-}
-
-/// Narrowest terminal that still shows the preview pane.
-const MIN_PREVIEW_WIDTH: u16 = 60;
 
 /// Applies `msg` to `model`; no I/O happens here.
 pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
@@ -461,27 +343,16 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
         }
         Msg::Nav(action) => {
             let before = model.state.cursor.clone();
-            let result = nav::apply(
-                &Filtered::new(&*model.tree, model.filter.as_deref()),
-                &mut model.state,
-                action,
-                model.height,
-            );
+            let height = model.height;
+            let (view, state) = model.view_state();
+            let result = nav::apply(&view, state, action, height);
             model.status = result.err().map(|err| err.to_string());
             if matches!(action, Nav::Top | Nav::Bottom) {
                 jumped(model, &before);
             }
         }
         Msg::History(step) => history(model, step),
-        Msg::SetMark(c) => {
-            if let Some(slot) = mark_slot(c) {
-                let cursor = model.state.cursor.clone();
-                if let Some(place) = place_at(model, &cursor) {
-                    model.marks[slot] = Some(place);
-                    model.note = Some(format!("mark {c} set"));
-                }
-            }
-        }
+        Msg::SetMark(c) => set_mark(model, c),
         Msg::GoMark(c) => go_mark(model, c),
         Msg::Mouse(_) | Msg::Wheel(..) if model.table.is_some() => {}
         Msg::Mouse(mouse) => on_mouse(model, mouse, 1),
@@ -503,10 +374,8 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             if model.preview.count.is_some_and(|count| count.growing) {
                 model.preview.count = None;
             }
-            if let Err(err) = model
-                .state
-                .refresh(&Filtered::new(&*model.tree, model.filter.as_deref()))
-            {
+            let (view, state) = model.view_state();
+            if let Err(err) = state.refresh(&view) {
                 model.status = Some(err.to_string());
             }
         }
@@ -536,13 +405,9 @@ fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
     let result = parse(text)
         .map_err(|err| err.to_string())
         .and_then(|steps| {
-            jump(
-                &Filtered::new(&*model.tree, model.filter.as_deref()),
-                &mut model.state,
-                &steps,
-                model.height,
-            )
-            .map_err(|err| err.to_string())
+            let height = model.height;
+            let (view, state) = model.view_state();
+            jump(&view, state, &steps, height).map_err(|err| err.to_string())
         });
     match result {
         Ok(()) => {
@@ -570,162 +435,21 @@ fn copy<T: TreeIndex>(model: &mut Model<T>, what: CopyWhat) {
     };
     match text {
         Ok(Some(text)) => model.effects.push(Effect::Copy(text)),
-        Ok(None) => model.note = Some("too large to copy (limit 16 MiB)".to_owned()),
+        Ok(None) => {
+            model.note = Some(format!(
+                "too large to copy (limit {} MiB)",
+                COPY_LIMIT >> 20
+            ));
+        }
         Err(err) => model.status = Some(err.to_string()),
     }
 }
 
 fn cursor_text<T: TreeIndex>(model: &Model<T>, style: Style) -> Result<Option<String>, IndexError> {
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
+    let tree = &model.view();
     match resolve(tree, &model.state.root, &model.state.cursor)? {
         Some(item) => value_text(tree, &item, style, COPY_LIMIT),
         None => Ok(None),
-    }
-}
-
-fn preview_cmd(preview: &mut PreviewState, cmd: PreviewCmd, lines: u64) {
-    match cmd {
-        PreviewCmd::Toggle => preview.visible = !preview.visible,
-        PreviewCmd::SplitRight => preview.tree_percent = (preview.tree_percent + 5).min(80),
-        PreviewCmd::SplitLeft => {
-            preview.tree_percent = preview.tree_percent.saturating_sub(5).max(20);
-        }
-        PreviewCmd::ScrollDown => preview.scroll = (preview.scroll + lines).min(MAX_PREVIEW_LINES),
-        PreviewCmd::ScrollUp => preview.scroll = preview.scroll.saturating_sub(lines),
-        PreviewCmd::Wrap => (preview.wrap, preview.row) = (!preview.wrap, 0),
-    }
-}
-
-/// A preview command; with wrap on, scrolling moves by screen rows.
-fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps: u64) {
-    match cmd {
-        PreviewCmd::ScrollDown | PreviewCmd::ScrollUp if model.preview.wrap => {
-            for _ in 0..steps {
-                if !scroll_row(model, cmd == PreviewCmd::ScrollDown) {
-                    break;
-                }
-            }
-        }
-        PreviewCmd::ScrollDown => {
-            let limit = max_scroll(model);
-            preview_cmd(&mut model.preview, cmd, steps);
-            model.preview.scroll = model.preview.scroll.min(limit);
-        }
-        _ => preview_cmd(&mut model.preview, cmd, steps),
-    }
-}
-
-/// The furthest the unwrapped preview scrolls: the last page of the value, or, while it is
-/// still growing, its last known line.
-fn max_scroll<T: TreeIndex>(model: &mut Model<T>) -> u64 {
-    if model.preview.count.is_none() {
-        let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
-        let item = resolve(tree, &model.state.root, &model.state.cursor);
-        model.preview.count = item
-            .ok()
-            .flatten()
-            .and_then(|item| preview_line_count(tree, &item).ok());
-    }
-    let page = model.height.saturating_sub(3).max(1);
-    match model.preview.count {
-        Some(count) if count.growing => count.lines.saturating_sub(1),
-        Some(count) => count.lines.saturating_sub(page),
-        None => MAX_PREVIEW_LINES,
-    }
-}
-
-/// Moves the wrapped preview one row, re-wrapping at most one neighboring line; false when it
-/// cannot move.
-fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) -> bool {
-    let (line, row) = (model.preview.scroll, model.preview.row);
-    let next = if down {
-        match wrapped_rows(model, line) {
-            Some(rows) if row + 1 < rows => Some((line, row + 1)),
-            _ if line + 1 < MAX_PREVIEW_LINES => {
-                wrapped_rows(model, line + 1).map(|_| (line + 1, 0))
-            }
-            _ => None,
-        }
-    } else if row > 0 {
-        Some((line, row - 1))
-    } else {
-        line.checked_sub(1)
-            .map(|up| (up, wrapped_rows(model, up).map_or(0, |rows| rows - 1)))
-    };
-    let Some((line, row)) = next else {
-        return false;
-    };
-    (model.preview.scroll, model.preview.row) = (line, row);
-    true
-}
-
-/// Rows that preview line `line` wraps into, or `None` past the last line.
-fn wrapped_rows<T: TreeIndex>(model: &Model<T>, line: u64) -> Option<u64> {
-    let width = preview_text_width(model)?;
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
-    let item = resolve(tree, &model.state.root, &model.state.cursor).ok()??;
-    let preview = preview_lines(tree, &item, line, 1).ok()?;
-    let text = preview.lines.first()?;
-    Some(wrap(&highlight(text, &model.theme), width).len() as u64)
-}
-
-/// Columns inside the preview pane's border, when the pane is shown.
-fn preview_text_width<T>(model: &Model<T>) -> Option<usize> {
-    let (_, pane) = panes(&model.preview, Rect::new(0, 0, model.width, 1));
-    pane.map(|pane| usize::from(pane.width.saturating_sub(2)))
-}
-
-/// The tree and (when shown) preview areas within `area`.
-fn panes(preview: &PreviewState, area: Rect) -> (Rect, Option<Rect>) {
-    if !preview.visible || area.width < MIN_PREVIEW_WIDTH {
-        return (area, None);
-    }
-    let [tree, pane] = Layout::horizontal([
-        Constraint::Percentage(preview.tree_percent),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
-    (tree, Some(pane))
-}
-
-/// Whether `column` falls inside the preview pane.
-fn over_preview<T>(model: &Model<T>, column: u16) -> bool {
-    let (tree, _) = panes(&model.preview, Rect::new(0, 0, model.width, 1));
-    model.preview.visible && model.width >= MIN_PREVIEW_WIDTH && column >= tree.right()
-}
-
-fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent, ticks: u64) {
-    let over_preview = over_preview(model, mouse.column);
-    match mouse.kind {
-        MouseEventKind::ScrollDown if over_preview => {
-            preview(model, PreviewCmd::ScrollDown, ticks.saturating_mul(3));
-        }
-        MouseEventKind::ScrollUp if over_preview => {
-            preview(model, PreviewCmd::ScrollUp, ticks.saturating_mul(3));
-        }
-        MouseEventKind::ScrollDown => {
-            for _ in 0..ticks {
-                update(model, Msg::Nav(Nav::ScrollDown));
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            for _ in 0..ticks {
-                update(model, Msg::Nav(Nav::ScrollUp));
-            }
-        }
-        MouseEventKind::Down(MouseButton::Left) if over_preview => {}
-        MouseEventKind::Down(MouseButton::Left) => {
-            let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
-            let result = nav::click(
-                &Filtered::new(&*model.tree, model.filter.as_deref()),
-                &mut model.state,
-                row,
-                column,
-                model.height,
-            );
-            model.status = result.err().map(|err| err.to_string());
-        }
-        _ => {}
     }
 }
 
@@ -763,7 +487,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
     match &model.table {
         Some(table) => {
             let widget = TableWidget {
-                tree: &Filtered::new(&*model.tree, model.filter.as_deref()),
+                tree: &model.view(),
                 table,
                 theme: &model.theme,
             };
@@ -799,7 +523,7 @@ pub fn view<T: TreeIndex>(model: &Model<T>, frame: &mut Frame) {
 fn render_tree<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
     let (tree_area, preview_area) = panes(&model.preview, area);
     let widget = TreeWidget {
-        tree: &Filtered::new(&*model.tree, model.filter.as_deref()),
+        tree: &model.view(),
         state: &model.state,
         theme: &model.theme,
     };
@@ -809,78 +533,11 @@ fn render_tree<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `[regex] [Aa] [keys]`-style markers for the non-default search options.
-fn flags(query: &Query) -> String {
-    let scope = match query.scope {
-        Scope::Both => None,
-        Scope::Keys => Some("[keys]"),
-        Scope::Values => Some("[values]"),
-    };
-    let marks = [
-        query.regex.then_some("[regex]"),
-        query.case_sensitive.then_some("[Aa]"),
-        scope,
-    ];
-    marks.into_iter().flatten().collect::<Vec<_>>().join(" ")
-}
-
-/// The picker popup: the query line, then matches with the selection highlighted.
-fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect, theme: &Theme) {
-    let [popup] = Layout::horizontal([Constraint::Percentage(80)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [popup] = Layout::vertical([Constraint::Percentage(70)])
-        .flex(Flex::Center)
-        .areas(popup);
-    let block = Block::bordered()
-        .title(picker_title(picker))
-        .border_style(theme.badge);
-    // The query line takes one row; the rest show a window ending at the selection.
-    let rows = usize::from(block.inner(popup).height.saturating_sub(1));
-    let first = (picker.selected + 1).saturating_sub(rows);
-    let mut lines = vec![Line::raw(format!("> {}", picker.query))];
-    match &picker.entries {
-        None => lines.push(Line::styled("indexing keys…", theme.badge)),
-        Some(entries) => lines.extend(
-            picker
-                .matches
-                .iter()
-                .enumerate()
-                .skip(first)
-                .take(rows)
-                .map(|(i, &m)| {
-                    let line = Line::styled(entries[m].0.clone(), theme.key);
-                    if i == picker.selected {
-                        line.patch_style(theme.selection)
-                    } else {
-                        line
-                    }
-                }),
-        ),
-    }
-    frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
-}
-
-/// ` keys in .users · collecting… `: the scope, then the collection state.
-fn picker_title(picker: &Picker) -> String {
-    let name = match picker.scope.as_ref().map(|s| s.label.as_str()) {
-        None | Some("") => "keys".to_owned(),
-        Some(label) => format!("keys in {label}"),
-    };
-    let state = match (picker.collecting, picker.truncated) {
-        (true, _) => " · collecting…",
-        (false, true) => " · partial list (collection capped)",
-        (false, false) => "",
-    };
-    format!(" {name}{state} ")
-}
-
 /// The cursor item's preview, sized to the pane's inner height.
 fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect) {
     // Two border rows plus one for the `…` marker.
     let take = usize::from(area.height.saturating_sub(3));
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
+    let tree = &model.view();
     let preview = resolve(tree, &model.state.root, &model.state.cursor)
         .and_then(|item| {
             item.map(|item| preview_lines(tree, &item, model.preview.scroll, take))
@@ -900,23 +557,6 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
         wrap: model.preview.wrap.then_some(model.preview.row),
     };
     frame.render_widget(widget, area);
-}
-
-/// Display column just after the prompt text, where the cursor sits.
-fn prompt_column(prompt: &Prompt) -> u16 {
-    let column = prompt.kind.label().width() + prompt.text.width();
-    u16::try_from(column).unwrap_or(u16::MAX)
-}
-
-fn prompt_line(prompt: &Prompt, flags: Option<&str>, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![Span::raw(format!("{}{}", prompt.kind.label(), prompt.text))];
-    if let Some(flags) = flags.filter(|f| !f.is_empty()) {
-        spans.push(Span::styled(format!("  {flags}"), theme.badge));
-    }
-    if let Some(error) = &prompt.error {
-        spans.push(Span::styled(format!("  {error}"), theme.error));
-    }
-    Line::from(spans)
 }
 
 fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
@@ -940,15 +580,9 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
 
 /// The jq path and type name of the cursor row.
 fn cursor_facts<T: TreeIndex>(model: &Model<T>) -> Result<(String, String), IndexError> {
-    let items = chain(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &model.state.root,
-        &model.state.cursor,
-    )?;
-    let path = render(&segments(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &items,
-    )?);
+    let view = model.view();
+    let items = chain(&view, &model.state.root, &model.state.cursor)?;
+    let path = render(&segments(&view, &items)?);
     let kind = match items.last().map(|item| &item.kind) {
         Some(RowKind::Value { node, .. }) => kind_name(node.kind),
         Some(RowKind::Bucket { .. }) | None => "bucket",
@@ -970,19 +604,11 @@ fn kind_name(kind: Kind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
     use super::*;
     use crate::source::MemSource;
     use crate::tree::MemTree;
-
-    #[test]
-    fn prompt_cursor_counts_display_columns() {
-        let mut prompt = Prompt::new(PromptKind::Search);
-        let label = u16::try_from(prompt.kind.label().width()).unwrap();
-        prompt.text = "名前".to_owned();
-        assert_eq!(prompt_column(&prompt), label + 4);
-    }
 
     fn model() -> Model<MemTree> {
         let tree = MemTree::parse(MemSource::new(br#"{"a": [1, 2]}"#.to_vec())).unwrap();

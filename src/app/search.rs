@@ -18,7 +18,6 @@ use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError,
 use crate::tree::{LINES_ROOT, NodeRef, TreeIndex};
 use crate::ui::status::{grouped, human_bytes};
 use crate::view::filtered::{FilterView, Filtered};
-use crate::view::jump::reveal;
 use crate::view::resolve::{Label, RootItem, RowKind, chain};
 use crate::view::table::{SortDir, sort_order};
 
@@ -391,13 +390,7 @@ fn accept<T: TreeIndex>(model: &mut Model<T>) {
 }
 
 fn restore<T: TreeIndex>(model: &mut Model<T>, rows: Vec<u64>) {
-    let result = reveal(
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &mut model.state,
-        rows,
-        model.height,
-    );
-    model.status = result.err().map(|err| err.to_string());
+    model.reveal(rows, false);
 }
 
 /// `n` / `N`: the next or previous match, from the last hit if the cursor is still on it.
@@ -539,7 +532,7 @@ fn clear_prompt_error<T>(model: &mut Model<T>) {
 
 /// The byte offset a row starts at: its key, its value, or a bucket's first child.
 pub(crate) fn offset_of<T: TreeIndex>(model: &Model<T>, rows: &[u64]) -> Option<u64> {
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
+    let tree = &model.view();
     let item = chain(tree, &model.state.root, rows).ok()?.pop()?;
     match item.kind {
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => Some(0),

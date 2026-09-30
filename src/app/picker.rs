@@ -12,8 +12,6 @@ use crate::path::render as render_path;
 use crate::schema::Seg;
 use crate::search::Direction;
 use crate::tree::TreeIndex;
-use crate::view::filtered::Filtered;
-use crate::view::jump::reveal;
 use crate::view::resolve::{RootItem, RowKind, chain, segments};
 
 /// Rendered schema paths with their segments, shared with the model.
@@ -170,11 +168,7 @@ fn subtree_of<T: TreeIndex>(model: &Model<T>) -> Subtree {
     if !model.tree.streamed() {
         return whole;
     }
-    let (tree, root) = (
-        &Filtered::new(&*model.tree, model.filter.as_deref()),
-        &model.state.root,
-    );
-    container_at(tree, root, &model.state.cursor).unwrap_or(whole)
+    container_at(&model.view(), &model.state.root, &model.state.cursor).unwrap_or(whole)
 }
 
 /// The innermost container on the path to `cursor`, below the document root.
@@ -244,11 +238,7 @@ pub fn stepped<T: TreeIndex>(model: &mut Model<T>, rows: Option<Vec<u64>>) {
         model.note = Some("no occurrence".to_owned());
         return;
     };
-    let tree = &Filtered::new(&*model.tree, model.filter.as_deref());
-    let before = model.state.cursor.clone();
-    let result = reveal(tree, &mut model.state, rows, model.height);
-    model.status = result.err().map(|err| err.to_string());
-    crate::app::jumped(model, &before);
+    model.reveal(rows, true);
 }
 
 #[cfg(test)]
