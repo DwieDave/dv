@@ -144,8 +144,7 @@ pub fn sorted<T>(model: &mut Model<T>, order: Vec<u64>) {
 /// The rows known so far (a pending array grows, TB-6).
 fn row_count<T: TreeIndex>(model: &Model<T>) -> u64 {
     model.table.as_ref().map_or(0, |table| {
-        model
-            .tree
+        Filtered::new(&*model.tree, model.filter.as_deref())
             .child_count(table.node)
             .map_or(0, crate::tree::Count::available)
     })

@@ -204,3 +204,31 @@ fn too_many_rows_cannot_be_sorted() {
         Err("too many rows to sort (max 1M)")
     );
 }
+
+/// One object whose `key` member comes after `SAMPLE` filler members.
+fn wide_row(key: &str, value: u32) -> String {
+    let filler: Vec<String> = (0..=SAMPLE).map(|i| format!(r#""f{i}": 0"#)).collect();
+    format!("{{{}, \"{key}\": {value}}}", filler.join(", "))
+}
+
+#[test]
+fn a_key_past_the_sampled_members_still_shows_and_sorts() {
+    let text = format!(
+        "[{}, {}, {{\"x\": 1}}]",
+        wide_row("late", 9),
+        wide_row("late", 3)
+    );
+    let tree = tree_of(&text);
+    let root = tree.root().unwrap();
+    let rows = tree.children(root, 0..3).unwrap();
+    let columns = [Column {
+        key: "late".to_owned(),
+        width: 4,
+    }];
+    let cells = row_cells(&tree, rows[0].node(), &columns).unwrap();
+    assert_eq!(cells[0].text(), "9");
+    let order = sort_order(&tree, root, "late", SortDir::Asc, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(order, [1, 0, 2]);
+}

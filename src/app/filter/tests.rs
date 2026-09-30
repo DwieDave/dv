@@ -185,3 +185,16 @@ fn a_filter_scan_outlives_a_later_search() {
     apply(&mut model, late);
     assert_eq!(model.filter.as_ref().map(|f| f.matches.len()), Some(3));
 }
+
+#[test]
+fn a_filtered_table_stops_at_the_last_visible_row_and_opens_it() {
+    let mut model = model();
+    filter(&mut model, ".n > 3");
+    typed(&mut model, "tG");
+    assert_eq!(model.table.as_ref().map(|table| table.row), Some(1));
+    press(&mut model, KeyCode::Enter);
+    assert!(model.table.is_none());
+    // The second match, still shown through the filter.
+    assert_eq!(model.state.cursor, vec![1]);
+    assert!(model.filter.is_some());
+}

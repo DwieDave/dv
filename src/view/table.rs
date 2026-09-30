@@ -270,17 +270,40 @@ pub fn row_cells<T: TreeIndex + ?Sized>(
     row: NodeRef,
     columns: &[Column],
 ) -> Result<Vec<Cell>, IndexError> {
-    let fields = fields(tree, row)?;
-    let lookup = |key: &str| {
-        fields
-            .iter()
-            .find(|(k, _)| k == key)
-            .map_or(Ok(Cell::Missing), |(_, child)| cell_of(tree, child))
-    };
-    columns.iter().map(|column| lookup(&column.key)).collect()
+    columns
+        .iter()
+        .map(|column| match member(tree, row, &column.key)? {
+            Some(child) => cell_of(tree, &child),
+            None => Ok(Cell::Missing),
+        })
+        .collect()
 }
 
-/// The decoded keys and values of an object row (none for other values).
+/// The member of object `row` named `key`, read in batches until it is found.
+fn member<T: TreeIndex + ?Sized>(
+    tree: &T,
+    row: NodeRef,
+    key: &str,
+) -> Result<Option<Child>, IndexError> {
+    if row.kind != Kind::Object {
+        return Ok(None);
+    }
+    let total = tree.child_count(row)?.available();
+    for start in (0..total).step_by(to_usize(SAMPLE)) {
+        for child in tree.children(row, start..start.saturating_add(SAMPLE).min(total))? {
+            let Some(span) = child.key.clone() else {
+                continue;
+            };
+            if unescape(&tree.bytes(span)?) == key {
+                return Ok(Some(child));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The decoded keys and values of an object row's first [`SAMPLE`] members (none for other
+/// values).
 fn fields<T: TreeIndex + ?Sized>(
     tree: &T,
     row: NodeRef,
@@ -414,8 +437,7 @@ fn sort_key<T: TreeIndex + ?Sized>(
     row: NodeRef,
     key: &str,
 ) -> Result<Option<SortKey>, IndexError> {
-    let fields = fields(tree, row)?;
-    let Some((_, child)) = fields.iter().find(|(k, _)| k == key) else {
+    let Some(child) = member(tree, row, key)? else {
         return Ok(None);
     };
     let raw = || tree.bytes(child.value..child.end);
