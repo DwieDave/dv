@@ -170,6 +170,18 @@ pub trait Lines {
         self.checkpoint_value(k).map(Some)
     }
 
+    /// Record index and start offset to begin scanning for record `k` from: the nearest
+    /// checkpoint at or before it, or the document start without checkpoints.
+    ///
+    /// # Errors
+    /// Read failures.
+    fn seek(&self, k: u64) -> Result<(u64, u64), SourceError> {
+        let cp = (k / CHECKPOINT_EVERY).min(self.checkpoints().saturating_sub(1));
+        Ok(self
+            .checkpoint(cp)?
+            .map_or((0, 0), |offset| (cp * CHECKPOINT_EVERY, offset)))
+    }
+
     /// The bad record starting at `start`.
     ///
     /// # Errors
@@ -411,10 +423,7 @@ pub fn stream_records<'a, S: NodeStore, R: Source, L: Lines>(
     k: u64,
     window: usize,
 ) -> Result<StreamRecords<'a, S, R, L>, IndexError> {
-    let cp = (k / CHECKPOINT_EVERY).min(lines.checkpoints().saturating_sub(1));
-    let (index, pos) = lines
-        .checkpoint(cp)?
-        .map_or((0, 0), |offset| (cp * CHECKPOINT_EVERY, offset));
+    let (index, pos) = lines.seek(k)?;
     let mut it = StreamRecords {
         win: ReadWindow::new(source, window),
         store,

@@ -6,6 +6,7 @@ use std::ops::{ControlFlow, Range};
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::Format;
 use crate::index::children::{Child, Children, seek, skip_value};
+use crate::index::lines::{Lines, checkpoint_index};
 use crate::index::store::{CHECKPOINT_EVERY, NodeStore, VecStore};
 use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, scan_scalar};
@@ -266,17 +267,7 @@ impl MemTree {
 
     /// Child index of the last checkpoint at or before `offset` (0 without checkpoints).
     fn checkpoint_index(&self, node: NodeRef, offset: u64) -> Result<u64, IndexError> {
-        if let Some(lines) = self.lines_of(node) {
-            return last_at_or_before(lines.checkpoints(), |k| Ok(lines.checkpoint(k)), offset);
-        }
-        let Some(fanout) = self.store.node_at(node.offset)?.and_then(|n| n.fanout) else {
-            return Ok(0);
-        };
-        last_at_or_before(
-            fanout.checkpoints(),
-            |k| Ok(self.store.checkpoint(&fanout, k)?),
-            offset,
-        )
+        checkpoint_index(&self.store, self.lines_of(node), node, offset)
     }
 }
 
@@ -338,7 +329,7 @@ impl TreeIndex for MemTree {
             return Ok(Count::Known(0));
         }
         if let Some(lines) = self.lines_of(node) {
-            return Ok(Count::Known(lines.count()));
+            return Ok(Count::Known(Lines::count(lines)));
         }
         if let Some(fanout) = self.store.node_at(node.offset)?.and_then(|n| n.fanout) {
             return Ok(Count::Known(fanout.count));
@@ -371,8 +362,14 @@ impl TreeIndex for MemTree {
         if self.lines_of(node).is_some() {
             return Ok(self.source.len());
         }
-        if let Some(bad) = self.lines.as_ref().and_then(|l| l.bad_at(node.offset)) {
-            return Ok(u64::from(bad.resume));
+        if let Some(bad) = self
+            .lines
+            .as_ref()
+            .map(|l| l.bad_at(node.offset))
+            .transpose()?
+            .flatten()
+        {
+            return Ok(bad.resume);
         }
         Ok(skip_value(self.source.as_bytes(), &self.store, to_usize(node.offset))?.1)
     }
@@ -393,7 +390,7 @@ impl TreeIndex for MemTree {
     }
 
     fn problem(&self, node: NodeRef) -> Option<ParseErrorKind> {
-        let bad = self.lines.as_ref()?.bad_at(node.offset)?;
+        let bad = self.lines.as_ref()?.bad_at(node.offset).ok()??;
         (node.kind == Kind::Invalid).then_some(bad.kind)
     }
 }

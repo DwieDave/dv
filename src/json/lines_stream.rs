@@ -566,10 +566,10 @@ mod tests {
             prop_assert_eq!(got.lines.count(), expected.lines.count());
             prop_assert_eq!(got.lines.checkpoints(), expected.lines.checkpoints());
             for k in 0..expected.lines.checkpoints() {
-                prop_assert_eq!(got.lines.checkpoint(k).unwrap(), expected.lines.checkpoint(k));
+                prop_assert_eq!(got.lines.checkpoint(k).unwrap(), expected.lines.checkpoint(k).unwrap());
             }
             for offset in 0..=bytes.len() as u64 {
-                let want = expected.lines.bad_at(offset).map(|b| (u64::from(b.start), u64::from(b.resume), b.kind));
+                let want = expected.lines.bad_at(offset).unwrap().map(|b| (b.start, b.resume, b.kind));
                 let have = got.lines.bad_at(offset).unwrap().map(|b| (b.start, b.resume, b.kind));
                 prop_assert_eq!(have, want, "bad record at {}", offset);
                 let (a, b) = (expected.store.node_at(offset).unwrap(), store.node_at(offset).unwrap());
