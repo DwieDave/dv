@@ -35,6 +35,48 @@ pub enum Work {
     Filter(FilterSpec),
 }
 
+impl Work {
+    /// The kind of job this is; a job only supersedes jobs of its own kind.
+    #[must_use]
+    pub fn kind(&self) -> JobKind {
+        match self {
+            Work::Find(_) | Work::Count => JobKind::Search,
+            Work::Schema => JobKind::Schema,
+            Work::Sort(_) => JobKind::Sort,
+            Work::Filter(_) => JobKind::Filter,
+        }
+    }
+}
+
+/// Jobs of one kind supersede each other; other kinds run alongside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    Search,
+    Schema,
+    Sort,
+    Filter,
+}
+
+/// The newest generation of each job kind; older jobs and outcomes of that kind are stale.
+#[derive(Debug, Default)]
+pub struct Generations([AtomicU64; 4]);
+
+impl Generations {
+    fn slot(&self, kind: JobKind) -> &AtomicU64 {
+        &self.0[kind as usize]
+    }
+
+    #[must_use]
+    pub fn current(&self, kind: JobKind) -> u64 {
+        self.slot(kind).load(Ordering::Relaxed)
+    }
+
+    /// Starts a new generation of `kind`, which cancels the running job of that kind.
+    pub fn next(&self, kind: JobKind) -> u64 {
+        self.slot(kind).fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
 /// A filter scan: the container and the expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilterSpec {
@@ -53,6 +95,7 @@ pub struct SortSpec {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub generation: u64,
+    pub kind: JobKind,
     /// The compiled query; `None` for schema collection.
     pub matcher: Option<Matcher>,
     pub root: RootItem,
@@ -90,6 +133,7 @@ pub enum JobResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub generation: u64,
+    pub kind: JobKind,
     pub result: JobResult,
 }
 
@@ -132,6 +176,7 @@ pub fn run_job<T: TreeIndex>(tree: &T, job: &Job, pulse: &dyn Pulse) -> Outcome 
     let result = result.unwrap_or_else(|err| JobResult::Failed(err.to_string()));
     Outcome {
         generation: job.generation,
+        kind: job.kind,
         result,
     }
 }
@@ -152,7 +197,8 @@ fn catalog(collected: Collected, done: bool, root: RootItem) -> Catalog {
 
 /// The worker's pulse: a newer generation cancels, and progress goes out as interim outcomes.
 struct WorkerPulse<'a> {
-    generation: &'a AtomicU64,
+    generations: &'a Generations,
+    kind: JobKind,
     job: u64,
     notify: &'a dyn Fn(Outcome),
     /// The job's root, which partial schema lists are collected under.
@@ -161,7 +207,7 @@ struct WorkerPulse<'a> {
 
 impl Pulse for WorkerPulse<'_> {
     fn cancelled(&self) -> bool {
-        self.generation.load(Ordering::Relaxed) != self.job
+        self.generations.current(self.kind) != self.job
     }
 
     fn scanned(&self, scanned: Scanned) {
@@ -194,16 +240,17 @@ impl WorkerPulse<'_> {
         if !self.cancelled() {
             (self.notify)(Outcome {
                 generation: self.job,
+                kind: self.kind,
                 result,
             });
         }
     }
 }
 
-/// A thread that runs jobs of the current generation and reports through `notify`.
+/// A thread that runs jobs of the current generation of their kind and reports through `notify`.
 pub fn spawn_worker<T: TreeIndex + Send + Sync + 'static>(
     tree: Arc<T>,
-    generation: Arc<AtomicU64>,
+    generations: Arc<Generations>,
     notify: impl Fn(Outcome) + Send + 'static,
 ) -> Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
@@ -211,7 +258,8 @@ pub fn spawn_worker<T: TreeIndex + Send + Sync + 'static>(
         for job in rx {
             let job_generation = job.generation;
             let pulse = WorkerPulse {
-                generation: &generation,
+                generations: &generations,
+                kind: job.kind,
                 job: job_generation,
                 notify: &notify,
                 root: job.root,
@@ -380,9 +428,11 @@ pub(crate) fn submit_job<T: TreeIndex>(
     from: Option<u64>,
     root: RootItem,
 ) {
-    let generation = model.generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let kind = work.kind();
+    let generation = model.generation.next(kind);
     let job = Job {
         generation,
+        kind,
         matcher,
         root,
         from,
@@ -403,9 +453,9 @@ pub(crate) fn submit_job<T: TreeIndex>(
     }
 }
 
-/// Applies a job outcome if it belongs to the current generation.
+/// Applies a job outcome if it belongs to the current generation of its kind.
 pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
-    if outcome.generation != model.generation.load(Ordering::Relaxed) {
+    if outcome.generation != model.generation.current(outcome.kind) {
         return;
     }
     match outcome.result {
@@ -428,12 +478,26 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
         | JobResult::Cancelled => {}
         JobResult::Matched { scan, done } => filter::receive(model, scan, done),
         JobResult::Schema(Some(entries)) => picker::receive(model, entries),
-        JobResult::Failed(message) => note(model, message),
+        JobResult::Failed(message) => failed(model, outcome.kind, message),
         JobResult::Scanning(scanned) => note(model, scanning(scanned)),
         JobResult::Sorted(Some(order)) => table::sorted(model, order),
         JobResult::Sorting { done, total } => {
             model.note = Some(format!("sorting… {}%", done * 100 / total.max(1)));
         }
+    }
+}
+
+/// Shows a job's error and drops the progress the job left on screen.
+fn failed<T>(model: &mut Model<T>, kind: JobKind, message: String) {
+    match kind {
+        JobKind::Sort => model.note = None,
+        JobKind::Filter => filter::finish(model),
+        JobKind::Search | JobKind::Schema => {}
+    }
+    if model.prompt.is_none() && model.search.is_none() {
+        model.status = Some(message);
+    } else {
+        note(model, message);
     }
 }
 
@@ -509,6 +573,7 @@ mod tests {
         });
         Job {
             generation: 7,
+            kind: work.kind(),
             matcher: Some(matcher),
             root: TreeState::new(tree).unwrap().root,
             from: None,
@@ -534,6 +599,7 @@ mod tests {
             counted,
             Outcome {
                 generation: 7,
+                kind: JobKind::Search,
                 result: JobResult::Counted(Some(2))
             }
         );
@@ -678,7 +744,10 @@ mod tests {
     #[test]
     fn the_worker_answers_only_the_current_generation() {
         let tree = Arc::new(tree());
-        let generation = Arc::new(AtomicU64::new(7));
+        let generation = Arc::new(Generations::default());
+        (0..7).for_each(|_| {
+            generation.next(JobKind::Search);
+        });
         let (tx, rx) = mpsc::channel();
         let jobs = spawn_worker(Arc::clone(&tree), Arc::clone(&generation), move |outcome| {
             drop(tx.send(outcome));
@@ -692,6 +761,7 @@ mod tests {
             outcome,
             Outcome {
                 generation: 7,
+                kind: JobKind::Search,
                 result: JobResult::Counted(Some(1))
             }
         );
@@ -699,12 +769,75 @@ mod tests {
     }
 
     #[test]
+    fn a_search_leaves_a_running_filter_scan_alone() {
+        let tree = Arc::new(tree());
+        let generations = Arc::new(Generations::default());
+        let (tx, rx) = mpsc::channel();
+        let jobs = spawn_worker(
+            Arc::clone(&tree),
+            Arc::clone(&generations),
+            move |outcome| {
+                drop(tx.send(outcome));
+            },
+        );
+        let filter = Work::Filter(FilterSpec {
+            node: tree.root().unwrap(),
+            expr: crate::filter::parse(".n > 3").unwrap(),
+        });
+        for work in [filter, Work::Count] {
+            let mut next = job(&tree, "ab", false, work);
+            next.generation = generations.next(next.kind);
+            jobs.send(next).unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut finished = Vec::new();
+        while finished.len() < 2 && std::time::Instant::now() < deadline {
+            let outcome = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(
+                outcome.result,
+                JobResult::Matched { done: true, .. } | JobResult::Counted(_)
+            ) {
+                finished.push(outcome.kind);
+            }
+        }
+        assert_eq!(finished, [JobKind::Filter, JobKind::Search]);
+    }
+
+    #[test]
+    fn a_newer_search_supersedes_an_older_one_only() {
+        let generations = Generations::default();
+        let old = generations.next(JobKind::Search);
+        let filter = generations.next(JobKind::Filter);
+        generations.next(JobKind::Search);
+        assert_ne!(generations.current(JobKind::Search), old);
+        assert_eq!(generations.current(JobKind::Filter), filter);
+    }
+
+    #[test]
+    fn a_failed_job_shows_its_error_and_clears_its_progress() {
+        let mut model = model();
+        model.note = Some("sorting…".to_owned());
+        let generation = model.generation.next(JobKind::Sort);
+        apply(
+            &mut model,
+            Outcome {
+                generation,
+                kind: JobKind::Sort,
+                result: JobResult::Failed("disk gone".to_owned()),
+            },
+        );
+        assert_eq!(model.status.as_deref(), Some("disk gone"));
+        assert_eq!(model.note, None);
+    }
+
+    #[test]
     fn scan_progress_is_noted_until_the_result_arrives() {
         let mut model = model();
-        let generation = model.generation.load(Ordering::Relaxed);
+        let generation = model.generation.current(JobKind::Search);
         update(&mut model, Msg::OpenPrompt(PromptKind::Search));
         let scanning = |matches| Outcome {
             generation,
+            kind: JobKind::Search,
             result: JobResult::Scanning(Scanned {
                 bytes: 67_100_000,
                 matches,
@@ -724,11 +857,15 @@ mod tests {
 
     #[test]
     fn the_worker_pulse_reports_only_for_the_current_generation() {
-        let (generation, sent) = (AtomicU64::new(7), std::cell::RefCell::new(Vec::new()));
+        let (generation, sent) = (Generations::default(), std::cell::RefCell::new(Vec::new()));
+        (0..7).for_each(|_| {
+            generation.next(JobKind::Search);
+        });
         let notify = |outcome: Outcome| sent.borrow_mut().push(outcome);
         let root = TreeState::new(&tree()).unwrap().root;
         let pulse = WorkerPulse {
-            generation: &generation,
+            generations: &generation,
+            kind: JobKind::Search,
             job: 7,
             notify: &notify,
             root,
@@ -738,11 +875,12 @@ mod tests {
             matches: None,
         };
         pulse.scanned(scanned);
-        generation.store(8, Ordering::Relaxed);
+        generation.next(JobKind::Search);
         pulse.scanned(scanned);
         assert!(pulse.cancelled());
         let expected = Outcome {
             generation: 7,
+            kind: JobKind::Search,
             result: JobResult::Scanning(scanned),
         };
         assert_eq!(sent.take(), vec![expected]);

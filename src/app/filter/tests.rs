@@ -141,3 +141,47 @@ fn a_table_of_a_filtered_array_shows_original_indices() {
         "{shown:#?}"
     );
 }
+
+#[test]
+fn a_failed_scan_shows_its_error_and_stops_scanning() {
+    use crate::app::search::{JobKind, JobResult, Outcome, apply};
+    let mut model = model();
+    filter(&mut model, ".n > 3");
+    let generation = model.generation.current(JobKind::Filter);
+    if let Some(filter) = model.filter.as_mut() {
+        Arc::make_mut(filter).done = false;
+    }
+    assert!(summary(&model).unwrap().contains("scanning"));
+    let failed = Outcome {
+        generation,
+        kind: JobKind::Filter,
+        result: JobResult::Failed("read failed".to_owned()),
+    };
+    apply(&mut model, failed);
+    assert_eq!(model.status.as_deref(), Some("read failed"));
+    assert!(!summary(&model).unwrap().contains("scanning"));
+}
+
+#[test]
+fn a_filter_scan_outlives_a_later_search() {
+    use crate::app::search::{JobKind, JobResult, Outcome, apply};
+    let mut model = model();
+    filter(&mut model, ".n > 3");
+    let generation = model.generation.current(JobKind::Filter);
+    typed(&mut model, "/");
+    typed(&mut model, "n");
+    press(&mut model, KeyCode::Enter);
+    let scan = Scan {
+        found: vec![3],
+        scanned: 4,
+        total: 4,
+        capped: false,
+    };
+    let late = Outcome {
+        generation,
+        kind: JobKind::Filter,
+        result: JobResult::Matched { scan, done: true },
+    };
+    apply(&mut model, late);
+    assert_eq!(model.filter.as_ref().map(|f| f.matches.len()), Some(3));
+}

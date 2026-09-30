@@ -11,7 +11,6 @@ pub mod table;
 pub mod terminal;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -23,7 +22,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::app::keymap::Keymap;
 use crate::app::picker::{Catalog, Picker};
 use crate::app::prompt::{Prompt, PromptAction, PromptKind};
-use crate::app::search::{Job, Outcome, SearchState};
+use crate::app::search::{Generations, Job, Outcome, SearchState};
 use crate::app::table::TableState;
 use crate::index::IndexError;
 use crate::json::format::Style;
@@ -98,8 +97,8 @@ pub struct Model<T> {
     pub effects: Vec<Effect>,
     /// The search worker; jobs run inline without one.
     pub jobs: Option<Sender<Job>>,
-    /// Current search generation; older jobs and outcomes are stale.
-    pub generation: Arc<AtomicU64>,
+    /// Current generation per job kind; older jobs and outcomes of a kind are stale.
+    pub generation: Arc<Generations>,
     pub quit: bool,
 }
 
@@ -136,7 +135,7 @@ impl<T: TreeIndex> Model<T> {
             marks: Default::default(),
             effects: Vec::new(),
             jobs: None,
-            generation: Arc::new(AtomicU64::new(0)),
+            generation: Arc::default(),
             quit: false,
         })
     }
