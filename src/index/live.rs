@@ -1,4 +1,4 @@
-//! Reading a spilled index while it is still being built (progressive browsing, FR-26).
+//! Reading a spilled index while it is still being built (progressive browsing).
 
 use std::cmp::Ordering;
 use std::fs::File;

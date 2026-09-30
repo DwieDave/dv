@@ -1,4 +1,4 @@
-//! Child enumeration over byte windows of a large source (streaming mode, D-15).
+//! Child enumeration over byte windows of a large source (streaming mode).
 
 use crate::error::{ParseError, ParseErrorKind};
 use crate::index::children::{Child, Lexed, after_value, checkpoint_before, lex_child, skip_value};

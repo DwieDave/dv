@@ -1,4 +1,4 @@
-//! The semi-index: sparse container spans plus child checkpoints (D-3).
+//! The semi-index: sparse container spans plus child checkpoints.
 
 pub mod background;
 pub mod children;

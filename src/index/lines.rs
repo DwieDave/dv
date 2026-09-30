@@ -1,4 +1,4 @@
-//! The NDJSON line index spilled to temporary files (streaming mode, FR-5, FR-23).
+//! The NDJSON line index spilled to temporary files (streaming mode).
 
 use std::fs::File;
 use std::io;
