@@ -541,7 +541,7 @@ mod tests {
             let mut failure = None;
             let publish = |_: &mut VecStoreBuilder, lines: &mut PendingLines<'_>, frontier: u64, moment: Moment| {
                 let last = moment == Moment::Last;
-                lines.publish(last);
+                lines.publish(last).unwrap();
                 if failure.is_none() {
                     failure = check_live(&live, &records, frontier, last).err();
                 }

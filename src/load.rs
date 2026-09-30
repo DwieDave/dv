@@ -11,7 +11,7 @@ use crate::document::Document;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::format::{Format, detect};
 use crate::index::IndexError;
-use crate::index::background::BackgroundSpill;
+use crate::index::background::{BackgroundSpill, Failure};
 use crate::index::lines::{LineSpill, PendingLines};
 use crate::index::spill::SpillLimits;
 use crate::index::to_usize;
@@ -325,16 +325,23 @@ fn sources(file: &File, path: Option<&Path>, budget: StreamBudget) -> Result<Sou
 fn pacer<'a>(
     budget: StreamBudget,
     source: &'a FileSource,
+    failure: &'a Failure,
     sink: &'a mut impl FnMut(LoadEvent<Document>),
 ) -> impl FnMut(&mut BackgroundSpill, Option<&mut PendingLines<'_>>, u64, bool, bool) + 'a {
     let mut last = 0;
     move |builder, lines, frontier, done, idle| {
         let total = source.len();
         let caught_up = idle && frontier > last;
+        if failure.is_set() {
+            return;
+        }
         if done || caught_up || frontier.saturating_sub(last) >= budget.publish_every {
-            builder.publish(frontier, done);
-            if let Some(lines) = lines {
-                lines.publish(done);
+            let published = builder
+                .publish(frontier, done)
+                .and_then(|()| lines.map_or(Ok(()), |lines| lines.publish(done)));
+            if let Err(err) = published {
+                failure.set(err);
+                return;
             }
             let (phase, done) = (Phase::Indexing, frontier);
             sink(LoadEvent::Progress(Progress { phase, done, total }));
@@ -343,9 +350,13 @@ fn pacer<'a>(
     }
 }
 
-fn stopper(cancel: &AtomicBool) -> impl FnMut(u64) -> ControlFlow<()> + '_ {
+/// Stops the parse on cancel, or as soon as the index builder has failed.
+fn stopper<'a>(
+    cancel: &'a AtomicBool,
+    failure: &'a Failure,
+) -> impl FnMut(u64) -> ControlFlow<()> + 'a {
     |_| {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || failure.is_set() {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -353,8 +364,12 @@ fn stopper(cancel: &AtomicBool) -> impl FnMut(u64) -> ControlFlow<()> + '_ {
     }
 }
 
-/// `Ok(None)` when cancelled; other errors become failures.
-fn finished<T>(result: Result<T, IndexError>) -> Result<Option<T>, LoadFailure> {
+/// `Ok(None)` when cancelled; other errors become failures. A builder failure wins over
+/// the parse result, since the parser only stopped because of it.
+fn finished<T>(result: Result<T, IndexError>, failure: &Failure) -> Result<Option<T>, LoadFailure> {
+    if let Some(err) = failure.error() {
+        return Err(plain(err));
+    }
     match result {
         Ok(parsed) => Ok(Some(parsed)),
         Err(IndexError::Parse(err)) if err.kind == ParseErrorKind::Cancelled => Ok(None),
@@ -373,10 +388,12 @@ fn stream_json(
     let (builder, store) = BackgroundSpill::live(budget.spill).map_err(plain)?;
     let live = LiveTree::new(src.live, store, root);
     sink(LoadEvent::Live(Document::Live(live)));
-    let mut pace = pacer(budget, &src.parse, sink);
+    let failure = builder.failure();
+    let mut pace = pacer(budget, &src.parse, &failure, sink);
     let publish = |b: &mut BackgroundSpill, frontier, done| pace(b, None, frontier, done, false);
-    let parsed = parse_stream(&src.parse, builder, budget.stream, stopper(cancel), publish);
-    let Some(parsed) = finished(parsed)? else {
+    let stop = stopper(cancel, &failure);
+    let parsed = parse_stream(&src.parse, builder, budget.stream, stop, publish);
+    let Some(parsed) = finished(parsed, &failure)? else {
         return Ok(None);
     };
     let store = parsed.builder.finish().map_err(plain)?;
@@ -399,25 +416,19 @@ fn stream_lines(
     sink(LoadEvent::Live(Document::Live(LiveTree::lines(
         src.live, store, lines,
     ))));
-    let mut pace = pacer(budget, &src.parse, sink);
+    let failure = builder.failure();
+    let mut pace = pacer(budget, &src.parse, &failure, sink);
     let publish = |b: &mut BackgroundSpill, lines: &mut PendingLines<'_>, frontier, moment| {
         let (done, idle) = (moment == Moment::Last, moment == Moment::Idle);
         pace(b, Some(lines), frontier, done, idle);
     };
     let (source, limits) = (&src.parse, budget.stream);
+    let stop_on = || stopper(cancel, &failure);
     let parsed = match follow {
-        Some(stop) => follow_lines_stream(
-            source,
-            builder,
-            spill,
-            limits,
-            stopper(cancel),
-            publish,
-            stop,
-        ),
-        None => parse_lines_stream(source, builder, spill, limits, stopper(cancel), publish),
+        Some(stop) => follow_lines_stream(source, builder, spill, limits, stop_on(), publish, stop),
+        None => parse_lines_stream(source, builder, spill, limits, stop_on(), publish),
     };
-    let Some(parsed) = finished(parsed)? else {
+    let Some(parsed) = finished(parsed, &failure)? else {
         return Ok(None);
     };
     let store = parsed.builder.finish().map_err(plain)?;
