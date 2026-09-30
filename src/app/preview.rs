@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use crate::app::{Model, Msg, update};
 use crate::tree::TreeIndex;
 use crate::ui::preview::highlight;
+use crate::ui::tree::marker_column;
 use crate::ui::wrap::wrap;
 use crate::view::filtered::FilterView;
 use crate::view::nav::{self, Nav};
@@ -116,7 +117,7 @@ pub(crate) fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps
 fn max_scroll<T: TreeIndex>(model: &mut Model<T>) -> u64 {
     if model.preview.count.is_none() {
         let tree = &model.view();
-        let item = resolve(tree, &model.state.root, &model.state.cursor);
+        let item = resolve(tree, &model.state.root(), model.state.cursor());
         model.preview.count = item
             .ok()
             .flatten()
@@ -159,7 +160,7 @@ fn scroll_row<T: TreeIndex>(model: &mut Model<T>, down: bool) -> bool {
 fn wrapped_rows<T: TreeIndex>(model: &Model<T>, line: u64) -> Option<u64> {
     let width = preview_text_width(model)?;
     let tree = &model.view();
-    let item = resolve(tree, &model.state.root, &model.state.cursor).ok()??;
+    let item = resolve(tree, &model.state.root(), model.state.cursor()).ok()??;
     let preview = preview_lines(tree, &item, line, 1).ok()?;
     let text = preview.lines.first()?;
     Some(wrap(&highlight(text, &model.theme), width).len() as u64)
@@ -222,7 +223,7 @@ pub(crate) fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent, ti
             let (row, column) = (u64::from(mouse.row), u64::from(mouse.column));
             let height = model.height;
             let (view, state) = model.view_state();
-            let result = nav::click(&view, state, row, column, height);
+            let result = nav::click(&view, state, row, column, height, marker_column);
             model.status = result.err().map(|err| err.to_string());
         }
         _ => {}

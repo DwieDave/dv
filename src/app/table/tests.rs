@@ -72,16 +72,16 @@ fn t_on_an_element_uses_its_array_and_elsewhere_explains() {
 fn rows_move_and_clamp() {
     let mut model = model_of(PEOPLE, 40, 12);
     keys(&mut model, "tjjj");
-    assert_eq!(table(&model).row, 2);
+    assert_eq!(table(&model).row(), 2);
     keys(&mut model, "gg");
-    assert_eq!(table(&model).row, 0);
+    assert_eq!(table(&model).row(), 0);
     keys(&mut model, "G");
-    assert_eq!(table(&model).row, 2);
+    assert_eq!(table(&model).row(), 2);
     update(
         &mut model,
         Msg::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
     );
-    assert_eq!(table(&model).row, 0);
+    assert_eq!(table(&model).row(), 0);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn rows_scroll_to_keep_the_cursor_visible() {
 fn columns_hide_show_and_scroll_horizontally() {
     let mut model = model_of(PEOPLE, 40, 12);
     keys(&mut model, "tl");
-    assert_eq!(table(&model).col, 1);
+    assert_eq!(table(&model).col(), 1);
     keys(&mut model, "x");
     assert_eq!(shown_keys(&model), ["id", "tags"]);
     keys(&mut model, "X");
@@ -118,13 +118,13 @@ fn enter_opens_the_element_in_the_tree_as_a_jump() {
     keys(&mut model, "tj");
     press(&mut model, KeyCode::Enter);
     assert!(model.table.is_none());
-    assert_eq!(model.state.cursor, vec![1]);
+    assert_eq!(model.state.cursor(), vec![1]);
     update(
         &mut model,
         Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
     );
     assert_eq!(
-        model.state.cursor,
+        model.state.cursor(),
         Vec::<u64>::new(),
         "back where t was pressed"
     );
@@ -197,7 +197,7 @@ fn enter_on_a_sorted_row_opens_that_element() {
     let mut model = model_of(text, 40, 12);
     keys(&mut model, "ts");
     press(&mut model, KeyCode::Enter);
-    assert_eq!(model.state.cursor, vec![1]);
+    assert_eq!(model.state.cursor(), vec![1]);
 }
 
 #[test]

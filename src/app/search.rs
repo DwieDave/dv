@@ -12,12 +12,12 @@ use crate::app::prompt::{Prompt, PromptAction, PromptKind};
 use crate::app::{LastFind, Model, filter, jumped, picker, table};
 use crate::filter::{Expr, MAX_MATCHES, Scan, scan};
 use crate::index::children::Child;
+use crate::number::{grouped, human_bytes};
 use crate::path::render;
 use crate::pulse::Pulse;
 use crate::schema::{self, Collected, collect};
 use crate::search::{Direction, Hit, Matcher, Query, Scanned, Scope, SearchError, count, find};
 use crate::tree::{LINES_ROOT, NodeRef, TreeIndex};
-use crate::ui::status::{grouped, human_bytes};
 use crate::view::filtered::{FilterView, Filtered};
 use crate::view::resolve::{Label, RootItem, RowKind, chain};
 use crate::view::table::{SortDir, sort_order};
@@ -295,7 +295,7 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
         case_sensitive: false,
         scope: Scope::Both,
     };
-    let origin = model.state.cursor.clone();
+    let origin = model.state.cursor().to_vec();
     model.last_find = LastFind::Text;
     model.search = Some(SearchState {
         query,
@@ -397,7 +397,7 @@ fn restore<T: TreeIndex>(model: &mut Model<T>, rows: Vec<u64>) {
 /// `n` / `N`: the next or previous match, from the last hit if the cursor is still on it.
 pub fn step<T: TreeIndex>(model: &mut Model<T>, direction: Direction) {
     if let LastFind::Schema(target) = &model.last_find {
-        let (target, from) = (target.clone(), offset_of(model, &model.state.cursor));
+        let (target, from) = (target.clone(), offset_of(model, model.state.cursor()));
         return picker::step(model, &target, direction, from);
     }
     let Some(search) = model.search.as_ref() else {
@@ -406,9 +406,9 @@ pub fn step<T: TreeIndex>(model: &mut Model<T>, direction: Direction) {
     let on_last = search
         .last
         .as_ref()
-        .filter(|hit| hit.rows == model.state.cursor)
+        .filter(|hit| hit.rows == model.state.cursor())
         .map(|hit| hit.offset);
-    let from = on_last.or_else(|| offset_of(model, &model.state.cursor));
+    let from = on_last.or_else(|| offset_of(model, model.state.cursor()));
     dispatch(model, Work::Find(direction), from);
 }
 
@@ -421,7 +421,7 @@ fn dispatch<T: TreeIndex>(model: &mut Model<T>, work: Work, from: Option<u64>) {
         Ok(matcher) => matcher,
         Err(err) => return note(model, err.to_string()),
     };
-    let root = model.state.root;
+    let root = model.state.root();
     submit_job(model, work, Some(matcher), from, root);
 }
 
@@ -465,7 +465,7 @@ pub fn apply<T: TreeIndex>(model: &mut Model<T>, outcome: Outcome) {
     }
     match outcome.result {
         JobResult::Found(Some(hit)) => {
-            let before = model.state.cursor.clone();
+            let before = model.state.cursor().to_vec();
             restore(model, hit.rows.clone());
             if model.prompt.is_none() {
                 jumped(model, &before);
@@ -534,7 +534,7 @@ fn clear_prompt_error<T>(model: &mut Model<T>) {
 /// The byte offset a row starts at: its key, its value, or a bucket's first child.
 pub(crate) fn offset_of<T: TreeIndex>(model: &Model<T>, rows: &[u64]) -> Option<u64> {
     let tree = &model.view();
-    let item = chain(tree, &model.state.root, rows).ok()?.pop()?;
+    let item = chain(tree, &model.state.root(), rows).ok()?.pop()?;
     match item.kind {
         RowKind::Value { node, .. } if node.offset == LINES_ROOT => Some(0),
         RowKind::Value {
@@ -581,7 +581,7 @@ mod tests {
             generation: 7,
             kind: work.kind(),
             matcher: Some(matcher),
-            root: TreeState::new(tree).unwrap().root,
+            root: TreeState::new(tree).unwrap().root(),
             from: None,
             work,
             filter: None,
@@ -652,11 +652,11 @@ mod tests {
     fn typing_previews_the_first_match_and_esc_restores() {
         let mut model = model();
         keys(&mut model, "/ab");
-        assert_eq!(model.state.cursor, vec![0]);
+        assert_eq!(model.state.cursor(), vec![0]);
         press(&mut model, KeyCode::Esc);
         assert_eq!(
             (
-                model.state.cursor.clone(),
+                model.state.cursor().to_vec(),
                 model.search.is_none(),
                 model.prompt.is_none()
             ),
@@ -676,11 +676,11 @@ mod tests {
         let mut visited = Vec::new();
         for _ in 0..4 {
             keys(&mut model, "n");
-            visited.push(model.state.cursor.clone());
+            visited.push(model.state.cursor().to_vec());
         }
         assert_eq!(visited, vec![vec![0, 0], vec![0, 2], vec![1, 0], vec![0]]);
         keys(&mut model, "N");
-        assert_eq!(model.state.cursor, vec![1, 0]);
+        assert_eq!(model.state.cursor(), vec![1, 0]);
     }
 
     #[test]
@@ -694,7 +694,7 @@ mod tests {
         );
         press(&mut model, KeyCode::Enter);
         keys(&mut model, "n");
-        assert_eq!(model.state.cursor, vec![1, 0]);
+        assert_eq!(model.state.cursor(), vec![1, 0]);
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod tests {
         let mut model = model();
         keys(&mut model, "j/qqq");
         assert_eq!(
-            (model.state.cursor.clone(), note(&model)),
+            (model.state.cursor().to_vec(), note(&model)),
             (vec![0], Some("no match".into()))
         );
     }
@@ -868,7 +868,7 @@ mod tests {
             generation.next(JobKind::Search);
         });
         let notify = |outcome: Outcome| sent.borrow_mut().push(outcome);
-        let root = TreeState::new(&tree()).unwrap().root;
+        let root = TreeState::new(&tree()).unwrap().root();
         let pulse = WorkerPulse {
             generations: &generation,
             kind: JobKind::Search,

@@ -65,7 +65,7 @@ pub fn apply(
 }
 
 fn shift(state: &mut TreeState, delta: i64) {
-    let row = state.row_of(&state.cursor).unwrap_or(0);
+    let row = state.row_of(state.cursor()).unwrap_or(0);
     jump(
         state,
         row.saturating_add_signed(delta).min(state.total_rows() - 1),
@@ -74,7 +74,7 @@ fn shift(state: &mut TreeState, delta: i64) {
 
 fn jump(state: &mut TreeState, row: u64) {
     if let Some(path) = state.locate(row) {
-        state.cursor = path;
+        state.set_cursor(path);
     }
 }
 
@@ -84,7 +84,7 @@ fn expandable(
     state: &TreeState,
     path: &[u64],
 ) -> Result<Option<Level>, IndexError> {
-    let Some(item) = resolve(tree, &state.root, path)? else {
+    let Some(item) = resolve(tree, &state.root(), path)? else {
         return Ok(None);
     };
     let container = match &item.kind {
@@ -108,9 +108,9 @@ pub(crate) fn expand(
     let Some(level) = expandable(tree, state, path)? else {
         return Ok(false);
     };
-    Ok(match (path.is_empty(), state.expansion.as_mut()) {
+    Ok(match (path.is_empty(), state.expansion_mut().as_mut()) {
         (true, _) => {
-            state.expansion = Some(Expansion::new(level));
+            state.set_expansion(Some(Expansion::new(level)));
             true
         }
         (false, Some(expansion)) => expansion.expand(path, level),
@@ -120,33 +120,35 @@ pub(crate) fn expand(
 
 fn collapse(state: &mut TreeState, path: &[u64]) -> bool {
     if path.is_empty() {
-        return state.expansion.take().is_some();
+        return state.expansion_mut().take().is_some();
     }
-    state.expansion.as_mut().is_some_and(|e| e.collapse(path))
+    state
+        .expansion_mut()
+        .as_mut()
+        .is_some_and(|e| e.collapse(path))
 }
 
 fn cursor(state: &TreeState) -> Vec<u64> {
-    state.cursor.clone()
+    state.cursor().to_vec()
 }
 
 fn expand_or_enter(tree: &impl TreeIndex, state: &mut TreeState) -> Result<(), IndexError> {
     let path = cursor(state);
     let has_rows = |state: &TreeState| {
         state
-            .expansion
-            .as_ref()
+            .expansion()
             .and_then(|e| e.get(&path))
             .is_some_and(|e| !e.level().is_empty())
     };
     if !expand(tree, state, &path)? && has_rows(state) {
-        state.cursor.push(0);
+        state.cursor_mut().push(0);
     }
     Ok(())
 }
 
 fn collapse_or_parent(state: &mut TreeState) {
     if !collapse(state, &cursor(state)) {
-        state.cursor.pop();
+        state.cursor_mut().pop();
     }
 }
 
@@ -162,8 +164,7 @@ fn expand_children(tree: &impl TreeIndex, state: &mut TreeState) -> Result<(), I
     let path = cursor(state);
     expand(tree, state, &path)?;
     let rows = state
-        .expansion
-        .as_ref()
+        .expansion()
         .and_then(|e| e.get(&path))
         .map_or(0, |e| e.level().len());
     for i in 0..rows {
@@ -173,24 +174,25 @@ fn expand_children(tree: &impl TreeIndex, state: &mut TreeState) -> Result<(), I
 }
 
 fn collapse_subtree(state: &mut TreeState) {
-    if !collapse(state, &cursor(state)) && state.cursor.pop().is_some() {
+    if !collapse(state, &cursor(state)) && state.cursor_mut().pop().is_some() {
         collapse(state, &cursor(state));
     }
 }
 
 fn collapse_all(tree: &impl TreeIndex, state: &mut TreeState) -> Result<(), IndexError> {
-    state.expansion = Some(Expansion::new(level_of(tree, &state.root.row())?));
-    state.cursor.clear();
+    state.set_expansion(Some(Expansion::new(level_of(tree, &state.root().row())?)));
+    state.cursor_mut().clear();
     Ok(())
 }
 
 pub(crate) fn scroll_into_view(state: &mut TreeState, height: u64) {
-    let row = state.row_of(&state.cursor).unwrap_or(0);
-    let top = state.top.min(state.total_rows() - 1).min(row);
-    state.top = top.max((row + 1).saturating_sub(height));
+    let row = state.row_of(state.cursor()).unwrap_or(0);
+    let top = state.top().min(state.total_rows() - 1).min(row);
+    state.set_top(top.max((row + 1).saturating_sub(height)));
 }
 
-/// Selects the row `row` lines below the top; a click on its marker toggles it.
+/// Selects the row `row` lines below the top; a click on the two columns starting at
+/// `marker_column(depth)` (the fold marker of a row `depth` levels down) toggles it.
 ///
 /// # Errors
 /// Storage or lexing failures while resolving rows.
@@ -200,13 +202,13 @@ pub fn click(
     row: u64,
     column: u64,
     height: u64,
+    marker_column: fn(usize) -> u64,
 ) -> Result<(), IndexError> {
-    let Some(path) = state.locate(state.top + row) else {
+    let Some(path) = state.locate(state.top() + row) else {
         return Ok(());
     };
-    // One gutter column, then two per nesting level (see the tree widget).
-    let marker = 1 + 2 * path.len() as u64;
-    state.cursor = path;
+    let marker = marker_column(path.len());
+    state.set_cursor(path);
     if (marker..marker + 2).contains(&column) {
         toggle(tree, state)?;
     }
@@ -217,11 +219,11 @@ pub fn click(
 /// Moves the viewport by `delta` rows; the cursor follows only to stay visible.
 fn scroll(state: &mut TreeState, delta: i64, height: u64) {
     let last = state.total_rows() - 1;
-    state.top = state.top.saturating_add_signed(delta).min(last);
-    let row = state.row_of(&state.cursor).unwrap_or(0);
+    state.set_top(state.top().saturating_add_signed(delta).min(last));
+    let row = state.row_of(state.cursor()).unwrap_or(0);
     jump(
         state,
-        row.clamp(state.top, (state.top + height - 1).min(last)),
+        row.clamp(state.top(), (state.top() + height - 1).min(last)),
     );
 }
 

@@ -22,7 +22,7 @@ impl<T: TreeIndex> Model<T> {
 
     /// As [`Self::reveal`], for rows that may have failed to resolve.
     pub(crate) fn reveal_result(&mut self, rows: Result<Vec<u64>, IndexError>, as_jump: bool) {
-        let before = self.state.cursor.clone();
+        let before = self.state.cursor().to_vec();
         let height = self.height;
         let (view, state) = self.view_state();
         let result = rows.and_then(|rows| reveal(&view, state, rows, height));
@@ -35,7 +35,7 @@ impl<T: TreeIndex> Model<T> {
 
 /// Records `before` in the jump list when a jump moved the cursor away from it.
 pub(crate) fn jumped<T: TreeIndex>(model: &mut Model<T>, before: &[u64]) {
-    if model.state.cursor != before
+    if model.state.cursor() != before
         && let Some(place) = place_at(model, before)
     {
         model.jumps.record(place);
@@ -44,7 +44,7 @@ pub(crate) fn jumped<T: TreeIndex>(model: &mut Model<T>, before: &[u64]) {
 
 /// The document place of the row at `rows` in the current view.
 fn place_at<T: TreeIndex>(model: &mut Model<T>, rows: &[u64]) -> Option<Place> {
-    match place_of(&model.view(), &model.state.root, rows) {
+    match place_of(&model.view(), &model.state.root(), rows) {
         Ok(place) => Some(place),
         Err(err) => {
             model.status = Some(err.to_string());
@@ -55,13 +55,13 @@ fn place_at<T: TreeIndex>(model: &mut Model<T>, rows: &[u64]) -> Option<Place> {
 
 /// Moves the cursor to `place`, expanding its ancestors, through the current view.
 fn reveal_place<T: TreeIndex>(model: &mut Model<T>, place: Place, as_jump: bool) {
-    let rows = rows_of(&model.view(), &model.state.root, place);
+    let rows = rows_of(&model.view(), &model.state.root(), place);
     model.reveal_result(rows, as_jump);
 }
 
 /// `Ctrl-o` / `Tab`: returns to a place in the jump list, expanding its ancestors.
 pub(crate) fn history<T: TreeIndex>(model: &mut Model<T>, step: Step) {
-    let cursor = model.state.cursor.clone();
+    let cursor = model.state.cursor().to_vec();
     let Some(current) = place_at(model, &cursor) else {
         return;
     };
@@ -84,7 +84,7 @@ pub(crate) fn set_mark<T: TreeIndex>(model: &mut Model<T>, c: char) {
     let Some(slot) = mark_slot(c) else {
         return;
     };
-    let cursor = model.state.cursor.clone();
+    let cursor = model.state.cursor().to_vec();
     if let Some(place) = place_at(model, &cursor) {
         model.marks[slot] = Some(place);
         model.note = Some(format!("mark {c} set"));
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn view_reads_the_tree_without_a_filter() {
         let model = model();
-        let root = model.state.root.node;
+        let root = model.state.root().node;
         assert_eq!(model.view().child_count(root).unwrap().available(), 1);
     }
 
@@ -122,10 +122,10 @@ mod tests {
     fn reveal_expands_ancestors_and_records_a_jump_on_request() {
         let mut model = model();
         model.reveal(vec![0, 1], true);
-        assert_eq!(model.state.cursor, vec![0, 1]);
+        assert_eq!(model.state.cursor(), vec![0, 1]);
         assert_eq!(model.status, None);
         update(&mut model, Msg::History(Step::Back));
-        assert_eq!(model.state.cursor, Vec::<u64>::new());
+        assert_eq!(model.state.cursor(), Vec::<u64>::new());
     }
 
     #[test]
@@ -133,6 +133,6 @@ mod tests {
         let mut model = model();
         model.reveal(vec![0, 1], false);
         update(&mut model, Msg::History(Step::Back));
-        assert_eq!(model.state.cursor, vec![0, 1]);
+        assert_eq!(model.state.cursor(), vec![0, 1]);
     }
 }

@@ -54,7 +54,7 @@ fn walk(tree: &MemTree, node: NodeRef, depth: usize) -> Result<(), TestCaseError
 fn previewed(tree: &MemTree) -> Result<(), TestCaseError> {
     let root = TreeState::new(tree)
         .map_err(|e| TestCaseError::fail(e.to_string()))?
-        .root;
+        .root();
     preview_lines(tree, &root.row(), 0, 40).map_err(|e| TestCaseError::fail(e.to_string()))?;
     walk(tree, root.node, 0)
 }
@@ -187,9 +187,9 @@ proptest! {
         let mut state = TreeState::new(&tree).map_err(failed)?;
         for nav in steps {
             nav::apply(&tree, &mut state, nav, height).map_err(failed)?;
-            let row = state.row_of(&state.cursor);
-            prop_assert!(row.is_some_and(|r| r < state.total_rows()), "{:?}", state.cursor);
-            prop_assert!(state.top < state.total_rows());
+            let row = state.row_of(state.cursor());
+            prop_assert!(row.is_some_and(|r| r < state.total_rows()), "{:?}", state.cursor());
+            prop_assert!(state.top() < state.total_rows());
         }
     }
 

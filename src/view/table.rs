@@ -63,22 +63,22 @@ pub const GUTTER: &str = "  ";
 /// An open table: the container, its columns, and the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableState {
-    pub node: NodeRef,
-    pub columns: Vec<Column>,
-    pub hidden: Vec<bool>,
+    node: NodeRef,
+    columns: Vec<Column>,
+    hidden: Vec<bool>,
     /// The current column, among the shown ones.
-    pub col: usize,
+    col: usize,
     /// The first shown column on screen.
-    pub left: usize,
-    pub row: u64,
+    left: usize,
+    row: u64,
     /// The first row on screen.
-    pub top: u64,
+    top: u64,
     /// `g` was pressed; a second `g` goes to the top.
-    pub chord: bool,
+    chord: bool,
     /// The sorted column (an index into `columns`) and direction.
-    pub sort: Option<(usize, SortDir)>,
+    sort: Option<(usize, SortDir)>,
     /// Element indices in sorted order, once the sort is done.
-    pub order: Option<Vec<u64>>,
+    order: Option<Vec<u64>>,
 }
 
 /// Where the cursor moves.
@@ -90,6 +90,68 @@ pub enum RowTo {
 }
 
 impl TableState {
+    #[must_use]
+    pub fn node(&self) -> NodeRef {
+        self.node
+    }
+
+    #[must_use]
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// The current column, among the shown ones.
+    #[must_use]
+    pub fn col(&self) -> usize {
+        self.col
+    }
+
+    /// The first shown column on screen.
+    #[must_use]
+    pub fn left(&self) -> usize {
+        self.left
+    }
+
+    #[must_use]
+    pub fn row(&self) -> u64 {
+        self.row
+    }
+
+    /// The first row on screen.
+    #[must_use]
+    pub fn top(&self) -> u64 {
+        self.top
+    }
+
+    /// The sorted column (an index into `columns`) and direction.
+    #[must_use]
+    pub fn sort(&self) -> Option<(usize, SortDir)> {
+        self.sort
+    }
+
+    /// Whether `g` was pressed, clearing the pending chord.
+    pub fn take_chord(&mut self) -> bool {
+        std::mem::take(&mut self.chord)
+    }
+
+    pub fn start_chord(&mut self) {
+        self.chord = true;
+    }
+
+    /// Moves to the [`next_sort`](Self::next_sort), dropping the old order; returns the new
+    /// sort's column key and direction.
+    pub fn advance_sort(&mut self) -> Option<(String, SortDir)> {
+        self.sort = self.next_sort();
+        self.order = None;
+        let (column, dir) = self.sort?;
+        Some((self.columns.get(column)?.key.clone(), dir))
+    }
+
+    /// Shows rows in `order` (element indices), once a sort is done.
+    pub fn set_order(&mut self, order: Vec<u64>) {
+        self.order = Some(order);
+    }
+
     #[must_use]
     pub fn new(node: NodeRef, columns: Vec<Column>) -> Self {
         let hidden = vec![false; columns.len()];
@@ -281,21 +343,7 @@ fn member<T: TreeIndex + ?Sized>(
     row: NodeRef,
     key: &str,
 ) -> Result<Option<Child>, IndexError> {
-    if row.kind != Kind::Object {
-        return Ok(None);
-    }
-    let total = tree.child_count(row)?.available();
-    for start in (0..total).step_by(to_usize(SAMPLE)) {
-        for child in tree.children(row, start..start.saturating_add(SAMPLE).min(total))? {
-            let Some(span) = child.key.clone() else {
-                continue;
-            };
-            if unescape(&tree.bytes(span)?) == key {
-                return Ok(Some(child));
-            }
-        }
-    }
-    Ok(None)
+    tree.find_member(row, key, SAMPLE)
 }
 
 /// The decoded keys and values of an object row's first [`SAMPLE`] members (none for other
@@ -309,10 +357,7 @@ fn fields<T: TreeIndex + ?Sized>(
     }
     let members = tree.children(row, 0..SAMPLE)?;
     let decode = |child: Child| -> Result<Option<(String, Child)>, IndexError> {
-        let Some(span) = child.key.clone() else {
-            return Ok(None);
-        };
-        Ok(Some((unescape(&tree.bytes(span)?).into_owned(), child)))
+        Ok(tree.key_of(&child)?.map(|key| (key, child)))
     };
     let decoded: Result<Vec<_>, _> = members.into_iter().map(decode).collect();
     Ok(decoded?.into_iter().flatten().collect())

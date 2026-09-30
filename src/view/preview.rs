@@ -1,13 +1,13 @@
 //! Pretty-printed preview of the selected item, produced lazily.
 
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 use crate::index::{IndexError, to_usize};
 use crate::json::format::{Formatter, Style};
 use crate::json::lex::Kind;
 use crate::json::text::unescape;
+use crate::number::grouped;
 use crate::tree::{Count, LINES_ROOT, NodeRef, TreeIndex};
-use crate::ui::status::grouped;
 use crate::view::resolve::{RowItem, RowKind};
 
 /// Deepest line the preview will skip to.
@@ -187,21 +187,21 @@ fn records_text(
         return Ok(None);
     };
     let mut out = Vec::new();
-    for start in (0..n).step_by(1024) {
-        for record in tree.children(root, start..(start + 1024).min(n))? {
-            if !out.is_empty() {
-                out.push(b'\n');
-            }
-            if !format_into(
-                tree,
-                &[Piece::Bytes(record.value..record.end)],
-                style,
-                limit,
-                &mut out,
-            )? {
-                return Ok(None);
-            }
+    let mut fits = true;
+    tree.children_batched(root, n, 1024, &mut |record| {
+        if !out.is_empty() {
+            out.push(b'\n');
         }
+        let piece = [Piece::Bytes(record.value..record.end)];
+        fits = format_into(tree, &piece, style, limit, &mut out)?;
+        Ok(if fits {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        })
+    })?;
+    if !fits {
+        return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }

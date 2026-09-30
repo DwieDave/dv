@@ -25,7 +25,7 @@ fn key_text(tree: &MemTree, item: &RowItem) -> String {
 #[test]
 fn resolves_members_buckets_and_items() {
     let tree = doc();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     let at = |path: &[u64]| resolve(&tree, &root, path).unwrap().unwrap();
 
     assert_eq!(at(&[]), root.row());
@@ -52,7 +52,7 @@ fn resolves_members_buckets_and_items() {
 #[test]
 fn levels_follow_counts_and_ranges() {
     let tree = doc();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     let big = resolve(&tree, &root, &[1]).unwrap().unwrap();
     assert_eq!(level_of(&tree, &root.row()).unwrap().len(), 3);
     assert_eq!(level_of(&tree, &big).unwrap().len(), 2);
@@ -63,7 +63,7 @@ fn levels_follow_counts_and_ranges() {
 #[test]
 fn segments_skip_bucket_levels() {
     let tree = doc();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     let items = chain(&tree, &root, &[1, 1, 5]).unwrap();
     assert_eq!(items.len(), 4);
     let path = crate::path::render(&segments(&tree, &items).unwrap());

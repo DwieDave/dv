@@ -297,8 +297,8 @@ const COPY_LIMIT: usize = 16 << 20;
 /// Applies `msg` to `model`; no I/O happens here.
 pub fn update<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
     handle(model, msg);
-    if model.preview.for_cursor != model.state.cursor {
-        model.preview.for_cursor.clone_from(&model.state.cursor);
+    if model.preview.for_cursor != model.state.cursor() {
+        model.preview.for_cursor = model.state.cursor().to_vec();
         (model.preview.scroll, model.preview.row) = (0, 0);
         model.preview.count = None;
     }
@@ -342,7 +342,7 @@ fn handle<T: TreeIndex>(model: &mut Model<T>, msg: Msg) {
             model.height = u64::from(height.saturating_sub(chrome_rows(model))).max(1);
         }
         Msg::Nav(action) => {
-            let before = model.state.cursor.clone();
+            let before = model.state.cursor().to_vec();
             let height = model.height;
             let (view, state) = model.view_state();
             let result = nav::apply(&view, state, action, height);
@@ -401,7 +401,7 @@ fn prompt_key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
 
 /// Runs the prompt's command; failures stay in the prompt for correction.
 fn submit<T: TreeIndex>(model: &mut Model<T>, text: &str) {
-    let before = model.state.cursor.clone();
+    let before = model.state.cursor().to_vec();
     let result = parse(text)
         .map_err(|err| err.to_string())
         .and_then(|steps| {
@@ -447,7 +447,7 @@ fn copy<T: TreeIndex>(model: &mut Model<T>, what: CopyWhat) {
 
 fn cursor_text<T: TreeIndex>(model: &Model<T>, style: Style) -> Result<Option<String>, IndexError> {
     let tree = &model.view();
-    match resolve(tree, &model.state.root, &model.state.cursor)? {
+    match resolve(tree, &model.state.root(), model.state.cursor())? {
         Some(item) => value_text(tree, &item, style, COPY_LIMIT),
         None => Ok(None),
     }
@@ -538,7 +538,7 @@ fn render_preview<T: TreeIndex>(model: &Model<T>, frame: &mut Frame, area: Rect)
     // Two border rows plus one for the `…` marker.
     let take = usize::from(area.height.saturating_sub(3));
     let tree = &model.view();
-    let preview = resolve(tree, &model.state.root, &model.state.cursor)
+    let preview = resolve(tree, &model.state.root(), model.state.cursor())
         .and_then(|item| {
             item.map(|item| preview_lines(tree, &item, model.preview.scroll, take))
                 .transpose()
@@ -581,7 +581,7 @@ fn status<T: TreeIndex>(model: &Model<T>, width: usize) -> Line<'static> {
 /// The jq path and type name of the cursor row.
 fn cursor_facts<T: TreeIndex>(model: &Model<T>) -> Result<(String, String), IndexError> {
     let view = model.view();
-    let items = chain(&view, &model.state.root, &model.state.cursor)?;
+    let items = chain(&view, &model.state.root(), model.state.cursor())?;
     let path = render(&segments(&view, &items)?);
     let kind = match items.last().map(|item| &item.kind) {
         Some(RowKind::Value { node, .. }) => kind_name(node.kind),
@@ -743,28 +743,28 @@ mod tests {
         update(&mut model, Msg::Resize(40, 12));
         typed(&mut model, ":.a[1]");
         update(&mut model, Msg::Key(KeyCode::Enter.into()));
-        assert_eq!(model.state.cursor, vec![0, 1]);
+        assert_eq!(model.state.cursor(), vec![0, 1]);
         typed(&mut model, "gg");
-        assert_eq!(model.state.cursor, Vec::<u64>::new());
+        assert_eq!(model.state.cursor(), Vec::<u64>::new());
         let ctrl_o = Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         update(&mut model, ctrl_o.clone());
-        assert_eq!(model.state.cursor, vec![0, 1], "back before gg");
+        assert_eq!(model.state.cursor(), vec![0, 1], "back before gg");
         update(&mut model, ctrl_o.clone());
         assert_eq!(
-            model.state.cursor,
+            model.state.cursor(),
             Vec::<u64>::new(),
             "back before the path jump"
         );
         update(&mut model, ctrl_o);
         assert_eq!(
-            model.state.cursor,
+            model.state.cursor(),
             Vec::<u64>::new(),
             "nothing further back"
         );
         update(&mut model, Msg::Key(KeyCode::Tab.into()));
-        assert_eq!(model.state.cursor, vec![0, 1]);
+        assert_eq!(model.state.cursor(), vec![0, 1]);
         update(&mut model, Msg::Key(KeyCode::Tab.into()));
-        assert_eq!(model.state.cursor, Vec::<u64>::new());
+        assert_eq!(model.state.cursor(), Vec::<u64>::new());
     }
 
     #[test]
@@ -772,17 +772,17 @@ mod tests {
         let mut model = model();
         update(&mut model, Msg::Resize(40, 12));
         typed(&mut model, "jlj");
-        assert_eq!(model.state.cursor, vec![0, 0]);
+        assert_eq!(model.state.cursor(), vec![0, 0]);
         typed(&mut model, "ma");
         typed(&mut model, "gg");
         typed(&mut model, "'a");
-        assert_eq!(model.state.cursor, vec![0, 0]);
+        assert_eq!(model.state.cursor(), vec![0, 0]);
         update(
             &mut model,
             Msg::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         );
         assert_eq!(
-            model.state.cursor,
+            model.state.cursor(),
             Vec::<u64>::new(),
             "the mark jump is in the history"
         );
@@ -803,7 +803,7 @@ mod tests {
         for c in ['j', 'l', 'j'] {
             update(&mut model, Msg::Key(KeyCode::Char(c).into()));
         }
-        assert_eq!(model.state.cursor, vec![0, 0]);
+        assert_eq!(model.state.cursor(), vec![0, 0]);
     }
 
     #[test]
@@ -822,10 +822,10 @@ mod tests {
             &mut model,
             mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
         );
-        assert_eq!(model.state.cursor, vec![0]);
+        assert_eq!(model.state.cursor(), vec![0]);
         assert!(model.state.is_expanded(&[0]));
         update(&mut model, mouse(MouseEventKind::ScrollDown, 0, 0));
-        assert_eq!(model.state.top, 3);
+        assert_eq!(model.state.top(), 3);
     }
 
     fn typed(model: &mut Model<MemTree>, text: &str) {
@@ -844,7 +844,7 @@ mod tests {
         );
         update(&mut model, Msg::Key(KeyCode::Enter.into()));
         assert_eq!(
-            (model.prompt.clone(), model.state.cursor.clone()),
+            (model.prompt.clone(), model.state.cursor().to_vec()),
             (None, vec![0, 1])
         );
     }
@@ -869,7 +869,7 @@ mod tests {
         );
         update(&mut model, Msg::Key(KeyCode::Esc.into()));
         assert_eq!(
-            (model.prompt.clone(), model.state.cursor.clone()),
+            (model.prompt.clone(), model.state.cursor().to_vec()),
             (None, vec![])
         );
     }
@@ -921,10 +921,10 @@ mod tests {
             })
         };
         update(&mut model, wheel(70));
-        assert_eq!((model.preview.scroll, model.state.top), (3, 0));
+        assert_eq!((model.preview.scroll, model.state.top()), (3, 0));
         update(&mut model, Msg::Key(KeyCode::Char('l').into()));
         update(&mut model, wheel(10));
-        assert_eq!(model.state.top, 1);
+        assert_eq!(model.state.top(), 1);
     }
 
     #[test]

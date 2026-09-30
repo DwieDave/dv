@@ -14,6 +14,7 @@ pub mod json;
 pub mod live_tree;
 pub mod load;
 pub mod mode;
+pub mod number;
 pub mod path;
 pub mod position;
 pub mod pulse;

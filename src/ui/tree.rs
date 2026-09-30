@@ -14,6 +14,13 @@ use crate::ui::theme::Theme;
 use crate::view::resolve::{Label, RowKind, resolve};
 use crate::view::state::TreeState;
 
+/// The column of the fold marker on a row `depth` levels down: one gutter column, then two
+/// per nesting level.
+#[must_use]
+pub fn marker_column(depth: usize) -> u64 {
+    1 + 2 * depth as u64
+}
+
 /// Longest key shown before truncation.
 const MAX_KEY_CHARS: usize = 32;
 
@@ -25,10 +32,10 @@ pub struct TreeWidget<'a, T> {
 
 impl<T: TreeIndex> Widget for TreeWidget<'_, T> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut path = self.state.locate(self.state.top);
+        let mut path = self.state.locate(self.state.top());
         for y in area.top()..area.bottom() {
             let Some(current) = path else { break };
-            let selected = current == self.state.cursor;
+            let selected = current == self.state.cursor();
             let line = self
                 .line(&current, area.width.into(), selected)
                 .unwrap_or_else(|err| Line::styled(err.to_string(), self.theme.error));
@@ -49,7 +56,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
         width: usize,
         selected: bool,
     ) -> Result<Line<'static>, IndexError> {
-        let Some(item) = resolve(self.tree, &self.state.root, path)? else {
+        let Some(item) = resolve(self.tree, &self.state.root(), path)? else {
             return Ok(Line::default());
         };
         let expanded = self.state.is_expanded(path);
@@ -86,7 +93,7 @@ impl<T: TreeIndex> TreeWidget<'_, T> {
     /// The gutter column, then a guide per nesting level: dim, except the level of the
     /// cursor's container on the rows inside it.
     fn indent(&self, path: &[u64]) -> Vec<Span<'static>> {
-        let cursor = &self.state.cursor;
+        let cursor = self.state.cursor();
         let lit = cursor
             .len()
             .checked_sub(1)

@@ -11,7 +11,7 @@ use crate::view::state::TreeState;
 
 fn doc(value: &Value) -> (MemTree, RootItem) {
     let tree = MemTree::parse(MemSource::new(serde_json::to_vec(value).unwrap())).unwrap();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     (tree, root)
 }
 

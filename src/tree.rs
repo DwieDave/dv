@@ -11,6 +11,7 @@ use crate::index::{IndexError, to_usize};
 use crate::json::lex::{Kind, scan_scalar};
 use crate::json::ndjson::{LineIndex, ParsedLines, Records, parse_lines, records};
 use crate::json::parse::Parsed;
+use crate::json::text::unescape;
 use crate::source::{MemSource, Source};
 
 /// A value in the document, identified by the offset of its first byte.
@@ -110,6 +111,65 @@ pub trait TreeIndex {
     fn stats(&self) -> Stats;
 
     fn format(&self) -> Format;
+
+    /// Feeds the first `total` children of `node` to `visit`, reading `batch` at a time,
+    /// until `visit` breaks.
+    ///
+    /// # Errors
+    /// Storage or lexing failures, or the ones `visit` returns.
+    fn children_batched(
+        &self,
+        node: NodeRef,
+        total: u64,
+        batch: u64,
+        visit: &mut dyn FnMut(Child) -> Result<ControlFlow<()>, IndexError>,
+    ) -> Result<(), IndexError> {
+        for start in (0..total).step_by(to_usize(batch)) {
+            for child in self.children(node, start..start.saturating_add(batch).min(total))? {
+                if visit(child)?.is_break() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The decoded key of `child`, or `None` for an array element.
+    ///
+    /// # Errors
+    /// Storage failures.
+    fn key_of(&self, child: &Child) -> Result<Option<String>, IndexError> {
+        let Some(span) = child.key.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(unescape(&self.bytes(span)?).into_owned()))
+    }
+
+    /// The first member of the object `node` named `key`, read `batch` members at a time;
+    /// `None` for other values.
+    ///
+    /// # Errors
+    /// Storage or lexing failures.
+    fn find_member(
+        &self,
+        node: NodeRef,
+        key: &str,
+        batch: u64,
+    ) -> Result<Option<Child>, IndexError> {
+        if node.kind != Kind::Object {
+            return Ok(None);
+        }
+        let mut found = None;
+        let total = self.child_count(node)?.available();
+        self.children_batched(node, total, batch, &mut |child| {
+            if self.key_of(&child)?.as_deref() != Some(key) {
+                return Ok(ControlFlow::Continue(()));
+            }
+            found = Some(child);
+            Ok(ControlFlow::Break(()))
+        })?;
+        Ok(found)
+    }
 
     /// Whether `node` was expanded from a YAML alias.
     fn is_alias(&self, _node: NodeRef) -> bool {

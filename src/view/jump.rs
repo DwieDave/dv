@@ -2,9 +2,8 @@
 
 use thiserror::Error;
 
-use crate::index::{IndexError, to_usize};
+use crate::index::IndexError;
 use crate::json::lex::Kind;
-use crate::json::text::unescape;
 use crate::path::Step;
 use crate::tree::{NodeRef, TreeIndex};
 use crate::view::bucket::Level;
@@ -63,7 +62,7 @@ pub fn jump(
     steps: &[Step],
     height: u64,
 ) -> Result<(), JumpError> {
-    let rows = row_path(tree, &state.root, steps)?;
+    let rows = row_path(tree, &state.root(), steps)?;
     Ok(reveal(tree, state, rows, height)?)
 }
 
@@ -80,7 +79,7 @@ pub fn reveal(
     for depth in 0..rows.len() {
         expand(tree, state, &rows[..depth])?;
     }
-    state.cursor = rows;
+    state.set_cursor(rows);
     scroll_into_view(state, height.max(1));
     Ok(())
 }
@@ -98,7 +97,7 @@ fn child_index(
     last: bool,
 ) -> Result<u64, JumpError> {
     match (step, node.kind) {
-        (Step::Key(key), Kind::Object) => find_key(tree, node, n, key),
+        (Step::Key(key), Kind::Object) => find_key(tree, node, key),
         (Step::Index(i), Kind::Array) => normalize(*i, n),
         (Step::Slice(..), Kind::Array) if !last => Err(JumpError::SliceNotLast),
         (Step::Slice(start, _), Kind::Array) => normalize(start.unwrap_or(0), n),
@@ -119,18 +118,11 @@ fn normalize(i: i64, n: u64) -> Result<u64, JumpError> {
 }
 
 /// The index of the first member named `key`, scanning children window by window.
-fn find_key(tree: &impl TreeIndex, node: NodeRef, n: u64, key: &str) -> Result<u64, JumpError> {
-    for start in (0..n).step_by(to_usize(KEY_WINDOW)) {
-        for child in tree.children(node, start..(start + KEY_WINDOW).min(n))? {
-            let Some(span) = child.key.clone() else {
-                continue;
-            };
-            if unescape(&tree.bytes(span)?) == key {
-                return Ok(child.index);
-            }
-        }
+fn find_key(tree: &impl TreeIndex, node: NodeRef, key: &str) -> Result<u64, JumpError> {
+    match tree.find_member(node, key, KEY_WINDOW)? {
+        Some(child) => Ok(child.index),
+        None => Err(JumpError::NoKey(key.to_owned())),
     }
-    Err(JumpError::NoKey(key.to_owned()))
 }
 
 /// Row indices from a container's level down through its buckets to child `k`.

@@ -37,7 +37,7 @@ proptest! {
     fn previews_match_serde_pretty_windows(value in json_value(), child in any::<prop::sample::Index>(), skip in 0usize..30, take in 0usize..30) {
         let (text, _) = layout(&value, " \n");
         let tree = tree_of(&text);
-        let root = TreeState::new(&tree).unwrap().root;
+        let root = TreeState::new(&tree).unwrap().root();
         let (item, expected) = match &value {
             Value::Array(items) if !items.is_empty() && items.len() <= 1024 => {
                 let i = child.index(items.len());
@@ -54,7 +54,7 @@ proptest! {
 fn buckets_preview_their_slice() {
     let items: Vec<String> = (0..1100).map(|i| i.to_string()).collect();
     let tree = tree_of(&format!("[{}]", items.join(",")));
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     let bucket = resolve(&tree, &root, &[1]).unwrap().unwrap();
     let got = preview_lines(&tree, &bucket, 0, 3).unwrap();
     assert_eq!(
@@ -69,7 +69,7 @@ fn buckets_preview_their_slice() {
 #[test]
 fn ndjson_roots_and_invalid_records_get_summaries() {
     let tree = MemTree::parse_lines(MemSource::new(b"1\n{bad\n".to_vec())).unwrap();
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     assert_eq!(
         preview_lines(&tree, &root.row(), 0, 5).unwrap().lines,
         ["2 records"]
@@ -86,7 +86,7 @@ proptest! {
     fn value_text_matches_serde(value in json_value(), child in any::<prop::sample::Index>()) {
         let (text, _) = layout(&value, " \n");
         let tree = tree_of(&text);
-        let root = TreeState::new(&tree).unwrap().root;
+        let root = TreeState::new(&tree).unwrap().root();
         let (item, expected) = match &value {
             Value::Object(map) if !map.is_empty() && map.len() <= 1024 => {
                 let i = child.index(map.len());
@@ -105,7 +105,7 @@ proptest! {
 fn value_text_respects_the_limit_and_covers_buckets_and_records() {
     let items: Vec<String> = (0..1100).map(|i| i.to_string()).collect();
     let tree = tree_of(&format!("[{}]", items.join(", ")));
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     assert_eq!(
         value_text(&tree, &root.row(), Style::Minify, 10).unwrap(),
         None
@@ -123,7 +123,7 @@ fn value_text_respects_the_limit_and_covers_buckets_and_records() {
         Some(expected)
     );
     let lines = MemTree::parse_lines(MemSource::new(b"{\"a\": 1}\n[2]\n".to_vec())).unwrap();
-    let root = TreeState::new(&lines).unwrap().root;
+    let root = TreeState::new(&lines).unwrap().root();
     assert_eq!(
         value_text(&lines, &root.row(), Style::Minify, usize::MAX).unwrap(),
         Some("{\"a\":1}\n[2]".into())
@@ -135,7 +135,7 @@ proptest! {
     fn the_line_count_matches_the_pretty_lines(value in json_value()) {
         let (text, _) = layout(&value, " \n");
         let tree = tree_of(&text);
-        let root = TreeState::new(&tree).unwrap().root;
+        let root = TreeState::new(&tree).unwrap().root();
         let count = preview_line_count(&tree, &root.row()).unwrap();
         prop_assert_eq!(count.lines, expected_lines(&value).len() as u64);
         prop_assert!(!count.growing);
@@ -146,7 +146,7 @@ proptest! {
 fn the_line_count_stops_at_the_cap() {
     let items: Vec<String> = (0..MAX_PREVIEW_LINES + 50).map(|i| i.to_string()).collect();
     let tree = tree_of(&format!("[{}]", items.join(",")));
-    let root = TreeState::new(&tree).unwrap().root;
+    let root = TreeState::new(&tree).unwrap().root();
     let count = preview_line_count(&tree, &root.row()).unwrap();
     assert_eq!(count.lines, MAX_PREVIEW_LINES);
 }

@@ -161,13 +161,13 @@ pub fn open<T: TreeIndex>(model: &mut Model<T>) {
 fn subtree_of<T: TreeIndex>(model: &Model<T>) -> Subtree {
     let whole = Subtree {
         rows: Vec::new(),
-        root: model.state.root,
+        root: model.state.root(),
         label: String::new(),
     };
     if !model.tree.streamed() {
         return whole;
     }
-    container_at(&model.view(), &model.state.root, &model.state.cursor).unwrap_or(whole)
+    container_at(&model.view(), &model.state.root(), model.state.cursor()).unwrap_or(whole)
 }
 
 /// The innermost container on the path to `cursor`, below the document root.
@@ -208,7 +208,7 @@ pub fn key<T: TreeIndex>(model: &mut Model<T>, key: KeyEvent) {
             let scope = scope.unwrap_or_else(|| subtree_of(model));
             let target = Target { scope, segs };
             model.last_find = LastFind::Schema(target.clone());
-            let from = offset_of(model, &model.state.cursor).and_then(|o| o.checked_sub(1));
+            let from = offset_of(model, model.state.cursor()).and_then(|o| o.checked_sub(1));
             step(model, &target, Direction::Forward, from);
         }
         Some(PickerAction::Edited | PickerAction::Moved) | None => {}
@@ -351,7 +351,7 @@ mod flow_tests {
         render(
             &segments(
                 tree,
-                &chain(tree, &model.state.root, &model.state.cursor).unwrap(),
+                &chain(tree, &model.state.root(), model.state.cursor()).unwrap(),
             )
             .unwrap(),
         )
@@ -393,7 +393,7 @@ mod flow_tests {
         open(&mut model);
         assert!(!screen(&model).contains("partial"));
         let entries = std::sync::Arc::new(vec![(".a".to_owned(), Vec::new())]);
-        let root = model.state.root;
+        let root = model.state.root();
         let truncated = super::Catalog {
             entries,
             truncated: true,
@@ -419,7 +419,7 @@ mod flow_tests {
             entries,
             truncated: false,
             done: false,
-            root: model.state.root,
+            root: model.state.root(),
         };
         super::receive(&mut model, partial.clone());
         let shown = screen(&model);
@@ -443,7 +443,7 @@ mod flow_tests {
         let tree = Streamed(MemTree::parse(MemSource::new(DOC.to_vec())).unwrap());
         let mut model = Model::new(tree).unwrap();
         update(&mut model, Msg::Resize(40, 12));
-        model.state.cursor = vec![1];
+        model.state.set_cursor(vec![1]);
         update(
             &mut model,
             Msg::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
@@ -478,7 +478,7 @@ mod flow_tests {
         let paths: Vec<(String, Vec<crate::path::Segment>)> = (0..40)
             .map(|i| (format!(".field{i:02}"), Vec::new()))
             .collect();
-        let root = model.state.root;
+        let root = model.state.root();
         super::receive(
             &mut model,
             super::Catalog {
@@ -502,7 +502,7 @@ mod flow_tests {
         open(&mut model);
         assert!(model.schema.is_some());
         update(&mut model, Msg::Key(KeyCode::Esc.into()));
-        model.state.cursor = vec![1];
+        model.state.set_cursor(vec![1]);
         keys(&mut model, "f.name != null");
         update(&mut model, Msg::Key(KeyCode::Enter.into()));
         assert!(model.filter.is_some(), "{:?}", model.prompt);
@@ -526,7 +526,7 @@ mod flow_tests {
         let target = super::Target {
             scope: super::Subtree {
                 rows: Vec::new(),
-                root: model.state.root,
+                root: model.state.root(),
                 label: String::new(),
             },
             segs: vec![
@@ -536,11 +536,11 @@ mod flow_tests {
             ],
         };
         model.last_find = crate::app::LastFind::Schema(target);
-        let before = model.state.cursor.clone();
+        let before = model.state.cursor().to_vec();
         keys(&mut model, "n");
         let job = rx.try_recv().unwrap();
         assert!(matches!(job.work, Work::SchemaStep(..)));
-        assert_eq!(model.state.cursor, before);
+        assert_eq!(model.state.cursor(), before);
     }
 
     #[test]
