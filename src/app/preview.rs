@@ -41,6 +41,10 @@ pub enum PreviewCmd {
     SplitRight,
     ScrollDown,
     ScrollUp,
+    /// Scrolls down half the pane.
+    ChunkDown,
+    /// Scrolls up half the pane.
+    ChunkUp,
     /// Word wrap on or off.
     Wrap,
 }
@@ -101,12 +105,21 @@ fn preview_cmd(preview: &mut PreviewState, cmd: PreviewCmd, lines: u64) {
         PreviewCmd::ScrollDown => preview.scroll = (preview.scroll + lines).min(MAX_PREVIEW_LINES),
         PreviewCmd::ScrollUp => preview.scroll = preview.scroll.saturating_sub(lines),
         PreviewCmd::Wrap => (preview.wrap, preview.row) = (!preview.wrap, 0),
+        // `preview` turns chunks into line scrolls before they get here.
+        PreviewCmd::ChunkDown | PreviewCmd::ChunkUp => {}
     }
 }
 
 /// A preview command; with wrap on, scrolling moves by screen rows.
 pub(crate) fn preview<T: TreeIndex>(model: &mut Model<T>, cmd: PreviewCmd, steps: u64) {
     match cmd {
+        PreviewCmd::ChunkDown | PreviewCmd::ChunkUp => {
+            let scroll = match cmd {
+                PreviewCmd::ChunkDown => PreviewCmd::ScrollDown,
+                _ => PreviewCmd::ScrollUp,
+            };
+            preview(model, scroll, steps.saturating_mul(chunk(model)));
+        }
         PreviewCmd::ScrollDown | PreviewCmd::ScrollUp if model.preview.wrap => {
             for _ in 0..steps {
                 if !scroll_row(model, cmd == PreviewCmd::ScrollDown) {
@@ -134,12 +147,22 @@ fn max_scroll<T: TreeIndex>(model: &mut Model<T>) -> u64 {
             .flatten()
             .and_then(|item| preview_line_count_with(tree, &item, &model.preview.seeks).ok());
     }
-    let page = model.height.saturating_sub(3).max(1);
+    let page = page(model);
     match model.preview.count {
         Some(count) if count.growing => count.lines.saturating_sub(1),
         Some(count) => count.lines.saturating_sub(page),
         None => MAX_PREVIEW_LINES,
     }
+}
+
+/// Lines the preview pane shows: its height less two borders and the `…` row.
+fn page<T>(model: &Model<T>) -> u64 {
+    model.height.saturating_sub(3).max(1)
+}
+
+/// Lines one `{` or `}` scrolls: half the page.
+fn chunk<T>(model: &Model<T>) -> u64 {
+    (page(model) / 2).max(1)
 }
 
 /// Moves the wrapped preview one row, re-wrapping at most one neighboring line; false when it
@@ -248,3 +271,6 @@ pub(crate) fn on_mouse<T: TreeIndex>(model: &mut Model<T>, mouse: MouseEvent, ti
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests;

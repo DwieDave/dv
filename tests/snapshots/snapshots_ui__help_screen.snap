@@ -34,10 +34,10 @@ expression: "render(&app, 70, 40)"
  │ ▸ [│   p          show or hide the preview                  │     │
  │ ▸ [│   < >        move the split                            │     │
       │   J K        scroll the preview                        │     │
+      │   { }        scroll the preview by half a pane         │     │
       │   w          wrap long lines in the preview            │     │
       │   yp         copy the path                             │     │
       │   yy yY      copy the value, minified / pretty         │     │
-      │   F          follow the file as it grows (NDJSON)      │     │
       └────────────────────────────────────────────────────────┘─────┘
 ──────────────────────────────────────────────────────────────────────
 .  array                                      JSON  1.1 kB  121 values
