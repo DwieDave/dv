@@ -121,12 +121,7 @@ fn cargo_deny_checks_every_release_target() -> Check {
         .as_array()
         .map(|list| list.iter().filter_map(|t| t.as_str()).collect())
         .unwrap_or_default();
-    for target in [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-musl",
-    ] {
+    for target in RELEASE_TARGETS {
         assert!(targets.contains(&target), "deny.toml targets lack {target}");
     }
     Ok(())
@@ -184,6 +179,33 @@ fn dependabot_keeps_actions_current() -> Check {
         assert!(
             config.contains(needle),
             "dependabot.yml is missing {needle:?}"
+        );
+    }
+    Ok(())
+}
+
+const RELEASE_TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+];
+
+#[test]
+fn release_builds_every_target_after_the_gates() -> Check {
+    let release = read(".github/workflows/release.yml")?;
+    let needles = [
+        "- 'v[0-9]+.[0-9]+.[0-9]+'",
+        "workflow_dispatch:",
+        "uses: ./.github/workflows/ci.yml",
+        "cargo build --release --locked --target",
+        "--version",
+        "lipo -archs",
+    ];
+    for needle in needles.into_iter().chain(RELEASE_TARGETS) {
+        assert!(
+            release.contains(needle),
+            "release.yml is missing {needle:?}"
         );
     }
     Ok(())

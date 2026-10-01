@@ -1,0 +1,69 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  # Dry run: builds and packages every target, publishes nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  gates:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [verify, gates]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15, smoke: run }
+          - { target: x86_64-apple-darwin, os: macos-15, smoke: arch }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, smoke: run }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, smoke: run }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      BIN: target/${{ matrix.target }}/release/dv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Smoke test (run)
+        if: matrix.smoke == 'run'
+        run: |
+          "$BIN" --version | tee /dev/stderr | grep -qF "dv $VERSION"
+      - name: Smoke test (architecture only, cross-compiled)
+        if: matrix.smoke == 'arch'
+        run: |
+          lipo -archs "$BIN" | tee /dev/stderr | grep -qx x86_64
