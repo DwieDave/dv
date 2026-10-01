@@ -96,7 +96,11 @@ const FINDING: &[Row] = &[
 const PREVIEW: &[Row] = &[
     row("p", "show or hide the preview", &["p"]),
     row("< >", "move the split", &["<", ">"]),
-    row("J K", "scroll the preview", &["J", "K"]),
+    row(
+        "J K  ^e ^y",
+        "scroll the preview",
+        &["J", "K", "C-e", "C-y"],
+    ),
     row("{ }", "scroll the preview by half a pane", &["{", "}"]),
     row("w", "wrap long lines in the preview", &["w"]),
     row("yp", "copy the path", &["yp"]),

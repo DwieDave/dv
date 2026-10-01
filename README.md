@@ -171,7 +171,7 @@ stops with a note.
 |---|---|
 | `p` | Show or hide the preview pane |
 | `<` / `>` | Move the split |
-| `J` / `K` | Scroll the preview (by screen rows when wrapped) |
+| `J` / `K`, `Ctrl-e` / `Ctrl-y` | Scroll the preview (by screen rows when wrapped) |
 | `}` / `{` | Scroll the preview down / up by half a pane |
 | `w` | Wrap long lines in the preview; continuation rows align with the value |
 | `yp` | Copy the jq path of the cursor |

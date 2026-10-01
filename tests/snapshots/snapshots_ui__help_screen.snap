@@ -33,7 +33,7 @@ expression: "render(&app, 70, 40)"
  │ ▸ [│ Preview & copy                                         │     │
  │ ▸ [│   p          show or hide the preview                  │     │
  │ ▸ [│   < >        move the split                            │     │
-      │   J K        scroll the preview                        │     │
+      │   J K  ^e ^y scroll the preview                        │     │
       │   { }        scroll the preview by half a pane         │     │
       │   w          wrap long lines in the preview            │     │
       │   yp         copy the path                             │     │

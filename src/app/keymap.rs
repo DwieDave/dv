@@ -57,8 +57,12 @@ fn single(code: KeyCode, ctrl: bool) -> Option<Msg> {
         (KeyCode::Char('p'), false) => return Some(Msg::Preview(PreviewCmd::Toggle)),
         (KeyCode::Char('<'), false) => return Some(Msg::Preview(PreviewCmd::SplitLeft)),
         (KeyCode::Char('>'), false) => return Some(Msg::Preview(PreviewCmd::SplitRight)),
-        (KeyCode::Char('J'), false) => return Some(Msg::Preview(PreviewCmd::ScrollDown)),
-        (KeyCode::Char('K'), false) => return Some(Msg::Preview(PreviewCmd::ScrollUp)),
+        (KeyCode::Char('J'), false) | (KeyCode::Char('e'), true) => {
+            return Some(Msg::Preview(PreviewCmd::ScrollDown));
+        }
+        (KeyCode::Char('K'), false) | (KeyCode::Char('y'), true) => {
+            return Some(Msg::Preview(PreviewCmd::ScrollUp));
+        }
         (KeyCode::Char('}'), false) => return Some(Msg::Preview(PreviewCmd::ChunkDown)),
         (KeyCode::Char('{'), false) => return Some(Msg::Preview(PreviewCmd::ChunkUp)),
         (KeyCode::Char('w'), false) => return Some(Msg::Preview(PreviewCmd::Wrap)),
@@ -155,6 +159,8 @@ mod tests {
             (keys(">"), Msg::Preview(PreviewCmd::SplitRight)),
             (keys("J"), Msg::Preview(PreviewCmd::ScrollDown)),
             (keys("K"), Msg::Preview(PreviewCmd::ScrollUp)),
+            (vec![ctrl('e')], Msg::Preview(PreviewCmd::ScrollDown)),
+            (vec![ctrl('y')], Msg::Preview(PreviewCmd::ScrollUp)),
             (keys("}"), Msg::Preview(PreviewCmd::ChunkDown)),
             (keys("{"), Msg::Preview(PreviewCmd::ChunkUp)),
             (keys("w"), Msg::Preview(PreviewCmd::Wrap)),
