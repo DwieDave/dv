@@ -106,3 +106,23 @@ fn release_profile_optimizes_for_distribution() -> Check {
     }
     Ok(())
 }
+
+#[test]
+fn cargo_deny_checks_every_release_target() -> Check {
+    let deny: Table = read("deny.toml")?
+        .parse()
+        .map_err(|e| format!("parse deny.toml: {e}"))?;
+    let targets: Vec<&str> = deny["graph"]["targets"]
+        .as_array()
+        .map(|list| list.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ] {
+        assert!(targets.contains(&target), "deny.toml targets lack {target}");
+    }
+    Ok(())
+}
