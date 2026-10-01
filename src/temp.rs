@@ -1,17 +1,21 @@
 //! Private temporary files that leave nothing behind.
 
-use std::fs::File;
+use std::fs::{File, Permissions};
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-/// A file in `$TMPDIR`, created with mode 0600 and unlinked at once: no exit path (normal,
-/// Ctrl-C, panic or SIGKILL) can leave it behind, so no guard or signal hook is needed.
+/// A file in `$TMPDIR` with mode 0600, unlinked at once: no exit path (normal, Ctrl-C, panic
+/// or SIGKILL) can leave it behind, so no guard or signal hook is needed.
 ///
 /// # Errors
 /// When the file cannot be created.
 #[allow(clippy::disallowed_methods)] // the one place allowed to create anonymous temp files
 pub fn file() -> io::Result<File> {
-    tempfile::tempfile()
+    let file = tempfile::tempfile()?;
+    // On Linux `tempfile` uses O_TMPFILE, whose mode is 0666 minus the umask, not 0600.
+    file.set_permissions(Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 /// Replaces `dest` with `bytes` atomically: a uniquely named file beside it is written,
@@ -31,7 +35,7 @@ pub fn replace(dest: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::MetadataExt;
 
     use super::*;
 
