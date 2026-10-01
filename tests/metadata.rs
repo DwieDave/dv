@@ -131,3 +131,60 @@ fn cargo_deny_checks_every_release_target() -> Check {
     }
     Ok(())
 }
+
+fn workflow_files() -> Result<Vec<String>, String> {
+    let dir = format!("{}/.github/workflows", env!("CARGO_MANIFEST_DIR"));
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read {dir}: {e}"))?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "yml"))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .map(|name| format!(".github/workflows/{name}"))
+        .collect())
+}
+
+/// A `uses:` reference is pinned when it's local or names a full 40-hex commit.
+fn is_pinned(reference: &str) -> bool {
+    reference.starts_with("./")
+        || reference
+            .rsplit_once('@')
+            .is_some_and(|(_, rev)| rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+#[test]
+fn every_action_is_pinned_to_a_commit() -> Check {
+    for file in workflow_files()? {
+        let unpinned: Vec<String> = read(&file)?
+            .lines()
+            .filter_map(|line| line.trim().trim_start_matches("- ").strip_prefix("uses: "))
+            .map(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .filter(|reference| !is_pinned(reference))
+            .collect();
+        assert!(
+            unpinned.is_empty(),
+            "{file} has unpinned actions: {unpinned:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dependabot_keeps_actions_current() -> Check {
+    let config = read(".github/dependabot.yml")?;
+    for needle in ["package-ecosystem: github-actions", "interval: weekly"] {
+        assert!(
+            config.contains(needle),
+            "dependabot.yml is missing {needle:?}"
+        );
+    }
+    Ok(())
+}
