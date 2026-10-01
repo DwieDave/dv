@@ -62,3 +62,28 @@ fn ci_runs_every_gate_on_arm_macos() -> Check {
     }
     Ok(())
 }
+
+#[test]
+fn is_dual_licensed_with_both_license_files() -> Check {
+    let manifest = manifest()?;
+    let license = manifest["package"]
+        .get("license")
+        .and_then(|l| l.as_str())
+        .unwrap_or_default();
+    assert_eq!(license, "MIT OR Apache-2.0");
+    for file in ["LICENSE-MIT", "LICENSE-APACHE"] {
+        assert!(!read(file)?.trim().is_empty(), "{file} is empty");
+    }
+    Ok(())
+}
+
+#[test]
+fn points_at_the_public_repository() -> Check {
+    let manifest = manifest()?;
+    let repository = manifest["package"]
+        .get("repository")
+        .and_then(|r| r.as_str())
+        .unwrap_or_default();
+    assert_eq!(repository, "https://github.com/DwieDave/dv");
+    Ok(())
+}
