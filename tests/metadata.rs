@@ -28,8 +28,8 @@ fn declares_a_minimum_rust_version() -> Check {
         .and_then(|minor| minor.parse().ok())
         .unwrap_or(0);
     assert!(
-        minor >= 85,
-        "rust-version must be set and at least 1.85, got {declared:?}"
+        minor >= 98,
+        "rust-version must be set and at least 1.98, got {declared:?}"
     );
     Ok(())
 }
