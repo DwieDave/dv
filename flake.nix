@@ -53,6 +53,9 @@
             jq
             yq-go
 
+            # CI workflows
+            actionlint
+
             just
             nixfmt
           ];

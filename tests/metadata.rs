@@ -48,10 +48,15 @@ fn yaml_parsers_are_pinned_exactly() -> Check {
 }
 
 #[test]
-fn ci_runs_every_gate_on_arm_macos() -> Check {
+fn ci_runs_every_gate_on_macos_and_linux() -> Check {
     let ci = read(".github/workflows/ci.yml")?;
     for needle in [
-        "macos-latest",
+        "workflow_call:",
+        "contents: read",
+        "timeout-minutes:",
+        "macos-15",
+        "ubuntu-24.04",
+        "ubuntu-24.04-arm",
         "cargo fmt --all --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
         "cargo nextest run",
