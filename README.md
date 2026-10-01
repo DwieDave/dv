@@ -21,12 +21,22 @@ and tuned on Apple silicon.
 
 ## Install
 
-With Homebrew (macOS or Linux). Homebrew 6 and later load third-party taps only after you
-trust them:
+With Homebrew (macOS or Linux), add the tap, trust it, then install. Homebrew 6 and later
+load third-party taps only after you trust them:
 
 ```sh
+brew tap DwieDave/tap
 brew trust --tap DwieDave/tap
 brew install DwieDave/tap/dv
+```
+
+### Brewfile
+
+For `brew bundle`, `trusted: true` on the tap does the `brew trust` step:
+
+```ruby
+tap "DwieDave/tap", trusted: true
+brew "DwieDave/tap/dv"
 ```
 
 Or download an archive for your platform from the
