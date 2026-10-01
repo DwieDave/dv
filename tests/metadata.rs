@@ -255,12 +255,11 @@ fn release_checks_the_formula_and_pushes_it_to_the_tap() -> Check {
 }
 
 #[test]
-fn readme_explains_installing_and_releasing() -> Check {
+fn readme_explains_installing() -> Check {
     let readme = read("README.md")?;
     for needle in [
         "brew trust --tap DwieDave/tap",
         "brew install DwieDave/tap/dv",
-        "git tag v",
     ] {
         assert!(readme.contains(needle), "README.md is missing {needle:?}");
     }

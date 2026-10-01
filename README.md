@@ -227,22 +227,6 @@ just suite DIR FILE # interactive streaming suite through tmux (needs a large FI
 nix develop .#fuzz  # then: just fuzz json|ndjson|yaml [secs]
 ```
 
-### Releasing
-
-Set `version` in `Cargo.toml`, commit, then tag and push:
-
-```sh
-git tag v0.2.0 && git push origin v0.2.0
-```
-
-The `release` workflow checks that the tag matches `Cargo.toml` and runs every CI gate. It then
-builds `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and
-`aarch64-unknown-linux-musl`, publishes the GitHub Release with checksums and attestations,
-and commits the new formula to [DwieDave/homebrew-tap](https://github.com/DwieDave/homebrew-tap).
-The tap push needs the `HOMEBREW_TAP_TOKEN` secret: a fine-grained token with Contents
-read/write on the tap repository only. Running the workflow by hand (`workflow_dispatch`) is a
-dry run that builds, packages and lints the formula without publishing.
-
 ### How it works
 
 The index is a *semi-index*, after Ottaviano & Grossi. Only containers of 64 bytes or more get
