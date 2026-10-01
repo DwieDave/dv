@@ -73,3 +73,33 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
+
+  release:
+    needs: [verify, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Combine checksums
+        working-directory: dist
+        run: |
+          cat ./*.sha256 > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "dv $GITHUB_REF_NAME"

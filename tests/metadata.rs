@@ -212,3 +212,25 @@ fn release_builds_every_target_after_the_gates() -> Check {
     }
     Ok(())
 }
+
+#[test]
+fn release_publishes_attested_archives_only_for_tags() -> Check {
+    let release = read(".github/workflows/release.yml")?;
+    for needle in [
+        "if: github.event_name == 'push'",
+        "contents: write",
+        "id-token: write",
+        "attestations: write",
+        "actions/download-artifact@",
+        "actions/attest-build-provenance@",
+        "SHA256SUMS",
+        "gh release create",
+        "--verify-tag",
+    ] {
+        assert!(
+            release.contains(needle),
+            "release.yml is missing {needle:?}"
+        );
+    }
+    Ok(())
+}
