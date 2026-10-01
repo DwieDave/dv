@@ -1,7 +1,8 @@
 # dv
 
 A fast terminal viewer for large JSON, NDJSON and YAML files, built in Rust with Ratatui.
-It targets macOS on Apple silicon.
+It runs on macOS (Apple silicon and Intel) and Linux (x86_64 and aarch64), and is developed
+and tuned on Apple silicon.
 
 - **Opens big files at once.** 15 MB loads in about 20–40 ms. Files over the auto threshold
   stream instead. dv indexes them from disk in the background, you can browse after ~50 ms,
@@ -17,6 +18,21 @@ It targets macOS on Apple silicon.
 - **Strict parsing.** The parser validates everything. A malformed NDJSON line shows inline
   without breaking the lines around it, and errors point at the line and column. No `unsafe`
   code.
+
+## Install
+
+With Homebrew (macOS or Linux). Homebrew 6 and later load third-party taps only after you
+trust them:
+
+```sh
+brew trust --tap DwieDave/tap
+brew install DwieDave/tap/dv
+```
+
+Or download an archive for your platform from the
+[releases](https://github.com/DwieDave/dv/releases) page. Each archive has a `.sha256`
+beside it and a build provenance attestation:
+`gh attestation verify dv-<version>-<target>.tar.gz -R DwieDave/dv`.
 
 ## Build
 
@@ -210,6 +226,22 @@ just fuzz-long      # a million property cases per parser
 just suite DIR FILE # interactive streaming suite through tmux (needs a large FILE)
 nix develop .#fuzz  # then: just fuzz json|ndjson|yaml [secs]
 ```
+
+### Releasing
+
+Set `version` in `Cargo.toml`, commit, then tag and push:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The `release` workflow checks that the tag matches `Cargo.toml` and runs every CI gate. It then
+builds `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl`, publishes the GitHub Release with checksums and attestations,
+and commits the new formula to [DwieDave/homebrew-tap](https://github.com/DwieDave/homebrew-tap).
+The tap push needs the `HOMEBREW_TAP_TOKEN` secret: a fine-grained token with Contents
+read/write on the tap repository only. Running the workflow by hand (`workflow_dispatch`) is a
+dry run that builds, packages and lints the formula without publishing.
 
 ### How it works
 
