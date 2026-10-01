@@ -201,6 +201,8 @@ fn release_builds_every_target_after_the_gates() -> Check {
         "cargo build --release --locked --target",
         "--version",
         "lipo -archs",
+        ".github/scripts/package.sh",
+        "actions/upload-artifact@",
     ];
     for needle in needles.into_iter().chain(RELEASE_TARGETS) {
         assert!(
