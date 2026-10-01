@@ -54,9 +54,9 @@ fn ci_runs_every_gate_on_macos_and_linux() -> Check {
         "workflow_call:",
         "contents: read",
         "timeout-minutes:",
-        "macos-15",
-        "ubuntu-24.04",
-        "ubuntu-24.04-arm",
+        "macos-26",
+        "ubuntu-26.04",
+        "ubuntu-26.04-arm",
         "cargo fmt --all --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
         "cargo nextest run",
@@ -262,6 +262,22 @@ fn readme_explains_installing() -> Check {
         "brew install DwieDave/tap/dv",
     ] {
         assert!(readme.contains(needle), "README.md is missing {needle:?}");
+    }
+    Ok(())
+}
+
+/// Runner images we've moved past, plus floating labels that change under us.
+const STALE_RUNNERS: [&str; 4] = ["macos-15", "ubuntu-24.04", "macos-latest", "ubuntu-latest"];
+
+#[test]
+fn workflows_use_current_pinned_runner_images() -> Check {
+    for file in workflow_files()? {
+        let text = read(&file)?;
+        let stale: Vec<&str> = STALE_RUNNERS
+            .into_iter()
+            .filter(|label| text.contains(label))
+            .collect();
+        assert!(stale.is_empty(), "{file} uses stale runners: {stale:?}");
     }
     Ok(())
 }

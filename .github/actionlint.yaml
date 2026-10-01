@@ -1,0 +1,6 @@
+# GitHub-hosted labels newer than actionlint's built-in list (Ubuntu 26.04 went GA on
+# 2026-09-17). Delete an entry once `actionlint` accepts the label on its own.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

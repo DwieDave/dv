@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [macos-26, ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -34,5 +34,5 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo nextest run
       # Covers every release target (deny.toml [graph] targets), so one leg is enough.
-      - if: matrix.os == 'macos-15'
+      - if: matrix.os == 'macos-26'
         run: cargo deny check
