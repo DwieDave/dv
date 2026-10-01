@@ -103,3 +103,64 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "dv $GITHUB_REF_NAME"
+
+  formula:
+    needs: [verify, build]
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_ANALYTICS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - run: .github/scripts/render-formula.sh "$VERSION" dist > dv.rb
+      - name: Lint the formula in a scratch tap
+        run: |
+          brew tap-new --no-git dwiedave/release-check
+          cp dv.rb "$(brew --repository)/Library/Taps/dwiedave/homebrew-release-check/Formula/dv.rb"
+          brew style dwiedave/release-check/dv
+          brew audit --strict --formula dwiedave/release-check/dv
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: formula
+          path: dv.rb
+          if-no-files-found: error
+
+  tap:
+    needs: [verify, release, formula]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DwieDave/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: formula
+          path: tap/Formula
+      - name: Commit and push the formula
+        working-directory: tap
+        run: |
+          git add Formula/dv.rb
+          if git diff --cached --quiet; then
+            echo "Formula/dv.rb already at $VERSION"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "dv $VERSION"
+          git push

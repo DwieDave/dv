@@ -234,3 +234,22 @@ fn release_publishes_attested_archives_only_for_tags() -> Check {
     }
     Ok(())
 }
+
+#[test]
+fn release_checks_the_formula_and_pushes_it_to_the_tap() -> Check {
+    let release = read(".github/workflows/release.yml")?;
+    for needle in [
+        ".github/scripts/render-formula.sh",
+        "brew style",
+        "brew audit --strict",
+        "repository: DwieDave/homebrew-tap",
+        "secrets.HOMEBREW_TAP_TOKEN",
+        "git push",
+    ] {
+        assert!(
+            release.contains(needle),
+            "release.yml is missing {needle:?}"
+        );
+    }
+    Ok(())
+}
