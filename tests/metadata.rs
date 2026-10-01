@@ -87,3 +87,22 @@ fn points_at_the_public_repository() -> Check {
     assert_eq!(repository, "https://github.com/DwieDave/dv");
     Ok(())
 }
+
+#[test]
+fn release_profile_optimizes_for_distribution() -> Check {
+    let manifest = manifest()?;
+    let release = manifest
+        .get("profile")
+        .and_then(|p| p.get("release"))
+        .and_then(|r| r.as_table())
+        .ok_or("Cargo.toml has no [profile.release]")?;
+    let expected = [
+        ("lto", toml::Value::from("fat")),
+        ("codegen-units", toml::Value::from(1)),
+        ("strip", toml::Value::from(true)),
+    ];
+    for (key, value) in expected {
+        assert_eq!(release.get(key), Some(&value), "[profile.release] {key}");
+    }
+    Ok(())
+}
