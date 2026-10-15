@@ -68,7 +68,7 @@ jobs:
         run: |
           lipo -archs "$BIN" | tee /dev/stderr | grep -qx x86_64
       - run: .github/scripts/package.sh "$TARGET" "$VERSION" "$BIN" dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/
@@ -128,7 +128,7 @@ jobs:
           cp dv.rb "$(brew --repository)/Library/Taps/dwiedave/homebrew-release-check/Formula/dv.rb"
           brew style dwiedave/release-check/dv
           brew audit --strict --formula dwiedave/release-check/dv
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: formula
           path: dv.rb
